@@ -58,7 +58,7 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help all check tools dolrecomp moderngekko submodules patches config wit extract \
-        recompile run llvm llvm-run clean clean-extracted clean-tools
+        recompile run llvm llvm-run symbols clean clean-extracted clean-tools
 
 help:
 	@echo "DualizeRecomp - NiGHTS: Journey of Dreams static recompilation"
@@ -74,6 +74,7 @@ help:
 	@echo "  make run ISO=path/to.iso         Recompile (if needed) and launch the game"
 	@echo "  make llvm ISO=path/to.iso        Build an optimized LLVM object module"
 	@echo "  make llvm-run ISO=path/to.iso    Build LLVM objects and launch the game"
+	@echo "  make symbols GAME=<slug>         Identify SDK functions, write build/symbols/<slug>.map"
 	@echo "  make clean                       Remove all build output"
 	@echo ""
 	@echo "  make run ISO=iso/Your\\ Game.iso   # first time for a new game"
@@ -206,6 +207,17 @@ recompile: moderngekko $(EXTRACTED_DIR)/sys/main.dol
 
 run: moderngekko config $(EXTRACTED_DIR)/sys/main.dol
 	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR) -- $(RUN_ARGS)
+
+# SDK function names found by matching Dolphin's signature database. The map
+# is derived from the user's own DOL, so it is generated, never committed.
+SYMBOL_DB  := $(MODERNGEKKO_DIR)/vendor/dolphin/Data/Sys/totaldb.dsy
+SYMBOL_MAP := build/symbols/$(GAME_SLUG).map
+
+$(SYMBOL_MAP): $(EXTRACTED_DIR)/sys/main.dol scripts/find_sdk_symbols.py | submodules
+	@mkdir -p $(dir $@)
+	python scripts/find_sdk_symbols.py $< $(SYMBOL_DB) --map $@ -o $(basename $@).txt
+
+symbols: $(SYMBOL_MAP)
 
 llvm: BACKEND=llvm
 llvm: recompile
