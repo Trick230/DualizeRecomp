@@ -32,7 +32,11 @@ LLVM_CMAKE_ARG = $(if $(and $(filter llvm,$(BACKEND)),$(LLVM_DIR)),-DLLVM_DIR="$
 # Toolchain used to compile the per-game module: auto, clang, gcc, or msvc.
 # Auto follows the compiler used to build moderngekko-port. This keeps the
 # generated module compatible with MSVC, MinGW GCC, and MinGW Clang builds.
-TOOLCHAIN ?= auto
+# Clang is preferred when installed: moderngekko-port builds it with ThinLTO.
+TOOLCHAIN ?= $(if $(shell command -v clang 2>/dev/null),clang,auto)
+
+# Optimization level for the per-game module (0-3).
+OPT_LEVEL ?= 3
 
 # Extra arguments forwarded after `--` to `moderngekko-run` via `make run`,
 # e.g. RUN_ARGS="--headless" or RUN_ARGS="--graphics Vulkan".
@@ -42,8 +46,11 @@ WIT_STAMP := .git/.recomp-wit-stamp
 
 # ModernGekko's user directory (same lookup as moderngekko-run). Per-game
 # Dolphin settings from config/ are installed here before running.
-ifdef LOCALAPPDATA
-USER_DIR ?= $(subst \,/,$(LOCALAPPDATA))/moderngekko
+# On Windows that is %LOCALAPPDATA% (CSIDL 28); cygpath asks the OS directly
+# because MSYS make does not always inherit the variable.
+LOCAL_APPDATA := $(shell cygpath -m -F 28 2>/dev/null)
+ifneq ($(LOCAL_APPDATA),)
+USER_DIR ?= $(LOCAL_APPDATA)/moderngekko
 else
 USER_DIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)/moderngekko
 endif
@@ -116,19 +123,29 @@ dolrecomp: submodules
 
 # Local fixes on top of the pinned submodules. Each patch is applied once;
 # one that already applies in reverse is left alone.
+# patches/ModernGekko/ targets the submodule itself, patches/ModernGekko-dolphin/
+# its nested vendor/dolphin submodule (GXRuntime, the module CPU runtime).
+PATCH_TARGETS := ModernGekko:$(MODERNGEKKO_DIR) ModernGekko-dolphin:$(MODERNGEKKO_DIR)/vendor/dolphin
+
 patches: submodules
-	@for patch in patches/ModernGekko/*.patch; do \
-		[ -f "$$patch" ] || continue; \
-		if git -C $(MODERNGEKKO_DIR) apply --reverse --check "$(CURDIR)/$$patch" 2>/dev/null; then \
-			continue; \
-		fi; \
-		echo "Applying $$patch"; \
-		git -C $(MODERNGEKKO_DIR) apply "$(CURDIR)/$$patch" || exit 1; \
+	@for target in $(PATCH_TARGETS); do \
+		dir="$${target%%:*}"; repo="$${target#*:}"; \
+		for patch in patches/$$dir/*.patch; do \
+			[ -f "$$patch" ] || continue; \
+			if git -C "$$repo" apply --reverse --check "$(CURDIR)/$$patch" 2>/dev/null; then \
+				continue; \
+			fi; \
+			echo "Applying $$patch"; \
+			git -C "$$repo" apply "$(CURDIR)/$$patch" || exit 1; \
+		done; \
 	done
 
+# GameSettings are ours and always refreshed; the controller profile is only
+# installed when the user has none, so local remaps are kept.
 config:
-	@mkdir -p "$(USER_DIR)/GameSettings"
+	@mkdir -p "$(USER_DIR)/GameSettings" "$(USER_DIR)/Config"
 	@cp config/GameSettings/*.ini "$(USER_DIR)/GameSettings/"
+	@[ -f "$(USER_DIR)/Config/WiimoteNew.ini" ] || cp config/Config/WiimoteNew.ini "$(USER_DIR)/Config/"
 
 moderngekko: patches
 	cmake -S $(MODERNGEKKO_DIR) -B $(MODERNGEKKO_BUILD) -G Ninja -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
@@ -185,10 +202,10 @@ extract: $(EXTRACTED_DIR)/sys/main.dol
 # moderngekko-port caches compiled modules by DOL hash + toolchain, so
 # re-running these is cheap once a module has already been built.
 recompile: moderngekko $(EXTRACTED_DIR)/sys/main.dol
-	$(MODERNGEKKO_PORT_BIN) build $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --output $(MODULES_DIR)
+	$(MODERNGEKKO_PORT_BIN) build $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR)
 
 run: moderngekko config $(EXTRACTED_DIR)/sys/main.dol
-	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --output $(MODULES_DIR) -- $(RUN_ARGS)
+	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR) -- $(RUN_ARGS)
 
 llvm: BACKEND=llvm
 llvm: recompile

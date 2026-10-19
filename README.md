@@ -21,10 +21,11 @@ Work in progress.
 |---|---|
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
 | Boot | Boots to the Sonic Team logo and the intro cutscene; all guest code runs natively (no interpreter/JIT fallback) |
-| Speed | Logos run at full speed (30 FPS); the intro cutscene currently runs at ~10 FPS (CPU bound) |
-| Tested platform | Windows x86_64, MSYS2 GCC 16.2, C backend, Vulkan, i5-9600KF + RTX 4060 |
+| Startup | ~6 s to the first frame (asset hash is cached after the first boot) |
+| Speed | Logos run at full speed (30 FPS, the game's native rate); the intro FMV runs at ~19 FPS (CPU bound in the video decoder) |
+| Tested platform | Windows x86_64, MSYS2 Clang 22 (C backend, `-O3`, ThinLTO), Vulkan, i5-9600KF + RTX 4060 |
 | Other platforms | Linux and macOS should work (both tools support them) but are untested |
-| Input | Not configured yet (see [Controls](#controls)) |
+| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)); gameplay not tested yet |
 
 Other regions (PAL `R7EP8P`, JP `R7EJ8P`) have not been tested.
 
@@ -43,7 +44,8 @@ After extracting (see below), you can check it with
 
 - CMake, Ninja, pkg-config, Git and Python
 - A C11/C++23 toolchain:
-  - **Windows:** MSYS2 (MinGW GCC or Clang, tested) or Visual Studio 2022 with
+  - **Windows:** MSYS2 UCRT64 (tested; install `mingw-w64-ucrt-x86_64-clang`
+    and `mingw-w64-ucrt-x86_64-lld` for the fastest build) or Visual Studio 2022 with
     the "Desktop development with C++" workload
   - **Linux:** GCC or Clang, plus the Dolphin NoGUI dev packages:
     ```
@@ -112,7 +114,9 @@ so later runs skip recompilation unless something changed.
 | `GAME` | *(none)* | Extracted game slug (`nights`). |
 | `BACKEND` | `c` | `c` (portable) or `llvm` (optimized native objects). |
 | `LLVM_DIR` | *(CMake discovery)* | Path to LLVM 19/20's CMake package, if not found automatically. |
-| `TOOLCHAIN` | `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. `auto` follows the compiler used to build ModernGekko. |
+| `TOOLCHAIN` | `clang` if installed, else `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. Clang builds use ThinLTO and are the fastest. `auto` follows the compiler used to build ModernGekko. |
+| `OPT_LEVEL` | `3` | Module optimization level (0-3). |
+| `USER_DIR` | ModernGekko's user directory | Where `make run` installs `config/`. |
 | `CMAKE_BUILD_TYPE` | `Release` | Build type for both tools. |
 | `JOBS` | CPU count | Parallel build jobs. |
 | `RUN_ARGS` | *(empty)* | Extra flags for the runner, e.g. `--headless` or `--graphics Vulkan`. |
@@ -125,21 +129,39 @@ CMAKE_BUILD_TYPE=Debug make run GAME=nights RUN_ARGS="--graphics Vulkan"
 
 ## Controls
 
-ModernGekko has no controller configuration UI. Bindings come from
-Dolphin-format `Config/WiimoteNew.ini` (Wii Remote + Nunchuk / Classic
-Controller) and `Config/GCPadNew.ini` (GameCube controller) in ModernGekko's
-user directory. Nothing creates these files for you, so input does nothing
-until you add one. A config exported from Dolphin works.
+NiGHTS supports the Classic Controller, so `make run` installs
+`config/Config/WiimoteNew.ini`: Wii Remote 1 with a Classic Controller attached,
+driven by the first XInput pad (any Xbox controller, or an 8BitDo pad in
+X-input mode). Buttons follow the physical Xbox layout:
+
+| Xbox | Classic Controller |
+|---|---|
+| A / B / X / Y | b / a / y / x |
+| Left / right stick | Left / right stick |
+| LT / RT | L / R |
+| LB / RB | ZL / ZR |
+| D-pad | D-pad |
+| Back / Start / Guide | − / + / Home |
+
+The profile is only installed when ModernGekko's user directory has no
+`Config/WiimoteNew.ini` yet, so your own remaps are kept. It is a regular
+Dolphin-format file, so one exported from Dolphin works too.
 
 ## Project-specific fixes
 
 Both are applied automatically by `make`.
 
-- **`patches/ModernGekko/`**: local fixes on top of the pinned ModernGekko
-  submodule, applied before it is built. `0001` makes the startup asset hash
-  compute each file's relative path once instead of inside the sort
-  comparator. Without it, startup on Windows hangs for well over 5 minutes on
-  NiGHTS' 12k files.
+- **`patches/ModernGekko/0001`**: the startup asset hash computes each file's
+  relative path once instead of inside the sort comparator (without it,
+  startup on Windows hangs for well over 5 minutes on NiGHTS' 12k files), and
+  caches the result next to `files/`, keyed by every file's path, size and
+  modification time. Unchanged game files are not re-read on every boot.
+- **`patches/ModernGekko-dolphin/0001`**: faster paired-single paths in
+  GXRuntime, the CPU runtime compiled into the game module. Quantized `psq_st`
+  uses exact power-of-two multiplies instead of libm `ldexp` and is handled
+  inline, and `ps_add` gets an inline path for finite inputs. Results are
+  bit-identical to the interpreter-accurate versions; this took the intro FMV
+  from ~12 to ~19 FPS.
 - **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
   ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
   enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
