@@ -22,10 +22,10 @@ Work in progress.
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
 | Boot | Boots to the Sonic Team logo and the intro cutscene; all guest code runs natively (no interpreter/JIT fallback) |
 | Startup | ~6 s to the first frame (asset hash is cached after the first boot) |
-| Speed | Logos run at full speed (30 FPS, the game's native rate); the intro FMV runs at ~19 FPS (CPU bound in the video decoder) |
+| Speed | Gameplay holds full speed (30 FPS, the game's native rate) with brief dips while areas load; the intro FMV runs at ~19 FPS (CPU bound in the video decoder) |
 | Tested platform | Windows x86_64, MSYS2 Clang 22 (C backend, `-O3`, ThinLTO), Vulkan, i5-9600KF + RTX 4060 |
 | Other platforms | Linux and macOS should work (both tools support them) but are untested |
-| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)); gameplay not tested yet |
+| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)); tested with an 8BitDo Ultimate 2 |
 
 Other regions (PAL `R7EP8P`, JP `R7EJ8P`) have not been tested.
 
@@ -156,6 +156,9 @@ Both are applied automatically by `make`.
   startup on Windows hangs for well over 5 minutes on NiGHTS' 12k files), and
   caches the result next to `files/`, keyed by every file's path, size and
   modification time. Unchanged game files are not re-read on every boot.
+- **`patches/ModernGekko/0002`**: only wires the mod host-call hooks into the
+  recompiler core when mods are actually loaded. Otherwise every dispatched
+  block queried the mod manager (~6% of the CPU thread in gameplay).
 - **`patches/ModernGekko-dolphin/0001`**: faster paired-single paths in
   GXRuntime, the CPU runtime compiled into the game module. Quantized `psq_st`
   uses exact power-of-two multiplies instead of libm `ldexp` and is handled
@@ -165,7 +168,10 @@ Both are applied automatically by `make`.
 - **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
   ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
   enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
-  idle thread, which otherwise holds the game at ~10 FPS.
+  idle thread, which otherwise holds the game at ~10 FPS, and turns on dual
+  core (`CPUThread`), which this Dolphin fork leaves off on desktop. That
+  moves GPU emulation (FIFO, vertex loading, texture hashing) to its own
+  thread and took gameplay from ~24 to a steady 30 FPS.
 
 ## Project layout
 
