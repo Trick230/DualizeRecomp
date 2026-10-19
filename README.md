@@ -20,9 +20,11 @@ Work in progress.
 | | |
 |---|---|
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
-| Recompilation | `main.dol` recompiles and builds into a native module |
-| Tested platform | Windows x86_64, MSYS2 GCC 16.2, C backend |
+| Boot | Boots to the Sonic Team logo and the intro cutscene; all guest code runs natively (no interpreter/JIT fallback) |
+| Speed | Logos run at full speed (30 FPS); the intro cutscene currently runs at ~10 FPS (CPU bound) |
+| Tested platform | Windows x86_64, MSYS2 GCC 16.2, C backend, Vulkan, i5-9600KF + RTX 4060 |
 | Other platforms | Linux and macOS should work (both tools support them) but are untested |
+| Input | Not configured yet (see [Controls](#controls)) |
 
 Other regions (PAL `R7EP8P`, JP `R7EJ8P`) have not been tested.
 
@@ -129,11 +131,27 @@ Controller) and `Config/GCPadNew.ini` (GameCube controller) in ModernGekko's
 user directory. Nothing creates these files for you, so input does nothing
 until you add one. A config exported from Dolphin works.
 
+## Project-specific fixes
+
+Both are applied automatically by `make`.
+
+- **`patches/ModernGekko/`**: local fixes on top of the pinned ModernGekko
+  submodule, applied before it is built. `0001` makes the startup asset hash
+  compute each file's relative path once instead of inside the sort
+  comparator. Without it, startup on Windows hangs for well over 5 minutes on
+  NiGHTS' 12k files.
+- **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
+  ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
+  enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
+  idle thread, which otherwise holds the game at ~10 FPS.
+
 ## Project layout
 
 ```
 lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
 lib/ModernGekko/    submodule: runtime the recompiled module runs on
+patches/            local fixes applied to the submodules
+config/             per-game runtime settings
 scripts/            build environment checks
 Makefile            the whole pipeline
 iso/                your disc image (gitignored)
