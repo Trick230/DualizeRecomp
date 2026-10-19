@@ -40,10 +40,18 @@ RUN_ARGS ?=
 
 WIT_STAMP := .git/.recomp-wit-stamp
 
+# ModernGekko's user directory (same lookup as moderngekko-run). Per-game
+# Dolphin settings from config/ are installed here before running.
+ifdef LOCALAPPDATA
+USER_DIR ?= $(subst \,/,$(LOCALAPPDATA))/moderngekko
+else
+USER_DIR ?= $(or $(XDG_DATA_HOME),$(HOME)/.local/share)/moderngekko
+endif
+
 .DEFAULT_GOAL := help
 
-.PHONY: help all check tools dolrecomp moderngekko submodules wit extract recompile run \
-        llvm llvm-run clean clean-extracted clean-tools
+.PHONY: help all check tools dolrecomp moderngekko submodules patches config wit extract \
+        recompile run llvm llvm-run clean clean-extracted clean-tools
 
 help:
 	@echo "DualizeRecomp - NiGHTS: Journey of Dreams static recompilation"
@@ -106,7 +114,23 @@ dolrecomp: submodules
 		-DDOLRECOMP_ENABLE_LLVM=$(DOLRECOMP_ENABLE_LLVM) $(LLVM_CMAKE_ARG)
 	cmake --build $(DOLRECOMP_BUILD) --target dolrecomp -j$(JOBS)
 
-moderngekko: submodules
+# Local fixes on top of the pinned submodules. Each patch is applied once;
+# one that already applies in reverse is left alone.
+patches: submodules
+	@for patch in patches/ModernGekko/*.patch; do \
+		[ -f "$$patch" ] || continue; \
+		if git -C $(MODERNGEKKO_DIR) apply --reverse --check "$(CURDIR)/$$patch" 2>/dev/null; then \
+			continue; \
+		fi; \
+		echo "Applying $$patch"; \
+		git -C $(MODERNGEKKO_DIR) apply "$(CURDIR)/$$patch" || exit 1; \
+	done
+
+config:
+	@mkdir -p "$(USER_DIR)/GameSettings"
+	@cp config/GameSettings/*.ini "$(USER_DIR)/GameSettings/"
+
+moderngekko: patches
 	cmake -S $(MODERNGEKKO_DIR) -B $(MODERNGEKKO_BUILD) -G Ninja -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
 		-DBUILD_TESTING=$(BUILD_TESTING) \
 		-DDOLRECOMP_ENABLE_LLVM=$(DOLRECOMP_ENABLE_LLVM) $(LLVM_CMAKE_ARG)
@@ -163,7 +187,7 @@ extract: $(EXTRACTED_DIR)/sys/main.dol
 recompile: moderngekko $(EXTRACTED_DIR)/sys/main.dol
 	$(MODERNGEKKO_PORT_BIN) build $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --output $(MODULES_DIR)
 
-run: moderngekko $(EXTRACTED_DIR)/sys/main.dol
+run: moderngekko config $(EXTRACTED_DIR)/sys/main.dol
 	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --output $(MODULES_DIR) -- $(RUN_ARGS)
 
 llvm: BACKEND=llvm
