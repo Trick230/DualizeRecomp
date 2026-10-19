@@ -1,195 +1,162 @@
-# ModernGekko-Template
+# DualizeRecomp
 
-A template for building a static-recompilation pipeline for GameCube and Wii games, built on:
+A static recompilation of **NiGHTS: Journey of Dreams** (Wii) to native PC code.
 
-- [DolRecomp](https://github.com/ExpansionPak/DolRecomp) - static recompiler that turns a GameCube/Wii DOL into portable C or optimized native LLVM objects.
-- [ModernGekko](https://github.com/ExpansionPak/ModernGekko) - the runtime the recompiled C links against (built on a Dolphin-derived core for video/audio/HLE).
+The game's `main.dol` is translated from PowerPC to C by
+[DolRecomp](https://github.com/ExpansionPak/DolRecomp), compiled into a native
+module, and run on [ModernGekko](https://github.com/ExpansionPak/ModernGekko),
+a runtime built on a Dolphin-derived core for video, audio and HLE.
 
-Both are pulled in as git submodules under `lib/`. Everything is handled through the top-level `Makefile`. This repo has no game-specific code of its own, so it's a starting point for standing up a recompilation project for any GameCube or Wii title you own.
+> [!IMPORTANT]
+> This repository contains **no game code, assets, disc images or keys**, and
+> it does not download any. You must provide your own dump of a disc you legally
+> own. Recompiled output is derived from the original game, so it is never
+> committed either.
 
-## Using This Template
+## Status
 
-Click **Use this template** on GitHub (or fork/clone it directly) to create your own project repo. Nothing in the `Makefile` or submodule setup needs to change to point it at a different game, just pass a different `ISO=` the first time you run it. Rename the repo to whatever fits your project.
+Work in progress.
 
-## Dependencies
+| | |
+|---|---|
+| Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
+| Recompilation | `main.dol` recompiles and builds into a native module |
+| Tested platform | Windows x86_64, MSYS2 GCC 16.2, C backend |
+| Other platforms | Linux and macOS should work (both tools support them) but are untested |
 
-CMake, Ninja, and pkg-config, plus a C11/C++23 toolchain. DolRecomp and ModernGekko both build on macOS, Linux, and Windows; this repo's `Makefile` doesn't do anything platform-specific itself, it just drives the same CMake builds each submodule supports natively. `TOOLCHAIN` (see below) follows the compiler used to build ModernGekko.
+Other regions (PAL `R7EP8P`, JP `R7EJ8P`) have not been tested.
 
-### Linux
+### Verifying your dump
 
-Ubuntu/Debian, matching what `lib/ModernGekko/vendor/dolphin`'s own CI installs for its NoGUI build (`.github/workflows/build.yml`):
-
-```
-sudo apt-get install -y ninja-build build-essential pkg-config cmake \
-  libevdev-dev libudev-dev libgtk-3-dev libsystemd-dev \
-  libbluetooth-dev libasound2-dev libpulse-dev libgl1-mesa-dev \
-  libxrandr-dev libxi-dev
-```
-
-`build-essential` pulls in GCC, the default toolchain on Linux.
-
-### macOS
-
-Via Homebrew:
+The supported USA `main.dol` has this SHA-256:
 
 ```
-brew install cmake ninja pkg-config
+e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20
 ```
 
-Xcode's command line tools are also required (AppleClang 14.0.3+; verified on AppleClang 17).
+After extracting (see below), you can check it with
+`sha256sum extracted/nights/sys/main.dol`.
 
-### Windows
+## Requirements
 
-Visual Studio 2022 (or the standalone Build Tools) with the "Desktop development with C++" workload, for the MSVC toolchain, plus CMake and Ninja on `PATH` (installable via winget/Chocolatey or their own installers). No external package manager is needed beyond that. Dolphin's Windows dependency tree (FFmpeg, SDL, etc.) is vendored as prebuilt binaries/source under `lib/ModernGekko/vendor/dolphin/Externals/`, unlike Linux where system `-dev` packages are expected.
+- CMake, Ninja, pkg-config, Git and Python
+- A C11/C++23 toolchain:
+  - **Windows:** MSYS2 (MinGW GCC or Clang, tested) or Visual Studio 2022 with
+    the "Desktop development with C++" workload
+  - **Linux:** GCC or Clang, plus the Dolphin NoGUI dev packages:
+    ```
+    sudo apt-get install -y ninja-build build-essential pkg-config cmake \
+      libevdev-dev libudev-dev libgtk-3-dev libsystemd-dev \
+      libbluetooth-dev libasound2-dev libpulse-dev libgl1-mesa-dev \
+      libxrandr-dev libxi-dev
+    ```
+  - **macOS:** Xcode command line tools and `brew install cmake ninja pkg-config`
+- A 64-bit host
+- Your own NiGHTS: Journey of Dreams (USA) disc image
 
-## Getting the Source
+Run `make check` to verify your environment. If the submodules are missing,
+it offers to fetch them (`make check FETCH=1` does it without asking).
+
+## Getting the source
 
 ```
-git clone --recurse-submodules https://github.com/<your-org>/<your-repo>.git
-cd <your-repo>
+git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
+cd DualizeRecomp
 ```
-
-If you already cloned without `--recurse-submodules`, `make` will fetch them for you on first run. To do it manually instead:
-
-```
-git submodule update --init --recursive
-```
-
-Run the build check at any time with:
-
-```
-make check
-```
-
-It verifies CMake, Ninja, Git, Python, working C11/C++23 compilers, and a
-64-bit target with 8-byte pointers. If the source submodules are absent, it
-offers to fetch them. Use `make check FETCH=1` for a non-interactive fetch,
-or `make check BACKEND=llvm` to validate LLVM 19/20 as well.
 
 > [!NOTE]
-> `lib/ModernGekko` vendors a large chunk of Dolphin's dependency tree (SDL, fmt, imgui, Vulkan headers, etc.), so the first submodule sync takes a while and pulls a few hundred MB.
+> `lib/ModernGekko` vendors a large part of Dolphin's dependency tree, so the
+> first submodule sync downloads a few hundred MB.
 
-## Recompile and Run
+## Building and running
 
-Bring your own legally-owned ISO, no game data is included in or downloaded by this repository. Works with any GameCube or Wii disc; there is no default game, so `ISO=` (or an already-extracted `GAME=`) is required. Point `ISO` at a dump and run:
+1. Place your disc image at `iso/nights.iso`. The `iso/` folder is gitignored.
+2. Build everything, extract the disc, recompile and launch:
+   ```
+   make run ISO=iso/nights.iso
+   ```
+   On the first run this builds DolRecomp and ModernGekko, downloads
+   [Wiimms ISO Tools](https://wit.wiimm.de/) into `extern/wit` (needed for
+   Wii extraction), extracts the disc into `extracted/nights/`, recompiles
+   `main.dol` and compiles the native module.
+3. On later runs, use the extracted copy:
+   ```
+   make run GAME=nights
+   ```
 
-```
-make run ISO=/path/to/Your\ Game.iso
-```
+Compiled modules are cached by DOL hash and toolchain under `build/modules/`,
+so later runs skip recompilation unless something changed.
 
-This builds DolRecomp and ModernGekko, extracts the ISO, recompiles `main.dol` to C, compiles the result into a native module, and launches the game in a window.
+### Useful targets
 
-For the optimized LLVM backend:
+| Target | Description |
+|---|---|
+| `make check` | Validate build tools, compilers, architecture and sources |
+| `make tools` | Build DolRecomp and ModernGekko only |
+| `make extract ISO=...` | Extract the disc into `extracted/nights/` |
+| `make recompile GAME=nights` | Recompile and build the module without launching |
+| `make run GAME=nights` | Recompile if needed and launch the game |
+| `make llvm GAME=nights` | Build the module with the optimized LLVM backend |
+| `make llvm-run GAME=nights` | Same, then launch |
+| `make clean-extracted` | Remove the extracted disc and compiled modules |
+| `make clean-tools` | Remove the DolRecomp/ModernGekko build trees |
+| `make clean` | Remove all of the above |
 
-```
-make llvm-run ISO=/path/to/Your\ Game.iso
-```
+### Variables
 
-`make llvm` builds the module without launching it. DolRecomp emits native
-objects, and RecompCore's module template discovers the generated object
-manifest and links every object into the game module automatically. LLVM is
-only needed while building; the resulting game module has no LLVM runtime
-dependency.
+| Variable | Default | Description |
+|---|---|---|
+| `ISO` | *(none)* | Disc image path. Only needed the first time. |
+| `GAME` | *(none)* | Extracted game slug (`nights`). |
+| `BACKEND` | `c` | `c` (portable) or `llvm` (optimized native objects). |
+| `LLVM_DIR` | *(CMake discovery)* | Path to LLVM 19/20's CMake package, if not found automatically. |
+| `TOOLCHAIN` | `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. `auto` follows the compiler used to build ModernGekko. |
+| `CMAKE_BUILD_TYPE` | `Release` | Build type for both tools. |
+| `JOBS` | CPU count | Parallel build jobs. |
+| `RUN_ARGS` | *(empty)* | Extra flags for the runner, e.g. `--headless` or `--graphics Vulkan`. |
 
-Each game gets its own directory under `extracted/<slug>/`, where `<slug>` is derived from the ISO's filename, so multiple games coexist without clobbering each other. `ISO` is only needed the first time per game, once extracted, run it again by slug instead:
-
-```
-make run ISO=iso/Your\ Game.iso        # first time for a new game
-make run GAME=Your-Game-Slug           # afterwards
-```
-
-Drop ISOs under `iso/` at the repo root (gitignored) for a stable local path.
-
-To just build the tools without touching a game, or to produce the compiled module without launching it:
-
-```
-make tools
-make recompile ISO=/path/to/game.iso
-```
-
-`moderngekko-port` caches compiled modules by DOL hash and toolchain identity, so re-running `recompile`/`run` after the first build is cheap, it hits cache instead of recompiling.
-
-> [!NOTE]
-> Wii ISOs need [Wiimms ISO Tools](https://wit.wiimm.de/) (`wit`) for extraction, `make` downloads it automatically into `extern/wit` on first use. GameCube extraction is built into DolRecomp directly and doesn't need this.
-
-## Makefile Targets
-
-Run `make help` (or just `make`, the default target) for this list:
-
-| Target       | Description                                                |
-|--------------|--------------------------------------------------------------|
-| `check`      | Validate build tools, compilers, architecture, and sources  |
-| `tools`      | Build DolRecomp and ModernGekko                             |
-| `extract`    | Extract a GameCube/Wii ISO into `extracted/<slug>/`         |
-| `recompile`  | Recompile + compile a runnable module                       |
-| `run`        | Recompile (if needed) and launch the game                   |
-| `llvm`       | Build an optimized LLVM object module                       |
-| `llvm-run`   | Build an LLVM object module and launch the game             |
-| `clean`      | Remove all build output                                     |
-
-## Variables
-
-| Variable           | Default                                    | Description                                              |
-|--------------------|--------------------------------------------|----------------------------------------------------------|
-| `ISO`              | *(none)*                                   | Path to a game ISO. Required the first time per game, also determines that game's slug. |
-| `GAME`             | *(none)*                                   | Select an already-extracted game by slug instead of `ISO=`. Required if `ISO` isn't given. |
-| `JOBS`             | detected CPU count                         | Parallel build jobs passed to CMake/Ninja.                |
-| `CMAKE_BUILD_TYPE` | `Release`                                  | Passed to both submodule builds.                          |
-| `BUILD_TESTING`    | `OFF`                                      | Build developer test targets alongside production tools. |
-| `BACKEND`          | `c`                                        | Generated-code backend: `c` or `llvm`.                    |
-| `LLVM_DIR`         | *(CMake discovery)*                        | Optional path to LLVM 19/20's CMake package.              |
-| `RUN_ARGS`         | *(empty)*                                  | Extra flags forwarded to `moderngekko-run` via `make run`, e.g. `--headless`, `--graphics Vulkan`. |
-| `TOOLCHAIN`        | `auto`                                      | Compiler for the per-game module: `auto`, `clang`, `gcc`, or `msvc`. See "Toolchain" below. |
-
-For example, to force a debug build with extra runner flags:
+Example debug build with Vulkan:
 
 ```
-CMAKE_BUILD_TYPE=Debug make run ISO=/path/to/game.iso RUN_ARGS="--headless"
+CMAKE_BUILD_TYPE=Debug make run GAME=nights RUN_ARGS="--graphics Vulkan"
 ```
 
-## LLVM Backend
+## Controls
 
-DolRecomp supports LLVM 19 and 20. If it is installed outside CMake's normal
-search path, point the template at its package directory:
+ModernGekko has no controller configuration UI. Bindings come from
+Dolphin-format `Config/WiimoteNew.ini` (Wii Remote + Nunchuk / Classic
+Controller) and `Config/GCPadNew.ini` (GameCube controller) in ModernGekko's
+user directory. Nothing creates these files for you, so input does nothing
+until you add one. A config exported from Dolphin works.
 
-```
-make llvm GAME=Your-Game-Slug LLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm
-make llvm-run GAME=Your-Game-Slug LLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm
-```
-
-The portable C backend remains the default and is always available:
+## Project layout
 
 ```
-make recompile GAME=Your-Game-Slug BACKEND=c
+lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
+lib/ModernGekko/    submodule: runtime the recompiled module runs on
+scripts/            build environment checks
+Makefile            the whole pipeline
+iso/                your disc image (gitignored)
+extracted/          extracted disc (gitignored)
+build/              tool builds and compiled modules (gitignored)
+extern/, database/  tools and title data downloaded on first run (gitignored)
 ```
 
-## Toolchain
+## Credits
 
-The default `TOOLCHAIN=auto` follows the compiler used to build `moderngekko-port`.
-This keeps an MSVC build on MSVC and an MSYS2/MinGW build on GCC or Clang instead
-of assuming that Visual Studio's `cl` is available.
+- [ModernGekko-Template](https://github.com/ExpansionPak/ModernGekko-Template),
+  the pipeline this project is based on
+- [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and
+  [ModernGekko](https://github.com/ExpansionPak/ModernGekko)
+- The [Dolphin](https://dolphin-emu.org/) team
+- [Wiimms ISO Tools](https://wit.wiimm.de/) and [GameTDB](https://www.gametdb.com/)
 
-Override it either way with `TOOLCHAIN=`:
+## Legal
 
-```
-make run ISO=/path/to/game.iso TOOLCHAIN=clang   # try clang on Linux anyway
-make run ISO=/path/to/game.iso TOOLCHAIN=auto    # let moderngekko-port pick
-```
+This is an unofficial fan project. It is not affiliated with or endorsed by
+SEGA or Nintendo. NiGHTS and NiGHTS: Journey of Dreams are trademarks of SEGA.
+Wii is a trademark of Nintendo.
 
-Module builds are cached by DOL hash *and* toolchain identity, so switching `TOOLCHAIN` between runs produces a separate cache entry rather than clobbering a previous build.
-
-## Controller Input
-
-ModernGekko has no in-app controller configuration UI (same as Dolphin's NoGUI frontend it's built on), bindings come from `Config/GCPadNew.ini` / `Config/WiimoteNew.ini` in ModernGekko's user directory (`~/.local/share/moderngekko/Config/` by default), which nothing in this pipeline creates for you. Without one, GameCube pad input silently does nothing. You'll need to hand-author or copy in a working ini, Dolphin's ini format and key names are stable and documented by the project itself.
-
-## Cleaning Up
-
-```
-make clean           # everything below
-make clean-extracted # extracted disc + compiled modules only, keeps built tools
-make clean-tools     # DolRecomp/ModernGekko build trees only
-```
-
-## License
-
-DolRecomp and ModernGekko are each distributed under their own upstream licenses (see `lib/DolRecomp/LICENSE` and `lib/ModernGekko/LICENSE`, the latter GPL-3.0-or-later due to its Dolphin-derived runtime). No Nintendo disc image, extracted game data, keys, or copyrighted assets are part of this repository, bring your own legally-owned dump.
+DolRecomp and ModernGekko are distributed under their own licenses (see
+`lib/DolRecomp/LICENSE` and `lib/ModernGekko/LICENSE`; ModernGekko is
+GPL-3.0-or-later because of its Dolphin-derived runtime).

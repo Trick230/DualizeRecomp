@@ -46,7 +46,7 @@ WIT_STAMP := .git/.recomp-wit-stamp
         llvm llvm-run clean clean-extracted clean-tools
 
 help:
-	@echo "GCWIIRecomp-template"
+	@echo "DualizeRecomp - NiGHTS: Journey of Dreams static recompilation"
 	@echo ""
 	@echo "Works with any GameCube or Wii ISO -- there is no default game."
 	@echo "ISO= or GAME= is required the first time you run a target that"

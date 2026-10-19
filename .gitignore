@@ -1,14 +1,35 @@
+# --- Copyrighted game data: never commit -------------------------------------
+# Disc images, extracted discs and anything derived from them (recompiled C,
+# compiled modules) contain or are derived from SEGA/Nintendo copyrighted code
+# and assets. Bring your own legally-owned dump.
 iso/
 extracted/
 generated/
+*.iso
+*.gcm
+*.wbfs
+*.rvz
+*.wia
+*.ciso
+*.nkit.*
+*.dol
+*.rel
+*.elf
+
+# --- Build output and downloaded tools ---------------------------------------
 build/
-extern/
-database/
 build-*/
 cmake-build-*/
+extern/
+# GameTDB title list downloaded by `dolrecomp --setup` (third-party data,
+# regenerated automatically on first run)
+database/
 CMakeUserPresets.json
 .cache/
 
-# OS
+# --- Editors / OS ------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
 .DS_Store
 Thumbs.db
