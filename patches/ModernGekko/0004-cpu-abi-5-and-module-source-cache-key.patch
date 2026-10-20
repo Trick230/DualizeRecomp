@@ -1,0 +1,85 @@
+diff --git a/include/moderngekko/cpu_abi_version.h b/include/moderngekko/cpu_abi_version.h
+index 29cf039..d68921a 100644
+--- a/include/moderngekko/cpu_abi_version.h
++++ b/include/moderngekko/cpu_abi_version.h
+@@ -17,7 +17,8 @@
+  * Version history:
+  *   3 - external_pointer and downcount tail extensions.
+  *   4 - cycle_budget, mirroring DolRecomp f0a86be, directly after downcount.
++ *   5 - fast_read/fast_write RAM slice tables appended after cache_control.
+  */
+-#define MODERNGEKKO_CPU_ABI_VERSION 4u
++#define MODERNGEKKO_CPU_ABI_VERSION 5u
+ 
+ #endif
+diff --git a/include/moderngekko/cpu_state.h b/include/moderngekko/cpu_state.h
+index 9248431..fbf34f5 100644
+--- a/include/moderngekko/cpu_state.h
++++ b/include/moderngekko/cpu_state.h
+@@ -87,6 +87,9 @@ struct CPUState
+     PPCSPRRead spr_read;
+     PPCSPRWrite spr_write;
+     PPCCacheControl cache_control;
++    /* ABI v5: host pointers per 8 MiB guest RAM slice (see GXRuntime cpu.h). */
++    uint8_t* fast_read[1u << 9];
++    uint8_t* fast_write[1u << 9];
+ };
+ 
+ #ifdef __cplusplus
+diff --git a/tools/moderngekko_port.cpp b/tools/moderngekko_port.cpp
+index af1c2a5..7b48228 100644
+--- a/tools/moderngekko_port.cpp
++++ b/tools/moderngekko_port.cpp
+@@ -451,6 +451,31 @@ fs::path SiblingExecutable(const char* argv0, std::string name)
+   return fs::is_regular_file(sibling) ? sibling : fs::path(std::move(name));
+ }
+ 
++// Every file the module build compiles from the source tree, by relative path
++// and content hash. Small enough (a few hundred KiB) to hash on each build.
++std::string ModuleSourcesIdentity(const fs::path& source_root)
++{
++  std::vector<std::pair<std::string, fs::path>> files;
++  for (const char* dir : {"vendor/dolphin/module-template", "vendor/dolphin/GXRuntime/include",
++                          "vendor/dolphin/GXRuntime/src/core"})
++  {
++    std::error_code ec;
++    for (fs::recursive_directory_iterator it(source_root / dir, ec), end; !ec && it != end;
++         it.increment(ec))
++    {
++      if (it->is_regular_file(ec))
++        files.emplace_back(it->path().lexically_relative(source_root).generic_string(), it->path());
++    }
++  }
++  std::ranges::sort(files);
++  std::string identity;
++  for (const auto& [relative, path] : files)
++    identity += relative + "=" + moderngekko::HashFileSha256(path).value_or("unreadable") + ";";
++  std::ostringstream digest;
++  digest << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
++  return digest.str();
++}
++
+ std::string DolRecompCodegenIdentity()
+ {
+   constexpr std::array<const char*, 8> names = {
+@@ -670,14 +695,18 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+       pgo_compile_flags += " -Werror=profile-instr-out-of-date";
+   }
+ 
++  // The module compiles the template and the GXRuntime CPU core from source,
++  // so edits there must miss the cache even when no ABI version moved.
++  const std::string module_sources = ModuleSourcesIdentity(source_root);
++
+   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
+       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
+       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
+       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
+       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
+-      *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
+-      DolRecompCodegenIdentity();
++      *dolrecomp_hash + "|module_sources=" + module_sources + "|" +
++      moderngekko::pgo::PgoCacheIdentity(options.pgo) + DolRecompCodegenIdentity();
+   std::ostringstream key_tail;
+   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
+   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
