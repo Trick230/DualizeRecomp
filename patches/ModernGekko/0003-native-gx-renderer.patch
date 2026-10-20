@@ -257,10 +257,10 @@ index 0000000..7d5a789
 +aurora_copy_runtime_dlls(moderngekko_native_gx)
 diff --git a/src/native_gx/native_gx.cpp b/src/native_gx/native_gx.cpp
 new file mode 100644
-index 0000000..ec6b7c1
+index 0000000..ccf79dd
 --- /dev/null
 +++ b/src/native_gx/native_gx.cpp
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,400 @@
 +#define NATIVE_GX_BUILD
 +#include "native_gx.h"
 +
@@ -381,9 +381,16 @@ index 0000000..ec6b7c1
 +  return s_host.resolve(s_host.user, address, size, data, available);
 +}
 +
++// Window events are polled once per frame, and at this interval while the
++// guest sends nothing (loading, a paused game), so the window stays responsive.
++// Polling drains the Windows message queue, which is not free.
++constexpr auto IDLE_PUMP_INTERVAL = std::chrono::milliseconds(16);
++std::chrono::steady_clock::time_point s_last_pump;
++
 +// Polls window events; false once the user asked to quit.
 +bool PumpEvents()
 +{
++  s_last_pump = std::chrono::steady_clock::now();
 +  for (const AuroraEvent* event = aurora_update(); event && event->type != AURORA_NONE; ++event)
 +  {
 +    if (event->type == AURORA_EXIT)
@@ -420,22 +427,30 @@ index 0000000..ec6b7c1
 +  {
 +    if (s_stop.load(std::memory_order_relaxed))
 +      return false;
-+    s_ring.consumer_waiting.store(true, std::memory_order_seq_cst);
-+    write = s_ring.write.load(std::memory_order_seq_cst);
-+    if (write == read)
++    const auto start = std::chrono::steady_clock::now();
++    const auto pump_due = s_last_pump + IDLE_PUMP_INTERVAL;
++    if (start >= pump_due)
 +    {
-+      const auto start = std::chrono::steady_clock::now();
-+      SDL_WaitSemaphoreTimeout(s_ring.wake, 5);
-+      s_stats.idle += std::chrono::steady_clock::now() - start;
++      if (!PumpEvents())
++      {
++        s_host.quit(s_host.user);
++        return false;
++      }
 +    }
-+    s_ring.consumer_waiting.store(false, std::memory_order_relaxed);
++    else
++    {
++      s_ring.consumer_waiting.store(true, std::memory_order_seq_cst);
++      write = s_ring.write.load(std::memory_order_seq_cst);
++      if (write == read)
++      {
++        const auto timeout = std::chrono::ceil<std::chrono::milliseconds>(pump_due - start);
++        SDL_WaitSemaphoreTimeout(s_ring.wake, static_cast<Sint32>(timeout.count()));
++        s_stats.idle += std::chrono::steady_clock::now() - start;
++      }
++      s_ring.consumer_waiting.store(false, std::memory_order_relaxed);
++    }
 +    s_stats.Report();
 +    write = s_ring.write.load(std::memory_order_acquire);
-+    if (write == read && !PumpEvents())
-+    {
-+      s_host.quit(s_host.user);
-+      return false;
-+    }
 +  }
 +
 +  if (s_ring.restart.exchange(false, std::memory_order_acquire))
@@ -464,6 +479,7 @@ index 0000000..ec6b7c1
 +  config.windowHeight = s_config.height;
 +  config.windowPosX = -1;
 +  config.windowPosY = -1;
++  config.disableInput = true;  // the emulator reads the controllers
 +  config.logCallback = Log;
 +  config.logLevel = LOG_WARNING;
 +  config.mem1Size = 0;  // guest memory is the host's, reached through Resolve
