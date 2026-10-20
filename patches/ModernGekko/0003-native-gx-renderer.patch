@@ -1,0 +1,719 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c0548a0..4ddda40 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,6 +20,8 @@ option(MODERNGEKKO_ENABLE_DYNAMIC_MODULES
+ 
+ option(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME
+        "Build the RecompCore/Dolphin production chassis" ON)
++option(MODERNGEKKO_NATIVE_GX
++       "Build the Aurora-based native GX renderer (--graphics Native)" ON)
+ option(MODERNGEKKO_ENABLE_DOLPHIN_TESTS
+        "Build the imported Dolphin unit-test targets" OFF)
+ option(MODERNGEKKO_ENABLE_DISC_TOOL
+@@ -281,6 +283,38 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         target_compile_definitions(moderngekko PRIVATE _M_GENERIC=1)
+     endif()
+     target_link_libraries(moderngekko PRIVATE core uicommon)
++    if(MODERNGEKKO_NATIVE_GX)
++        # Aurora lives in its own project and DLL so its dependency tree never
++        # links against Dolphin's (both vendor fmt, imgui, xxhash, ...).
++        include(ExternalProject)
++        set(_native_gx_build "${CMAKE_BINARY_DIR}/native_gx")
++        set(_native_gx_import
++            "${_native_gx_build}/${CMAKE_IMPORT_LIBRARY_PREFIX}moderngekko_native_gx${CMAKE_IMPORT_LIBRARY_SUFFIX}")
++        ExternalProject_Add(native_gx_build
++            SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/native_gx"
++            BINARY_DIR "${_native_gx_build}"
++            CMAKE_ARGS
++                -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
++                -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
++                -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
++                -DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}
++                -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=${CMAKE_BINARY_DIR}
++                -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${CMAKE_BINARY_DIR}
++                -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=${_native_gx_build}
++                "-DAURORA_DIR=${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/graphics/aurora"
++            BUILD_BYPRODUCTS "${_native_gx_import}"
++            INSTALL_COMMAND ""
++            BUILD_ALWAYS ON)
++        add_library(native_gx SHARED IMPORTED)
++        set_target_properties(native_gx PROPERTIES
++            IMPORTED_IMPLIB "${_native_gx_import}"
++            IMPORTED_LOCATION "${CMAKE_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}moderngekko_native_gx${CMAKE_SHARED_LIBRARY_SUFFIX}")
++        add_dependencies(native_gx native_gx_build)
++        target_sources(moderngekko PRIVATE src/gpu/native_gx_host.cpp)
++        target_include_directories(moderngekko PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/native_gx")
++        target_link_libraries(moderngekko PRIVATE native_gx)
++        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_NATIVE_GX=1)
++    endif()
+     if(TARGET PkgConfig::X11)
+         target_sources(moderngekko PRIVATE
+             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformX11.cpp)
+diff --git a/src/gpu/native_gx_host.cpp b/src/gpu/native_gx_host.cpp
+new file mode 100644
+index 0000000..098a107
+--- /dev/null
++++ b/src/gpu/native_gx_host.cpp
+@@ -0,0 +1,113 @@
++#include "native_gx_host.hpp"
++
++#include "Core/HW/GPFifo.h"
++#include "Core/HW/Memmap.h"
++#include "Core/System.h"
++#include "VideoCommon/PixelEngine.h"
++
++#include "native_gx.h"
++
++#include <filesystem>
++#include <system_error>
++#include <utility>
++
++namespace moderngekko::native_gx
++{
++namespace
++{
++std::function<void()> s_on_quit;
++
++constexpr u32 PHYSICAL_MASK = 0x1FFFFFFF;
++constexpr u32 EXRAM_BASE = 0x10000000;
++
++// Cached and uncached virtual mirrors both map onto physical MEM1/MEM2.
++bool Resolve(void* user, uint32_t address, uint32_t size, const void** data)
++{
++  auto& memory = static_cast<Core::System*>(user)->GetMemory();
++  const u32 physical = address & PHYSICAL_MASK;
++  u8* base;
++  u32 offset;
++  u32 limit;
++  if (physical < memory.GetRamSizeReal())
++  {
++    base = memory.GetRAM();
++    offset = physical;
++    limit = memory.GetRamSizeReal();
++  }
++  else if (physical >= EXRAM_BASE && memory.GetEXRAM() &&
++           physical - EXRAM_BASE < memory.GetExRamSizeReal())
++  {
++    base = memory.GetEXRAM();
++    offset = physical - EXRAM_BASE;
++    limit = memory.GetExRamSizeReal();
++  }
++  else
++  {
++    return false;
++  }
++  if (size > limit - offset)
++    return false;
++  *data = base + offset;
++  return true;
++}
++
++// The render thread reaching a marker is the GPU reaching it; in dual-core
++// mode PixelEngine schedules the interrupt from any thread, as it does for
++// Dolphin's own GPU thread.
++void DrawDone(void* user)
++{
++  static_cast<Core::System*>(user)->GetPixelEngine().SetFinish(0);
++}
++
++void Token(void* user, uint16_t token, bool interrupt)
++{
++  static_cast<Core::System*>(user)->GetPixelEngine().SetToken(token, interrupt, 0);
++}
++
++void Quit(void*)
++{
++  if (s_on_quit)
++    s_on_quit();
++}
++
++void SubmitBursts(const u8* data, size_t size, void*)
++{
++  native_gx_submit(data, size);
++}
++}  // namespace
++
++bool Start(Core::System& system, const std::string& title, const std::string& cache_path,
++           std::function<void()> on_quit)
++{
++  s_on_quit = std::move(on_quit);
++  std::error_code error;
++  std::filesystem::create_directories(cache_path, error);
++  if (error)
++    return false;
++  const NativeGxConfig config{
++      .title = title.c_str(),
++      .cache_path = cache_path.c_str(),
++      .width = 1280,
++      .height = 960,
++      .vsync = true,
++  };
++  const NativeGxHost host{
++      .user = &system,
++      .resolve = Resolve,
++      .draw_done = DrawDone,
++      .token = Token,
++      .quit = Quit,
++  };
++  if (!native_gx_start(&config, &host))
++    return false;
++  system.GetGPFifo().SetBurstSink(SubmitBursts, nullptr);
++  return true;
++}
++
++void Stop(Core::System& system)
++{
++  system.GetGPFifo().SetBurstSink(nullptr, nullptr);
++  native_gx_stop();
++  s_on_quit = nullptr;
++}
++}  // namespace moderngekko::native_gx
+diff --git a/src/gpu/native_gx_host.hpp b/src/gpu/native_gx_host.hpp
+new file mode 100644
+index 0000000..569c282
+--- /dev/null
++++ b/src/gpu/native_gx_host.hpp
+@@ -0,0 +1,20 @@
++#pragma once
++
++#include <functional>
++#include <string>
++
++namespace Core
++{
++class System;
++}
++
++namespace moderngekko::native_gx
++{
++// Renders the guest's GX FIFO natively (Aurora, own window and render thread)
++// instead of through Dolphin's video emulation, which must be the Null
++// backend in dual-core mode. Call before boot; on_quit runs on the render
++// thread when the user closes the window.
++bool Start(Core::System& system, const std::string& title, const std::string& cache_path,
++           std::function<void()> on_quit);
++void Stop(Core::System& system);
++}  // namespace moderngekko::native_gx
+diff --git a/src/native_gx/CMakeLists.txt b/src/native_gx/CMakeLists.txt
+new file mode 100644
+index 0000000..7d5a789
+--- /dev/null
++++ b/src/native_gx/CMakeLists.txt
+@@ -0,0 +1,36 @@
++# Native GX renderer: Aurora behind a small C API (native_gx.h). A separate
++# project, built by ModernGekko through ExternalProject, so Aurora's
++# dependencies (fmt, imgui, SDL3, Dawn, ...) never share a link with Dolphin's.
++cmake_minimum_required(VERSION 3.25)
++project(ModernGekkoNativeGx LANGUAGES C CXX)
++
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++set(AURORA_DIR "" CACHE PATH "Aurora source tree")
++if(NOT EXISTS "${AURORA_DIR}/include/aurora/aurora.h")
++    message(FATAL_ERROR "Aurora not found at '${AURORA_DIR}'")
++endif()
++
++set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
++set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
++set(AURORA_ENABLE_RMLUI OFF CACHE BOOL "" FORCE)
++set(AURORA_CACHE_USE_ZSTD OFF CACHE BOOL "" FORCE)
++if(WIN32)
++    # Prebuilt Dawn and SDL3 are MSVC builds; as DLLs their C APIs link from
++    # MinGW too.
++    set(AURORA_DAWN_PROVIDER package CACHE STRING "" FORCE)
++    set(AURORA_DAWN_LINKAGE shared CACHE STRING "" FORCE)
++    set(AURORA_SDL3_PROVIDER package CACHE STRING "" FORCE)
++    set(AURORA_SDL3_LINKAGE shared CACHE STRING "" FORCE)
++endif()
++add_subdirectory("${AURORA_DIR}" aurora EXCLUDE_FROM_ALL)
++include("${AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
++
++add_library(moderngekko_native_gx SHARED native_gx.cpp)
++target_link_libraries(moderngekko_native_gx PRIVATE aurora::core aurora::gx aurora::vi)
++target_include_directories(moderngekko_native_gx PRIVATE "${AURORA_DIR}/lib")
++set_target_properties(moderngekko_native_gx PROPERTIES
++    CXX_VISIBILITY_PRESET hidden
++    VISIBILITY_INLINES_HIDDEN ON)
++aurora_copy_runtime_dlls(moderngekko_native_gx)
+diff --git a/src/native_gx/native_gx.cpp b/src/native_gx/native_gx.cpp
+new file mode 100644
+index 0000000..46105cc
+--- /dev/null
++++ b/src/native_gx/native_gx.cpp
+@@ -0,0 +1,302 @@
++#define NATIVE_GX_BUILD
++#include "native_gx.h"
++
++#include <aurora/aurora.h>
++#include <aurora/event.h>
++#include <aurora/gfx.h>
++#include <gx/recomp.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <string>
++#include <vector>
++
++namespace
++{
++using aurora::gx::recomp::StreamEvent;
++
++// One frame of NiGHTS is ~1-2 MB of FIFO; the ring holds several so the CPU
++// thread only waits when the renderer is genuinely behind.
++constexpr size_t RING_SIZE = size_t{16} << 20;
++constexpr size_t RING_MASK = RING_SIZE - 1;
++
++struct Ring
++{
++  std::unique_ptr<uint8_t[]> data{new uint8_t[RING_SIZE]};
++  alignas(64) std::atomic<uint64_t> write{0};
++  alignas(64) std::atomic<uint64_t> read{0};
++  // Set by the consumer before it sleeps, so the producer only pays for a
++  // wake-up when one is needed.
++  alignas(64) std::atomic<bool> consumer_waiting{false};
++  std::mutex mutex;
++  std::condition_variable wake;
++};
++
++NativeGxHost s_host;
++NativeGxConfig s_config;
++// Owned copies: the caller's strings need not outlive native_gx_start.
++std::string s_title;
++std::string s_cache_path;
++Ring s_ring;
++std::thread s_thread;
++std::atomic<bool> s_stop{false};
++
++// NATIVE_GX_STATS=1 prints one line per second of render-thread counters.
++struct Stats
++{
++  bool enabled = false;
++  std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
++  uint64_t bytes = 0;
++  uint32_t frames = 0;
++  uint32_t draw_dones = 0;
++  uint32_t tokens = 0;
++  uint32_t draws = 0;
++  uint32_t stalled_begins = 0;
++
++  void Report()
++  {
++    const auto now = std::chrono::steady_clock::now();
++    if (!enabled || now - last < std::chrono::seconds(1))
++      return;
++    std::fprintf(stderr,
++                 "[native-gx] %u fps, %u draws, %.2f MB fifo, %u draw-done, %u tokens, "
++                 "%u stalled frame starts\n",
++                 frames, draws, bytes / 1048576.0, draw_dones, tokens, stalled_begins);
++    std::fflush(stderr);
++    *this = Stats{.enabled = true};
++    last = now;
++  }
++};
++Stats s_stats;
++
++void Log(AuroraLogLevel level, const char* module, const char* message, unsigned int len)
++{
++  if (level < LOG_WARNING)
++    return;
++  std::fprintf(stderr, "[native-gx] %s: %.*s\n", module, static_cast<int>(len), message);
++  if (level == LOG_FATAL)
++    std::abort();
++}
++
++bool Resolve(void*, uint32_t address, uint32_t size, aurora::gx::recomp::AddressSpace,
++             aurora::gx::recomp::ResourceKind, const void** data, uint32_t* available)
++{
++  if (!s_host.resolve(s_host.user, address, size, data))
++    return false;
++  *available = size;
++  return true;
++}
++
++// Polls window events; false once the user asked to quit.
++bool PumpEvents()
++{
++  for (const AuroraEvent* event = aurora_update(); event && event->type != AURORA_NONE; ++event)
++  {
++    if (event->type == AURORA_EXIT)
++      return false;
++  }
++  return true;
++}
++
++bool BeginFrame()
++{
++  while (!aurora_begin_frame())
++  {
++    // Minimized or the surface is being rebuilt; the guest stalls with us.
++    ++s_stats.stalled_begins;
++    s_stats.Report();
++    if (!PumpEvents() || s_stop.load(std::memory_order_relaxed))
++      return false;
++    std::this_thread::sleep_for(std::chrono::milliseconds(10));
++  }
++  return true;
++}
++
++// Waits for queued bytes and appends them to work. False on shutdown.
++bool Receive(std::vector<uint8_t>& work)
++{
++  uint64_t read = s_ring.read.load(std::memory_order_relaxed);
++  uint64_t write = s_ring.write.load(std::memory_order_acquire);
++  while (write == read)
++  {
++    if (s_stop.load(std::memory_order_relaxed))
++      return false;
++    std::unique_lock lock(s_ring.mutex);
++    s_ring.consumer_waiting.store(true, std::memory_order_seq_cst);
++    write = s_ring.write.load(std::memory_order_seq_cst);
++    if (write == read)
++      s_ring.wake.wait_for(lock, std::chrono::milliseconds(5));
++    s_ring.consumer_waiting.store(false, std::memory_order_relaxed);
++    s_stats.Report();
++    write = s_ring.write.load(std::memory_order_acquire);
++    if (write == read && !PumpEvents())
++    {
++      s_host.quit(s_host.user);
++      return false;
++    }
++  }
++
++  const size_t size = static_cast<size_t>(write - read);
++  const size_t offset = static_cast<size_t>(read & RING_MASK);
++  const size_t first = std::min(size, RING_SIZE - offset);
++  work.insert(work.end(), s_ring.data.get() + offset, s_ring.data.get() + offset + first);
++  work.insert(work.end(), s_ring.data.get(), s_ring.data.get() + (size - first));
++  s_ring.read.store(write, std::memory_order_release);
++  return true;
++}
++
++void RenderThread(std::atomic<int>* started)
++{
++  AuroraConfig config{};
++  config.appName = s_config.title;
++  // Aurora otherwise derives these from the window title, which need not be
++  // a valid directory name.
++  config.userPath = s_config.cache_path;
++  config.cachePath = s_config.cache_path;
++  config.desiredBackend = BACKEND_AUTO;
++  config.vsync = s_config.vsync;
++  config.windowWidth = s_config.width;
++  config.windowHeight = s_config.height;
++  config.windowPosX = -1;
++  config.windowPosY = -1;
++  config.logCallback = Log;
++  config.logLevel = LOG_WARNING;
++  config.mem1Size = 0;  // guest memory is the host's, reached through Resolve
++  config.mem2Size = 0;
++  const AuroraInfo info = aurora_initialize(0, nullptr, &config);
++  if (!info.window)
++  {
++    started->store(-1, std::memory_order_release);
++    started->notify_one();
++    return;
++  }
++  aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
++  started->store(1, std::memory_order_release);
++  started->notify_one();
++
++  std::vector<uint8_t> work;
++  size_t carried = 0;  // incomplete packet kept from the previous batch
++  bool running = BeginFrame();
++  while (running && Receive(work))
++  {
++    if (s_stats.enabled)
++    {
++      s_stats.bytes += work.size() - carried;
++      s_stats.Report();
++    }
++    size_t pos = 0;
++    while (running && pos < work.size())
++    {
++      StreamEvent event;
++      uint32_t value = 0;
++      const uint32_t consumed = aurora::gx::recomp::process_stream(
++          work.data() + pos, static_cast<uint32_t>(work.size() - pos), &event, &value);
++      pos += consumed;
++      switch (event)
++      {
++      case StreamEvent::None:
++        break;
++      case StreamEvent::DrawDone:
++        ++s_stats.draw_dones;
++        s_host.draw_done(s_host.user);
++        break;
++      case StreamEvent::Token:
++      case StreamEvent::TokenInt:
++        ++s_stats.tokens;
++        s_host.token(s_host.user, static_cast<uint16_t>(value), event == StreamEvent::TokenInt);
++        break;
++      case StreamEvent::DisplayCopy:
++        ++s_stats.frames;
++        if (const AuroraStats* frame = aurora_get_stats())
++          s_stats.draws += frame->drawCallCount;
++        aurora_end_frame();
++        if (!PumpEvents())
++        {
++          s_host.quit(s_host.user);
++          running = false;
++        }
++        else
++        {
++          running = BeginFrame();
++        }
++        break;
++      }
++      if (event == StreamEvent::None)
++        break;  // the rest is an incomplete packet
++    }
++    work.erase(work.begin(), work.begin() + static_cast<std::ptrdiff_t>(pos));
++    carried = work.size();
++  }
++
++  // Nothing drains the ring from here on; never let the producer wait for it.
++  s_stop.store(true);
++  aurora::gx::recomp::clear_guest_address_resolver();
++  aurora_shutdown();
++}
++}  // namespace
++
++extern "C" {
++bool native_gx_start(const NativeGxConfig* config, const NativeGxHost* host)
++{
++  if (s_thread.joinable())
++    return true;
++  s_config = *config;
++  s_title = config->title ? config->title : "";
++  s_cache_path = config->cache_path ? config->cache_path : "";
++  s_config.title = s_title.c_str();
++  s_config.cache_path = s_cache_path.c_str();
++  s_host = *host;
++  s_stop.store(false);
++  s_stats.enabled = std::getenv("NATIVE_GX_STATS") != nullptr;
++  std::atomic<int> started{0};
++  s_thread = std::thread(RenderThread, &started);
++  started.wait(0, std::memory_order_acquire);
++  if (started.load(std::memory_order_acquire) < 0)
++  {
++    s_thread.join();
++    return false;
++  }
++  return true;
++}
++
++void native_gx_submit(const uint8_t* data, size_t size)
++{
++  const uint64_t write = s_ring.write.load(std::memory_order_relaxed);
++  while (write + size - s_ring.read.load(std::memory_order_acquire) > RING_SIZE)
++  {
++    if (s_stop.load(std::memory_order_relaxed))
++      return;
++    std::this_thread::yield();
++  }
++  const size_t offset = static_cast<size_t>(write & RING_MASK);
++  const size_t first = std::min(size, RING_SIZE - offset);
++  std::memcpy(s_ring.data.get() + offset, data, first);
++  std::memcpy(s_ring.data.get(), data + first, size - first);
++  s_ring.write.store(write + size, std::memory_order_seq_cst);
++  if (s_ring.consumer_waiting.load(std::memory_order_seq_cst))
++  {
++    std::lock_guard lock(s_ring.mutex);
++    s_ring.wake.notify_one();
++  }
++}
++
++void native_gx_stop(void)
++{
++  if (!s_thread.joinable())
++    return;
++  s_stop.store(true);
++  {
++    std::lock_guard lock(s_ring.mutex);
++    s_ring.wake.notify_one();
++  }
++  s_thread.join();
++}
++}
+diff --git a/src/native_gx/native_gx.h b/src/native_gx/native_gx.h
+new file mode 100644
+index 0000000..039f177
+--- /dev/null
++++ b/src/native_gx/native_gx.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++// Native GX: renders a guest's retail GX FIFO with Aurora (WebGPU) on its own
++// render thread and window, in place of Dolphin's emulated GPU. Built as its
++// own shared library so Aurora's dependency tree never meets Dolphin's.
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef _WIN32
++#ifdef NATIVE_GX_BUILD
++#define NATIVE_GX_API __declspec(dllexport)
++#else
++#define NATIVE_GX_API __declspec(dllimport)
++#endif
++#else
++#define NATIVE_GX_API __attribute__((visibility("default")))
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Called on the render thread.
++typedef struct NativeGxHost {
++  void* user;
++  // Guest address (virtual or physical) to host memory covering size bytes.
++  bool (*resolve)(void* user, uint32_t address, uint32_t size, const void** data);
++  // The GPU reached a GXSetDrawDone / GXSetDrawSync marker.
++  void (*draw_done)(void* user);
++  void (*token)(void* user, uint16_t token, bool interrupt);
++  // The user closed the window.
++  void (*quit)(void* user);
++} NativeGxHost;
++
++typedef struct NativeGxConfig {
++  const char* title;
++  const char* cache_path;  // existing directory for Aurora's pipeline cache and settings
++  uint32_t width;
++  uint32_t height;
++  bool vsync;
++} NativeGxConfig;
++
++// Starts the render thread and waits until Aurora is up. False on failure.
++NATIVE_GX_API bool native_gx_start(const NativeGxConfig* config, const NativeGxHost* host);
++// Queues big-endian FIFO bytes (the guest's gather-pipe bursts). Producer
++// thread only; blocks while the render thread is a full ring behind.
++NATIVE_GX_API void native_gx_submit(const uint8_t* data, size_t size);
++NATIVE_GX_API void native_gx_stop(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index e076b29..86ca3bf 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -27,6 +27,9 @@
+ #include "VideoCommon/VideoConfig.h"
+ #include "automation_protocol.hpp"
+ #include "dolphin_runtime_internal.hpp"
++#ifdef MODERNGEKKO_NATIVE_GX
++#include "../gpu/native_gx_host.hpp"
++#endif
+ #include "moderngekko/cpu_state.h"
+ #include "moderngekko/mod_loader.hpp"
+ #include "moderngekko/module_loader.hpp"
+@@ -510,6 +513,8 @@ struct Runtime::Impl {
+   bool ui_initialized = false;
+   bool controllers_initialized = false;
+   bool booted = false;
++  // --graphics Native: Aurora renders the FIFO, Dolphin's video is Null.
++  bool native_gx = false;
+   std::atomic<bool> running{false};
+   RuntimeAutomationState automation_state;
+   Common::EventHook present_hook;
+@@ -614,7 +619,16 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   }
+   Config::SetBase(Config::MAIN_FULLSCREEN, impl->config.fullscreen);
+ 
+-  if (impl->config.headless)
++  impl->native_gx = impl->config.graphics.backend == "Native";
++#ifndef MODERNGEKKO_NATIVE_GX
++  if (impl->native_gx)
++    return {{},
++            RuntimeError{RuntimeErrorCode::PlatformUnavailable,
++                         "this build has no native GX renderer"}};
++#endif
++
++  // Native GX brings its own window, so Dolphin needs none.
++  if (impl->config.headless || impl->native_gx)
+     impl->platform = Platform::CreateHeadlessPlatform();
+ #ifdef _WIN32
+   else
+@@ -658,7 +672,12 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   impl->platform->SetTitle(impl->title);
+ 
+   Config::SetBase(Config::MAIN_CPU_CORE, SelectCPUCore());
+-  if (!impl->config.graphics.backend.empty())
++  if (impl->native_gx) {
++    Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
++    // The render thread signals PixelEngine, which is only thread-safe in
++    // dual-core mode.
++    Config::SetBase(Config::MAIN_CPU_THREAD, true);
++  } else if (!impl->config.graphics.backend.empty())
+     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
+   else if (impl->config.headless)
+     Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
+@@ -787,8 +806,23 @@ RuntimeRunResult Runtime::Run() {
+         if (state == Core::State::Uninitialized && m_impl->platform)
+           m_impl->platform->Stop();
+       });
++#ifdef MODERNGEKKO_NATIVE_GX
++  if (m_impl->native_gx &&
++      !native_gx::Start(Core::System::GetInstance(), m_impl->title,
++                        (m_impl->config.user_directory / "Cache" / "NativeGX").string(),
++                        [this] { RequestStop(); })) {
++    m_impl->running = false;
++    return {RuntimeExitReason::BootFailed,
++            RuntimeError{RuntimeErrorCode::PlatformUnavailable,
++                         "the native GX renderer could not start"}};
++  }
++#endif
+   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot),
+                              m_impl->platform->GetWindowSystemInfo())) {
++#ifdef MODERNGEKKO_NATIVE_GX
++    if (m_impl->native_gx)
++      native_gx::Stop(Core::System::GetInstance());
++#endif
+     m_impl->running = false;
+     return {RuntimeExitReason::BootFailed,
+             RuntimeError{RuntimeErrorCode::BootFailed,
+@@ -826,6 +860,10 @@ RuntimeRunResult Runtime::Run() {
+   StopAutomation();
+   Core::Stop(Core::System::GetInstance());
+   Core::Shutdown(Core::System::GetInstance());
++#ifdef MODERNGEKKO_NATIVE_GX
++  if (m_impl->native_gx)
++    native_gx::Stop(Core::System::GetInstance());
++#endif
+   m_impl->booted = false;
+   m_impl->running = false;
+   return {};
+diff --git a/tools/frontend_config.cpp b/tools/frontend_config.cpp
+index 03740d4..067ac13 100644
+--- a/tools/frontend_config.cpp
++++ b/tools/frontend_config.cpp
+@@ -40,6 +40,8 @@ std::string NormalizeGraphicsBackend(std::string value) {
+     return "Vulkan";
+   if (lower == "opengl" || lower == "ogl")
+     return "OGL";
++  if (lower == "native")
++    return "Native";
+   return {};
+ }
+ 
+@@ -124,7 +126,7 @@ ConfigResult LoadConfig(const fs::path &user_directory,
+     else if (key == "backend" || key == "graphics_backend") {
+       config.graphics_backend = NormalizeGraphicsBackend(raw_value);
+       if (config.graphics_backend.empty())
+-        return {.error = "graphics backend must be Vulkan or OpenGL"};
++        return {.error = "graphics backend must be Vulkan, OpenGL or Native"};
+     }
+     else if (key == "controller")
+       config.controller = raw_value;

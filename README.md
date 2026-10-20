@@ -45,8 +45,9 @@ After extracting (see below), you can check it with
 - CMake, Ninja, pkg-config, Git and Python
 - A C11/C++23 toolchain:
   - **Windows:** MSYS2 UCRT64 (tested; install `mingw-w64-ucrt-x86_64-clang`
-    and `mingw-w64-ucrt-x86_64-lld` for the fastest build) or Visual Studio 2022 with
-    the "Desktop development with C++" workload
+    and `mingw-w64-ucrt-x86_64-lld` for the fastest build, plus
+    `mingw-w64-ucrt-x86_64-abseil-cpp` for the native renderer) or Visual Studio
+    2022 with the "Desktop development with C++" workload
   - **Linux:** GCC or Clang, plus the Dolphin NoGUI dev packages:
     ```
     sudo apt-get install -y ninja-build build-essential pkg-config cmake \
@@ -127,6 +128,16 @@ Example debug build with Vulkan:
 CMAKE_BUILD_TYPE=Debug make run GAME=nights RUN_ARGS="--graphics Vulkan"
 ```
 
+### Native renderer (experimental)
+
+`RUN_ARGS="--graphics Native"` replaces Dolphin's emulated GPU with
+[Aurora](https://github.com/encounter/aurora) (WebGPU through Dawn: D3D12,
+Vulkan or Metal). The game's GX command stream is taken straight from the
+gather pipe and drawn on a dedicated render thread in its own window; Dolphin
+keeps running the OS, IOS and audio side. This is the base for native,
+interpolated high frame rates. Set `NATIVE_GX_STATS=1` for a once-per-second
+line of frame, draw and FIFO counters.
+
 ## Controls
 
 NiGHTS supports the Classic Controller, so `make run` installs
@@ -149,7 +160,7 @@ Dolphin-format file, so one exported from Dolphin works too.
 
 ## Project-specific fixes
 
-Both are applied automatically by `make`.
+All of these are applied automatically by `make`.
 
 - **`patches/ModernGekko/0001`**: the startup asset hash computes each file's
   relative path once instead of inside the sort comparator (without it,
@@ -165,6 +176,16 @@ Both are applied automatically by `make`.
   inline, and `ps_add` gets an inline path for finite inputs. Results are
   bit-identical to the interpreter-accurate versions; this took the intro FMV
   from ~12 to ~19 FPS.
+- **`patches/ModernGekko/0003`**: the native renderer. A separate shared
+  library (`src/native_gx`, so Aurora's dependency tree never meets Dolphin's)
+  receives the FIFO through a lock-free ring and reports draw-done and token
+  markers back to Dolphin's pixel engine.
+- **`patches/ModernGekko-dolphin/0002`**: the gather-pipe burst sink for the
+  native renderer, MinGW build fixes for Aurora, and fixes to Aurora's retail
+  FIFO decoding: 24-bit texture, copy and TLUT addresses (Wii MEM2), viewport
+  depth clamped to [0, 1] and positioned from the stream's scissor offset, and
+  a 1e-7 near-plane margin so the game's 2D and FMV quads, which sit exactly
+  on the near plane, are not clipped (Dolphin does the same).
 - **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
   ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
   enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
