@@ -125,8 +125,10 @@ dolrecomp: submodules
 # Local fixes on top of the pinned submodules. Each patch is applied once;
 # one that already applies in reverse is left alone.
 # patches/ModernGekko/ targets the submodule itself, patches/ModernGekko-dolphin/
-# its nested vendor/dolphin submodule (GXRuntime, the module CPU runtime).
-PATCH_TARGETS := ModernGekko:$(MODERNGEKKO_DIR) ModernGekko-dolphin:$(MODERNGEKKO_DIR)/vendor/dolphin
+# its nested vendor/dolphin submodule (GXRuntime, the module CPU runtime) and
+# patches/ModernGekko-dolphin-DolRecomp/ the recompiler vendored inside that.
+PATCH_TARGETS := ModernGekko:$(MODERNGEKKO_DIR) ModernGekko-dolphin:$(MODERNGEKKO_DIR)/vendor/dolphin \
+	ModernGekko-dolphin-DolRecomp:$(MODERNGEKKO_DIR)/vendor/dolphin/DolRecomp
 
 patches: submodules
 	@for target in $(PATCH_TARGETS); do \
