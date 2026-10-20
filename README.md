@@ -136,7 +136,12 @@ Vulkan or Metal). The game's GX command stream is taken straight from the
 gather pipe and drawn on a dedicated render thread in its own window; Dolphin
 keeps running the OS, IOS and audio side. This is the base for native,
 interpolated high frame rates. Set `NATIVE_GX_STATS=1` for a once-per-second
-line of frame, draw and FIFO counters.
+line of frame, draw and FIFO counters, per-frame buffer peaks and the render
+thread's decode / end-frame / idle time split.
+
+Known issues: Will's hair renders black, the main menu background is missing
+a layer, and the densest level scenes (~44k draws per frame) run at ~15 FPS
+because FIFO decoding is CPU-bound.
 
 ## Controls
 
@@ -178,14 +183,26 @@ All of these are applied automatically by `make`.
   from ~12 to ~19 FPS.
 - **`patches/ModernGekko/0003`**: the native renderer. A separate shared
   library (`src/native_gx`, so Aurora's dependency tree never meets Dolphin's)
-  receives the FIFO through a lock-free ring and reports draw-done and token
-  markers back to Dolphin's pixel engine.
+  receives the FIFO through a lock-free ring (woken through an SDL semaphore;
+  winpthreads' timed condition wait overslept) and reports draw-done and token
+  markers back to Dolphin's pixel engine. Guest addresses resolve together
+  with the bytes left in their memory region, so indexed vertex arrays and
+  indexed matrix loads see their whole array.
 - **`patches/ModernGekko-dolphin/0002`**: the gather-pipe burst sink for the
   native renderer, MinGW build fixes for Aurora, and fixes to Aurora's retail
   FIFO decoding: 24-bit texture, copy and TLUT addresses (Wii MEM2), viewport
   depth clamped to [0, 1] and positioned from the stream's scissor offset, and
   a 1e-7 near-plane margin so the game's 2D and FMV quads, which sit exactly
-  on the near plane, are not clipped (Dolphin does the same).
+  on the near plane, are not clipped (Dolphin does the same). A disabled TEV
+  texture order reads white, as on hardware. Retail textures (no texture
+  object id) are cached by address and content hash instead of being
+  re-created per draw. Vertex arrays are uploaded once per frame per address
+  until the game invalidates the vertex cache (`GXInvalidateVtxCache`), and
+  identical uniform blocks are shared within a frame, the vertex start moving
+  to `firstInstance`; together these keep a level frame inside Aurora's fixed
+  per-frame buffers (the uniform budget went from 24 to 8 MB and the array
+  budget from 8 to 24 MB). A draw that still does not fit is dropped with a
+  warning instead of aborting.
 - **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
   ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
   enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
