@@ -52,10 +52,10 @@ index c0548a0..4ddda40 100644
              vendor/dolphin/Source/Core/DolphinNoGUI/PlatformX11.cpp)
 diff --git a/src/gpu/native_gx_host.cpp b/src/gpu/native_gx_host.cpp
 new file mode 100644
-index 0000000..098cbe4
+index 0000000..9c88934
 --- /dev/null
 +++ b/src/gpu/native_gx_host.cpp
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,131 @@
 +#include "native_gx_host.hpp"
 +
 +#include "Core/HW/GPFifo.h"
@@ -68,6 +68,7 @@ index 0000000..098cbe4
 +#include <filesystem>
 +#include <system_error>
 +#include <utility>
++#include <vector>
 +
 +namespace moderngekko::native_gx
 +{
@@ -133,7 +134,23 @@ index 0000000..098cbe4
 +{
 +  native_gx_submit(data, size);
 +}
-+}  // namespace
++
++void FlushBursts(void*)
++{
++  native_gx_drain();
++}
++
++void BurstState(std::vector<u8>* state, bool load, void*)
++{
++  if (load)
++  {
++    native_gx_load_state(state->data(), state->size());
++    return;
++  }
++  size_t size = 0;
++  const uint8_t* saved = native_gx_save_state(&size);
++  state->assign(saved, saved + size);
++}}  // namespace
 +
 +bool Start(Core::System& system, const std::string& title, const std::string& cache_path,
 +           std::function<void()> on_quit)
@@ -159,13 +176,13 @@ index 0000000..098cbe4
 +  };
 +  if (!native_gx_start(&config, &host))
 +    return false;
-+  system.GetGPFifo().SetBurstSink(SubmitBursts, nullptr);
++  system.GetGPFifo().SetBurstSink(SubmitBursts, FlushBursts, BurstState, nullptr);
 +  return true;
 +}
 +
 +void Stop(Core::System& system)
 +{
-+  system.GetGPFifo().SetBurstSink(nullptr, nullptr);
++  system.GetGPFifo().SetBurstSink(nullptr, nullptr, nullptr, nullptr);
 +  native_gx_stop();
 +  s_on_quit = nullptr;
 +}
@@ -240,10 +257,10 @@ index 0000000..7d5a789
 +aurora_copy_runtime_dlls(moderngekko_native_gx)
 diff --git a/src/native_gx/native_gx.cpp b/src/native_gx/native_gx.cpp
 new file mode 100644
-index 0000000..3954fac
+index 0000000..ec6b7c1
 --- /dev/null
 +++ b/src/native_gx/native_gx.cpp
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,384 @@
 +#define NATIVE_GX_BUILD
 +#include "native_gx.h"
 +
@@ -282,6 +299,12 @@ index 0000000..3954fac
 +  // Set by the consumer before it sleeps, so the producer only pays for a
 +  // wake-up when one is needed.
 +  alignas(64) std::atomic<bool> consumer_waiting{false};
++  // Ring position up to which the render thread has processed everything
++  // (only an incomplete trailing packet may remain), for native_gx_drain.
++  alignas(64) std::atomic<uint64_t> settled{0};
++  // Set by native_gx_load_state: the next bytes start a fresh stream, so the
++  // render thread drops the incomplete packet it kept.
++  std::atomic<bool> restart{false};
 +  // SDL's semaphore is native on every platform; winpthreads' timed condvar
 +  // wait was seen sleeping far past its timeout.
 +  SDL_Semaphore* wake = nullptr;
@@ -293,6 +316,9 @@ index 0000000..3954fac
 +std::string s_title;
 +std::string s_cache_path;
 +Ring s_ring;
++// Received bytes not yet processed: after a batch, the head of an incomplete
++// packet. Render thread only, except while drained (native_gx_save_state).
++std::vector<uint8_t> s_work;
 +std::thread s_thread;
 +std::atomic<bool> s_stop{false};
 +
@@ -311,9 +337,10 @@ index 0000000..3954fac
 +  uint32_t peak_uniforms = 0;  // largest per-frame use of Aurora's fixed buffer budgets
 +  uint32_t peak_vertices = 0;
 +  uint32_t peak_storage = 0;
-+  // Render-thread time split: decoding the FIFO into Aurora draws, ending
-+  // frames (WebGPU encode, submit, present) and idling for guest data.
-+  std::chrono::steady_clock::duration decode{}, end_frame{}, idle{};
++  // Render-thread time split: decoding the FIFO into Aurora draws, starting
++  // frames (waiting for a free frame slot), ending them (handing the frame to
++  // Aurora's submit worker) and idling for guest data.
++  std::chrono::steady_clock::duration decode{}, begin_frame{}, end_frame{}, idle{};
 +
 +  void Report()
 +  {
@@ -323,10 +350,10 @@ index 0000000..3954fac
 +    std::fprintf(stderr,
 +                 "[native-gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
 +                 "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
-+                 "ms decode %lld / end frame %lld / idle %lld\n",
++                 "ms decode %lld / begin frame %lld / end frame %lld / idle %lld\n",
 +                 frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
 +                 peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
-+                 Ms(decode), Ms(end_frame), Ms(idle));
++                 Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle));
 +    std::fflush(stderr);
 +    *this = Stats{.enabled = true};
 +    last = now;
@@ -367,6 +394,11 @@ index 0000000..3954fac
 +
 +bool BeginFrame()
 +{
++  const auto start = std::chrono::steady_clock::now();
++  const bool begun = aurora_begin_frame();
++  s_stats.begin_frame += std::chrono::steady_clock::now() - start;
++  if (begun)
++    return true;
 +  while (!aurora_begin_frame())
 +  {
 +    // Minimized or the surface is being rebuilt; the guest stalls with us.
@@ -406,7 +438,10 @@ index 0000000..3954fac
 +    }
 +  }
 +
++  if (s_ring.restart.exchange(false, std::memory_order_acquire))
++    work.clear();
 +  const size_t size = static_cast<size_t>(write - read);
++  s_stats.bytes += size;
 +  const size_t offset = static_cast<size_t>(read & RING_MASK);
 +  const size_t first = std::min(size, RING_SIZE - offset);
 +  work.insert(work.end(), s_ring.data.get() + offset, s_ring.data.get() + offset + first);
@@ -444,16 +479,11 @@ index 0000000..3954fac
 +  started->store(1, std::memory_order_release);
 +  started->notify_one();
 +
-+  std::vector<uint8_t> work;
-+  size_t carried = 0;  // incomplete packet kept from the previous batch
++  auto& work = s_work;
 +  bool running = BeginFrame();
 +  while (running && Receive(work))
 +  {
-+    if (s_stats.enabled)
-+    {
-+      s_stats.bytes += work.size() - carried;
-+      s_stats.Report();
-+    }
++    s_stats.Report();
 +    size_t pos = 0;
 +    while (running && pos < work.size())
 +    {
@@ -507,7 +537,8 @@ index 0000000..3954fac
 +        break;  // the rest is an incomplete packet
 +    }
 +    work.erase(work.begin(), work.begin() + static_cast<std::ptrdiff_t>(pos));
-+    carried = work.size();
++    if (running)
++      s_ring.settled.store(s_ring.read.load(std::memory_order_relaxed), std::memory_order_release);
 +  }
 +
 +  // Nothing drains the ring from here on; never let the producer wait for it.
@@ -564,6 +595,45 @@ index 0000000..3954fac
 +    SDL_SignalSemaphore(s_ring.wake);
 +}
 +
++void native_gx_drain(void)
++{
++  const uint64_t target = s_ring.write.load(std::memory_order_relaxed);
++  if (s_ring.consumer_waiting.exchange(false, std::memory_order_seq_cst))
++    SDL_SignalSemaphore(s_ring.wake);
++  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++  while (s_ring.settled.load(std::memory_order_acquire) < target)
++  {
++    if (s_stop.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() > deadline)
++    {
++      std::fprintf(stderr, "[native-gx] drain timed out; markers may be lost\n");
++      return;
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds(1));
++  }
++}
++
++const uint8_t* native_gx_save_state(size_t* size)
++{
++  // Drained, so the render thread is waiting for data and leaves the decoder
++  // and s_work alone. The incomplete packet goes last: the rest of it is still
++  // in the guest's gather pipe, which the emulator saves.
++  static std::vector<uint8_t> s_state;
++  s_state = aurora::gx::recomp::register_stream();
++  s_state.insert(s_state.end(), s_work.begin(), s_work.end());
++  *size = s_state.size();
++  return s_state.data();
++}
++
++void native_gx_load_state(const uint8_t* data, size_t size)
++{
++  native_gx_drain();
++  s_ring.restart.store(true, std::memory_order_relaxed);
++  if (size != 0)
++    native_gx_submit(data, size);
++  else if (s_ring.consumer_waiting.exchange(false, std::memory_order_seq_cst))
++    SDL_SignalSemaphore(s_ring.wake);
++}
++
 +void native_gx_stop(void)
 +{
 +  if (!s_thread.joinable())
@@ -577,10 +647,10 @@ index 0000000..3954fac
 +}
 diff --git a/src/native_gx/native_gx.h b/src/native_gx/native_gx.h
 new file mode 100644
-index 0000000..5b3b685
+index 0000000..f8a3999
 --- /dev/null
 +++ b/src/native_gx/native_gx.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,67 @@
 +#pragma once
 +
 +// Native GX: renders a guest's retail GX FIFO with Aurora (WebGPU) on its own
@@ -632,6 +702,17 @@ index 0000000..5b3b685
 +// Queues big-endian FIFO bytes (the guest's gather-pipe bursts). Producer
 +// thread only; blocks while the render thread is a full ring behind.
 +NATIVE_GX_API void native_gx_submit(const uint8_t* data, size_t size);
++// Producer thread only: returns once every queued byte has been processed and
++// its draw-done and token markers reported, so emulator state saved afterwards
++// holds them. Gives up after a few seconds if the render thread is stalled.
++NATIVE_GX_API void native_gx_drain(void);
++// Producer thread only, after native_gx_drain: the decoder state (GX registers
++// and any incomplete packet) as bytes for native_gx_load_state. The buffer
++// stays valid until the next call.
++NATIVE_GX_API const uint8_t* native_gx_save_state(size_t* size);
++// Producer thread only: replaces the decoder state with one saved by
++// native_gx_save_state; the stream submitted next continues from it.
++NATIVE_GX_API void native_gx_load_state(const uint8_t* data, size_t size);
 +NATIVE_GX_API void native_gx_stop(void);
 +
 +#ifdef __cplusplus

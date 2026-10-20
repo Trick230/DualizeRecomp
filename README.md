@@ -137,11 +137,16 @@ gather pipe and drawn on a dedicated render thread in its own window; Dolphin
 keeps running the OS, IOS and audio side. This is the base for native,
 interpolated high frame rates. Set `NATIVE_GX_STATS=1` for a once-per-second
 line of frame, draw and FIFO counters, per-frame buffer peaks and the render
-thread's decode / end-frame / idle time split.
+thread's decode / begin-frame / end-frame / idle time split.
 
-Known issues: Will's hair renders black, the main menu background is missing
-a layer, and the densest level scenes (~44k draws per frame) run at ~15 FPS
-because FIFO decoding is CPU-bound.
+Gameplay holds 30 FPS: draws built from unchanged GX state reuse the previous
+pipeline, bind groups and uniforms, and consecutive draws (indexed or not)
+merge into one, so a dense level goes from ~45k to ~1k GPU draws per frame.
+Savestates work with the native renderer: the FIFO decoder's registers and any
+incomplete packet are saved with the state (states made before this change no
+longer load).
+
+Known issue: Will's hair renders black in cutscenes (it is correct in gameplay).
 
 ## Controls
 

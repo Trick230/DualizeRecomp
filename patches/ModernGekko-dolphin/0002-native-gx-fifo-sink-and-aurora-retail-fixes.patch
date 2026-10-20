@@ -120,11 +120,76 @@ index e885be0..866c02d 100644
  template <typename T>
  static Range push_storage(ArrayRef<T> data) {
    return push_storage(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));
+diff --git a/GXRuntime/graphics/aurora/lib/gfx/texture.hpp b/GXRuntime/graphics/aurora/lib/gfx/texture.hpp
+index 45a8ba8..58f6fa0 100644
+--- a/GXRuntime/graphics/aurora/lib/gfx/texture.hpp
++++ b/GXRuntime/graphics/aurora/lib/gfx/texture.hpp
+@@ -81,8 +81,9 @@ struct GXTexObj_ {
+ 
+   static constexpr u32 get_bits(u32 reg, u32 size, u32 shift) noexcept { return (reg >> shift) & ((1u << size) - 1); }
+ 
+-  u32 width() const noexcept { return mWidth != 0 ? mWidth : (get_bits(image0, 10, 0) + 1) & 0x3FFu; }
+-  u32 height() const noexcept { return mHeight != 0 ? mHeight : (get_bits(image0, 10, 10) + 1) & 0x3FFu; }
++  // TX_SETIMAGE0 stores size - 1 in 10 bits, so 1024 is a valid size.
++  u32 width() const noexcept { return mWidth != 0 ? mWidth : get_bits(image0, 10, 0) + 1; }
++  u32 height() const noexcept { return mHeight != 0 ? mHeight : get_bits(image0, 10, 10) + 1; }
+   u32 raw_format() const noexcept { return get_bits(image0, 4, 20); }
+   u32 format() const noexcept { return mFormat != aurora::gfx::InvalidTextureFormat ? mFormat : raw_format(); }
+   GXTexWrapMode wrap_s() const noexcept { return static_cast<GXTexWrapMode>(get_bits(mode0, 2, 0)); }
 diff --git a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
-index 5b176e7..c8df38d 100644
+index 5b176e7..d09ea74 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
-@@ -378,6 +378,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian);
+@@ -14,9 +14,11 @@
+ #include <tracy/Tracy.hpp>
+ 
+ #include <algorithm>
++#include <bitset>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
++#include <map>
+ #include <optional>
+ 
+ namespace aurora::gx::fifo {
+@@ -243,6 +245,36 @@ static inline f32 read_f32(const u8* ptr, bool bigEndian) {
+   return val;
+ }
+ 
++// The last value written to each GX register, kept so the decoder's state can
++// be rebuilt from FIFO packets (recomp::register_stream).
++static struct {
++  std::array<u32, 0x100> cp{};
++  std::bitset<0x100> cpWritten;
++  std::bitset<0x100> bpWritten; // values live in g_gxState.bpRegCache
++  // XF memory (matrices, lights) by load address: its handlers take whole
++  // matrices, so loads are replayed as they were made.
++  std::map<u16, std::vector<u32>> xfMem;
++  std::array<u32, 0x100> xfRegs{};
++  std::bitset<0x100> xfRegsWritten;
++  // TMEM offset -> BP 0x64 (address) and 0x65 (load) of the last TLUT loaded there
++  std::map<u16, std::pair<u32, u32>> tlutLoads;
++} s_registers;
++
++static void shadow_xf(u32 addr, const u8* data, u32 count, bool bigEndian) {
++  if (addr >= 0x1000) {
++    for (u32 i = 0; i < count && addr - 0x1000 + i < s_registers.xfRegs.size(); ++i) {
++      s_registers.xfRegs[addr - 0x1000 + i] = read_u32(data + i * 4, bigEndian);
++      s_registers.xfRegsWritten.set(addr - 0x1000 + i);
++    }
++    return;
++  }
++  auto& words = s_registers.xfMem[static_cast<u16>(addr)];
++  words.resize(count);
++  for (u32 i = 0; i < count; ++i) {
++    words[i] = read_u32(data + i * 4, bigEndian);
++  }
++}
++
+ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
+   if (addr < 0x78) {
+     // Position matrices (0x0000 - 0x0077)
+@@ -378,6 +410,7 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian);
  static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
  static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
  static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
@@ -132,7 +197,15 @@ index 5b176e7..c8df38d 100644
  
  void process(const u8* data, u32 size, bool bigEndian) {
    ZoneScoped;
-@@ -472,7 +473,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
+@@ -436,6 +469,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
+         break;
+       }
+       const u8* srcData = static_cast<const u8*>(array.data) + srcOffset;
++      shadow_xf(dstAddr, srcData, len, bigEndian);
+       if (!copy_xf_data(dstAddr, srcData, len, bigEndian)) {
+ #ifndef NDEBUG
+         Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr=%04x)", opcode, dstAddr);
+@@ -472,7 +506,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
      }
  
      case CP_CMD_INVAL_VTX: {
@@ -141,7 +214,7 @@ index 5b176e7..c8df38d 100644
        break;
      }
  
-@@ -521,7 +522,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
+@@ -521,7 +555,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
  // Helper to extract bit fields from a 32-bit register
  inline static u32 bp_get(u32 reg, u32 size, u32 shift) { return reg >> shift & (1u << size) - 1; }
  
@@ -151,7 +224,15 @@ index 5b176e7..c8df38d 100644
  
  static void mark_recomp_texture_metadata(GXTexObj_& slot) {
    slot.data = nullptr;
-@@ -958,7 +960,8 @@ static void handle_bp(u32 value, bool bigEndian) {
+@@ -651,6 +686,7 @@ static void handle_bp(u32 value, bool bigEndian) {
+     g_gxState.bpRegCache[0xFE] = 0x00FFFFFF;
+     const u32 merged = (g_gxState.bpRegCache[regId] & ~ssMask) | (value & ssMask);
+     value = (regId << 24) | (merged & 0x00FFFFFF);
++    s_registers.bpWritten.set(regId);
+     if (g_gxState.bpRegCache[regId] == value && regId != 0x52)
+       return;
+     g_gxState.bpRegCache[regId] = value;
+@@ -958,7 +994,8 @@ static void handle_bp(u32 value, bool bigEndian) {
    case 0x52: {
      const bool clear = bp_get(value, 1, 11) != 0;
      if (bp_get(value, 1, 14) != 0) {
@@ -161,7 +242,43 @@ index 5b176e7..c8df38d 100644
      } else {
        resolve_tex_copy_destination_from_bp(value);
        if (g_gxState.texCopyDest != nullptr) {
-@@ -1597,13 +1600,21 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+@@ -974,6 +1011,7 @@ static void handle_bp(u32 value, bool bigEndian) {
+   case 0x64:
+     break;
+   case 0x65: {
++    s_registers.tlutLoads[static_cast<u16>(bp_get(value, 10, 0))] = {g_gxState.bpRegCache[0x64], value};
+     resolve_tlut_load_from_bp(value);
+     const auto idx = bp_get(value, 10, 0);
+     if (idx < MaxTluts) {
+@@ -1312,6 +1350,8 @@ static void handle_bp(u32 value, bool bigEndian) {
+ 
+ // CP register handler - decodes CP register writes and updates g_gxState
+ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
++  s_registers.cp[addr] = value;
++  s_registers.cpWritten.set(addr);
+   switch (addr) {
+   // VCD low (0x50)
+   case 0x50: {
+@@ -1479,6 +1519,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+   CHECK(pos + dataBytes <= size, "XF data read overrun: need {} bytes at pos {}", dataBytes, pos);
+ 
+   const u8* xfData = data + pos;
++  shadow_xf(addr, xfData, count, bigEndian);
+ 
+   if (copy_xf_data(addr, xfData, count, bigEndian)) {
+     // copy_xf_data handled everything.
+@@ -1561,6 +1602,10 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+         }
+         break;
+       }
++      case 0x12:
++        g_gxState.dualTexTrans = (val & 1) != 0;
++        g_gxState.stateDirty = true;
++        break;
+       case 0x18: {
+         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
+         g_gxState.currentPnMtx = bp_get(val, 6, 0) / 3;
+@@ -1597,13 +1642,21 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
            f32 oz = read_f32(xfData + 20, bigEndian);
            f32 width = sx * 2.0f;
            f32 height = -sy * 2.0f;
@@ -187,10 +304,78 @@ index 5b176e7..c8df38d 100644
            });
          }
          break;
-@@ -1832,6 +1843,32 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
-   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-                         lastDraw->instanceCount == 1;
+@@ -1718,6 +1771,34 @@ static void handle_draw_overrun [[noreturn]] (u32 totalVtxBytes, const u8* data,
+   FATAL("draw vertex data overrun: need {} bytes at pos {}, have {}", totalVtxBytes, pos, size);
+ }
  
++// The GX state the last triangle draw of this frame was built with. While no
++// state changes, later draws can reuse it or merge into that draw.
++static struct {
++  u32 frame = UINT32_MAX;
++  GXVtxFmt fmt{};
++  BindGroupRanges ranges{};
++  gfx::PipelineRef pipeline{};
++  GXBindGroups bindGroups{};
++  gfx::Range uniformRange{};
++} s_lastDraw;
++
++// The vertex array ranges a draw would bind, or nothing if one of its arrays
++// still has to be uploaded (which would change the ranges).
++static std::optional<BindGroupRanges> uploaded_array_ranges(const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
++  BindGroupRanges ranges{};
++  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
++    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
++      continue;
++    }
++    const auto& array = g_gxState.arrays[i];
++    if (array.cachedRange.size == 0 || array.cachedRange.size < std::min(array.size, arraySizes[i])) {
++      return std::nullopt;
++    }
++    ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
++  }
++  return ranges;
++}
++
+ // Draw command handler - parses vertices inline and caches results
+ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
+   u32 vtxSize = 0;
+@@ -1747,15 +1828,6 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
+   return vtxSize;
+ }
+ 
+-static bool has_indexed_arrays() {
+-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+-    if (g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) {
+-      return true;
+-    }
+-  }
+-  return false;
+-}
+-
+ static void calculate_indexed_array_sizes(GXVtxFmt fmt, u16 vtxCount, const u8* vertices, bool bigEndian,
+                                           std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
+   arraySizes.fill(0);
+@@ -1828,9 +1900,45 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
+   std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+   calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
+ 
+-  auto* lastDraw = !g_gxState.stateDirty && !has_indexed_arrays() ? gfx::get_last_draw_command<DrawData>() : nullptr;
+-  const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
+-                        lastDraw->instanceCount == 1;
++  // Merge into the previous draw when it was built from identical state,
++  // including the vertex format and the array ranges its uniform block holds.
++  DrawData* lastDraw = nullptr;
++  if (!g_gxState.stateDirty && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
++      s_lastDraw.frame == gfx::current_frame() && s_lastDraw.fmt == fmt) {
++    const auto ranges = uploaded_array_ranges(arraySizes);
++    if (ranges && *ranges == s_lastDraw.ranges) {
++      lastDraw = gfx::get_last_draw_command<DrawData>();
++    }
++  }
++  // Merged draws index their vertices with u16.
++  const bool canMerge =
++      lastDraw != nullptr && lastDraw->instanceCount == 1 && lastDraw->vtxCount + vtxCount <= UINT16_MAX + 1u;
++
 +  // The per-frame staging buffers are fixed; drop a draw that cannot fit rather
 +  // than abort. Sizes are upper bounds: strips/fans expand to 3 indices per
 +  // vertex, and a merge may also convert the previous draw.
@@ -216,11 +401,10 @@ index 5b176e7..c8df38d 100644
 +      pos += totalVtxBytes;
 +      return;
 +    }
-+
+ 
    // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
    gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
-   pos += totalVtxBytes;
-@@ -1904,6 +1941,31 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
+@@ -1904,6 +2012,31 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
    push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, arraySizes);
  }
  
@@ -252,7 +436,7 @@ index 5b176e7..c8df38d 100644
  static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                           u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
    // Build pipeline, bind groups, and push draw command
-@@ -1914,13 +1976,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+@@ -1914,22 +2047,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
      }
      auto& array = g_gxState.arrays[i];
      const u32 requiredSize = std::min(array.size, arraySizes[i]);
@@ -268,16 +452,65 @@ index 5b176e7..c8df38d 100644
 +    ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
    }
  
-   PipelineConfig config{};
-@@ -1946,6 +2005,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+-  PipelineConfig config{};
+-  populate_pipeline_config(config, prim, fmt);
+-  const auto info = build_shader_info(config.shaderConfig);
+-  resolve_sampled_textures(info);
+-  const auto bindGroups = build_bind_groups(info);
+-  const auto pipeline = gfx::pipeline_ref(config);
+-
++  // Lines and points expand each primitive into an instanced quad.
++  const bool expanded = prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS;
+   uint32_t instanceCount = 1;
+   if (prim == GX_LINES) {
+     instanceCount = vtxCount / 2;
+@@ -1938,14 +2063,44 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+   } else if (prim == GX_POINTS) {
+     instanceCount = vtxCount;
+   }
++
++  // Nearly every draw in a frame follows another with no GX state change in
++  // between. Triangle draws then share the previous draw's pipeline, bindings
++  // and uniform block (it holds no per-draw data), so only geometry differs.
++  auto& s_last = s_lastDraw;
++  gfx::PipelineRef pipeline;
++  GXBindGroups bindGroups;
++  gfx::Range uniformRange;
++  if (!expanded && !g_gxState.stateDirty && s_last.frame == gfx::current_frame() && s_last.fmt == fmt &&
++      std::memcmp(&s_last.ranges, &ranges, sizeof(ranges)) == 0) {
++    pipeline = s_last.pipeline;
++    bindGroups = s_last.bindGroups;
++    uniformRange = s_last.uniformRange;
++  } else {
++    PipelineConfig config{};
++    populate_pipeline_config(config, prim, fmt);
++    const ShaderInfo info = build_shader_info(config.shaderConfig);
++    resolve_sampled_textures(info);
++    bindGroups = build_bind_groups(info);
++    pipeline = gfx::pipeline_ref(config);
++    uniformRange = build_uniform(info, vertRange.offset, ranges);
++    s_last.frame = expanded ? UINT32_MAX : gfx::current_frame();
++    s_last.fmt = fmt;
++    s_last.ranges = ranges;
++    s_last.pipeline = pipeline;
++    s_last.bindGroups = bindGroups;
++    s_last.uniformRange = uniformRange;
++  }
++
+   gfx::push_draw_command(DrawData{
+       .pipeline = pipeline,
+       .vertRange = vertRange,
+       .idxRange = idxRange,
+-      .uniformRange = build_uniform(info, vertRange.offset, ranges),
++      .uniformRange = uniformRange,
        .vtxCount = vtxCount,
        .indexCount = numIndices,
        .instanceCount = instanceCount,
-+      .firstInstance = info.lineMode == 0 ? vertRange.offset : 0,
++      .firstInstance = expanded ? 0 : vertRange.offset,
        .bindGroups = bindGroups,
        .dstAlpha = g_gxState.dstAlpha,
        .cullMode = g_gxState.cullMode,
-@@ -2203,3 +2263,113 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
+@@ -2203,3 +2358,167 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
  }
  
  } // namespace aurora::gx::fifo
@@ -349,6 +582,60 @@ index 5b176e7..c8df38d 100644
 +}
 +} // namespace
 +
++std::vector<u8> register_stream() {
++  std::vector<u8> out;
++  const auto put32 = [&out](u32 value) {
++    for (int shift = 24; shift >= 0; shift -= 8) {
++      out.push_back(static_cast<u8>(value >> shift));
++    }
++  };
++  const auto loadXf = [&](u32 addr, const u32* words, u32 count) {
++    out.push_back(CP_CMD_LOAD_XF_REG);
++    put32(((count - 1) << 16) | addr);
++    for (u32 i = 0; i < count; ++i) {
++      put32(words[i]);
++    }
++  };
++
++  for (u32 addr = 0; addr < s_registers.cp.size(); ++addr) {
++    if (s_registers.cpWritten.test(addr)) {
++      out.push_back(CP_CMD_LOAD_CP_REG);
++      out.push_back(static_cast<u8>(addr));
++      put32(s_registers.cp[addr]);
++    }
++  }
++  for (const auto& [addr, words] : s_registers.xfMem) {
++    loadXf(addr, words.data(), static_cast<u32>(words.size()));
++  }
++  // Contiguous runs, since the viewport and projection take their registers together.
++  for (u32 reg = 0; reg < s_registers.xfRegs.size();) {
++    u32 end = reg;
++    while (end < s_registers.xfRegs.size() && s_registers.xfRegsWritten.test(end)) {
++      ++end;
++    }
++    if (end != reg) {
++      loadXf(0x1000 + reg, &s_registers.xfRegs[reg], end - reg);
++    }
++    reg = end + 1;
++  }
++  for (u32 reg = 0; reg < s_registers.bpWritten.size(); ++reg) {
++    // Skip registers that trigger work (copies, TLUT loads, sync markers) and the write mask.
++    const bool trigger = reg == BP_PE_DONE || reg == BP_PE_TOKEN || reg == BP_PE_TOKEN_INT ||
++                         reg == BP_COPY_TRIGGER || reg == 0x65 || reg == 0x66 || reg == 0xFE;
++    if (s_registers.bpWritten.test(reg) && !trigger) {
++      out.push_back(CP_CMD_LOAD_BP_REG);
++      put32(g_gxState.bpRegCache[reg]);
++    }
++  }
++  for (const auto& [offset, load] : s_registers.tlutLoads) {
++    out.push_back(CP_CMD_LOAD_BP_REG);
++    put32(load.first);
++    out.push_back(CP_CMD_LOAD_BP_REG);
++    put32(load.second);
++  }
++  return out;
++}
++
 +u32 process_stream(const u8* data, u32 size, StreamEvent* event, u32* value) {
 +  ZoneScoped;
 +  *event = StreamEvent::None;
@@ -392,7 +679,7 @@ index 5b176e7..c8df38d 100644
 +}
 +} // namespace aurora::gx::recomp
 diff --git a/GXRuntime/graphics/aurora/lib/gx/gx.cpp b/GXRuntime/graphics/aurora/lib/gx/gx.cpp
-index 5915c5b..8e0231a 100644
+index 5915c5b..c77e69b 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/gx.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/gx.cpp
 @@ -85,7 +85,76 @@ absl::flat_hash_map<u32, CachedTextureEntry> s_textureObjectCaches;
@@ -534,6 +821,41 @@ index 5915c5b..8e0231a 100644
    if (!obj.no_cache() && !tlut.no_cache()) {
      store_cached_texture(obj, handle, tlut.tlutObjId, tlut.tlutDataVersion);
    }
+@@ -778,6 +856,10 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   }
+   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
+     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
++    if (!g_gxState.dualTexTrans) {
++      config.shaderConfig.tcgs[i].postMtx = GX_PTIDENTITY;
++      config.shaderConfig.tcgs[i].normalize = false;
++    }
+   }
+   if (g_gxState.alphaCompare) {
+     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+diff --git a/GXRuntime/graphics/aurora/lib/gx/gx.hpp b/GXRuntime/graphics/aurora/lib/gx/gx.hpp
+index 5e5d458..916cee7 100644
+--- a/GXRuntime/graphics/aurora/lib/gx/gx.hpp
++++ b/GXRuntime/graphics/aurora/lib/gx/gx.hpp
+@@ -380,6 +380,10 @@ struct GXState {
+   u8 numIndStages = 0;
+   u8 numTevStages = 0;
+   u8 numTexGens = 0;
++  // XF dual texture transform (0x1012): post-transform matrices and
++  // normalization only apply while it is set. Aurora's own GX API never
++  // writes it, so it stays on unless a retail stream clears it.
++  bool dualTexTrans = true;
+   bool stateDirty = true;
+   std::array<u32, 0x100> bpRegCache = [] {
+     std::array<u32, 0x100> regs{};
+@@ -497,6 +501,8 @@ struct ShaderInfo {
+ };
+ struct BindGroupRanges {
+   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
++
++  bool operator==(const BindGroupRanges& rhs) const = default;
+ };
+ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
+ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
 diff --git a/GXRuntime/graphics/aurora/lib/gx/pipeline.cpp b/GXRuntime/graphics/aurora/lib/gx/pipeline.cpp
 index 41a1742..01beb58 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/pipeline.cpp
@@ -551,7 +873,7 @@ index 41a1742..01beb58 100644
  }
  } // namespace aurora::gx
 diff --git a/GXRuntime/graphics/aurora/lib/gx/pipeline.hpp b/GXRuntime/graphics/aurora/lib/gx/pipeline.hpp
-index 9f5a806..bee768d 100644
+index 9f5a806..6c9323c 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/pipeline.hpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/pipeline.hpp
 @@ -12,12 +12,13 @@ struct DrawData {
@@ -565,7 +887,7 @@ index 9f5a806..bee768d 100644
  };
  
 -constexpr uint32_t GXPipelineConfigVersion = 13;
-+constexpr uint32_t GXPipelineConfigVersion = 14;
++constexpr uint32_t GXPipelineConfigVersion = 16;
  struct PipelineConfig {
    uint32_t version = GXPipelineConfigVersion;
    uint32_t msaaSamples = 1;
@@ -583,10 +905,18 @@ index 0177d18..34d689e 100644
  
  bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
 diff --git a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp b/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
-index da10f50..42218e0 100644
+index da10f50..eb9dd10 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
-@@ -32,6 +32,23 @@ void clear_guest_address_resolver();
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <vector>
+ 
+ struct GXTexObj_;
+ struct GXTlutObj_;
+@@ -32,6 +33,28 @@ void clear_guest_address_resolver();
  bool resolve_guest_address(std::uint32_t address, std::uint32_t size, AddressSpace space, ResourceKind resource,
                             const void** data, std::uint32_t* available);
  
@@ -607,11 +937,16 @@ index da10f50..42218e0 100644
 +std::uint32_t process_stream(const std::uint8_t* data, std::uint32_t size, StreamEvent* event,
 +                             std::uint32_t* value);
 +
++// The last value written to every GX register, as big-endian FIFO packets that
++// bring the decoder back to that state when processed (a savestate restore).
++// Call only while no stream is being processed.
++std::vector<std::uint8_t> register_stream();
++
  std::uint32_t texture_byte_size(const GXTexObj_& obj) noexcept;
  bool resolve_texture_data(GXTexObj_& obj) noexcept;
  bool resolve_texture_tlut(std::uint32_t textureSlot, GXTlutObj_* out) noexcept;
 diff --git a/GXRuntime/graphics/aurora/lib/gx/shader.cpp b/GXRuntime/graphics/aurora/lib/gx/shader.cpp
-index 3e34858..1ba5881 100644
+index 3e34858..1bf0d90 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/shader.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/shader.cpp
 @@ -123,15 +123,13 @@ static std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const Shade
@@ -692,7 +1027,23 @@ index 3e34858..1ba5881 100644
    }
    vtxXfrAttrsPre += fmt::format(
        "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
-@@ -1472,7 +1478,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+@@ -1198,10 +1204,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, vtx_attr(config, GX_VA_POS));
+     } else if (tcg.src == GX_TG_NRM) {
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, vtx_attr(config, GX_VA_NRM));
+-    } else if (tcg.src == GX_TG_COLOR0) {
+-      vtxXfrAttrs += fmt::format("\n    var tc{} = {};", i, vtx_attr(config, GX_VA_CLR0));
+-    } else if (tcg.src == GX_TG_COLOR1) {
+-      vtxXfrAttrs += fmt::format("\n    var tc{} = {};", i, vtx_attr(config, GX_VA_CLR1));
++    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
++      // XF texgen sees the channel after lighting, not the vertex color
++      // (Dolphin does the same); shader_info marks the channel as computed.
++      static_assert(!UsePerPixelLighting, "color texgen needs per-vertex channel colors");
++      vtxXfrAttrs += fmt::format("\n    var tc{} = out.cc{};", i, tcg.src - GX_TG_COLOR0);
+     } else if (tcg.src == GX_TG_BINRM) {
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::B));
+     } else if (tcg.src == GX_TG_TANGENT) {
+@@ -1472,7 +1479,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
        continue;
      }
  
@@ -706,7 +1057,7 @@ index 3e34858..1ba5881 100644
      if (uvIn.empty()) {
        // No indirect texturing
 diff --git a/GXRuntime/graphics/aurora/lib/gx/shader_info.cpp b/GXRuntime/graphics/aurora/lib/gx/shader_info.cpp
-index bb9ddec..c49a471 100644
+index bb9ddec..934d633 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/shader_info.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/shader_info.cpp
 @@ -55,10 +55,11 @@ void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& in
@@ -741,7 +1092,18 @@ index bb9ddec..c49a471 100644
      break;
    case GX_CA_RASA:
      if (stage.channelId != GX_COLOR_NULL && stage.channelId != GX_COLOR_ZERO &&
-@@ -375,7 +377,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+@@ -266,6 +268,10 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+     if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
+       info.sampledTexCoords.set(tcg.embossSrc);
+       info.lightingEnabled = true;
++    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
++      // Color texgen (SRTG) reads the lit channel, so compute it even when no
++      // TEV stage rasterizes it (toon ramps).
++      info.sampledColorChannels.set(tcg.src - GX_TG_COLOR0);
+     }
+   }
+ 
+@@ -375,7 +381,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
    buf.clear();
    buf.reserve_extra(info.uniformSize);
  
@@ -752,7 +1114,7 @@ index bb9ddec..c49a471 100644
    buf.append(g_gxState.currentPnMtx);
    buf.append<f32>(g_gxState.renderViewport.width);
    buf.append<f32>(g_gxState.renderViewport.height);
-@@ -482,6 +486,19 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
+@@ -482,6 +490,19 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
      buf.append(texture_size_bias(tex));
    }
    g_gxState.stateDirty = false;
@@ -829,7 +1191,7 @@ index 37fb564..776089f 100644
      dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
      dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
 diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
-index 0de434b..fb0fcb0 100644
+index 0de434b..d765d37 100644
 --- a/Source/Core/Core/HW/GPFifo.cpp
 +++ b/Source/Core/Core/HW/GPFifo.cpp
 @@ -90,6 +90,17 @@ void GPFifoManager::UpdateGatherPipe()
@@ -850,24 +1212,53 @@ index 0de434b..fb0fcb0 100644
    for (processed = 0; pipe_count >= GATHER_PIPE_SIZE; processed += GATHER_PIPE_SIZE)
    {
      // copy the GatherPipe
-@@ -111,6 +122,12 @@ void GPFifoManager::UpdateGatherPipe()
+@@ -111,6 +122,32 @@ void GPFifoManager::UpdateGatherPipe()
    SetGatherPipeCount(pipe_count);
  }
  
-+void GPFifoManager::SetBurstSink(BurstSink sink, void* user)
++void GPFifoManager::SetBurstSink(BurstSink sink, BurstFlush flush, BurstState state, void* user)
 +{
 +  m_burst_sink = sink;
++  m_burst_flush = flush;
++  m_burst_state = state;
 +  m_burst_sink_user = user;
++}
++
++void GPFifoManager::FlushBurstSink()
++{
++  if (m_burst_flush)
++    m_burst_flush(m_burst_sink_user);
++}
++
++void GPFifoManager::DoBurstSinkState(PointerWrap& p)
++{
++  // The sink decodes GX commands itself, so the emulated GPU state saved
++  // elsewhere never saw them.
++  std::vector<u8> state;
++  if (!p.IsReadMode() && m_burst_state)
++    m_burst_state(&state, false, m_burst_sink_user);
++  p.Do(state);
++  if (p.IsReadMode() && m_burst_state)
++    m_burst_state(&state, true, m_burst_sink_user);
 +}
 +
  void GPFifoManager::FastCheckGatherPipe()
  {
    if (GetGatherPipeCount() >= GATHER_PIPE_SIZE)
 diff --git a/Source/Core/Core/HW/GPFifo.h b/Source/Core/Core/HW/GPFifo.h
-index 006c8ed..7915ca5 100644
+index 006c8ed..b96ba59 100644
 --- a/Source/Core/Core/HW/GPFifo.h
 +++ b/Source/Core/Core/HW/GPFifo.h
-@@ -52,6 +52,12 @@ public:
+@@ -3,6 +3,8 @@
+ 
+ #pragma once
+ 
++#include <vector>
++
+ #include "Common/CommonTypes.h"
+ 
+ class PointerWrap;
+@@ -52,6 +54,19 @@ public:
    void FastWrite32(u32 value);
    void FastWrite64(u64 value);
  
@@ -875,21 +1266,55 @@ index 006c8ed..7915ca5 100644
 +  // gather-pipe bursts (whole 32-byte blocks, big-endian) go to the sink on
 +  // the CPU thread instead of the emulated FIFO and command processor.
 +  using BurstSink = void (*)(const u8* data, size_t size, void* user);
-+  void SetBurstSink(BurstSink sink, void* user);
++  // Returns once the sink has finished with everything it was given, so
++  // markers it reports (draw done, tokens) are part of saved state.
++  using BurstFlush = void (*)(void* user);
++  // Saves the sink's own GX state into state, or restores it from there.
++  using BurstState = void (*)(std::vector<u8>* state, bool load, void* user);
++  void SetBurstSink(BurstSink sink, BurstFlush flush, BurstState state, void* user);
++  void FlushBurstSink();
++  void DoBurstSinkState(PointerWrap& p);
 +
  private:
    size_t GetGatherPipeCount();
    void SetGatherPipeCount(size_t size);
-@@ -59,6 +65,9 @@ private:
+@@ -59,6 +74,11 @@ private:
    // More room for the fastmodes
    alignas(GATHER_PIPE_SIZE) u8 m_gather_pipe[GATHER_PIPE_EXTRA_SIZE]{};
  
 +  BurstSink m_burst_sink = nullptr;
++  BurstFlush m_burst_flush = nullptr;
++  BurstState m_burst_state = nullptr;
 +  void* m_burst_sink_user = nullptr;
 +
    Core::System& m_system;
  };
  
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+index 4f8d2c0..c043456 100644
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -37,6 +37,7 @@
+ #include "Core/Core.h"
+ #include "Core/CoreTiming.h"
+ #include "Core/Cheats/GeckoCode.h"
++#include "Core/HW/GPFifo.h"
+ #include "Core/HW/HW.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/Wiimote.h"
+@@ -127,6 +128,12 @@ static void DoState(Core::System& system, PointerWrap& p)
+   system.GetMovie().DoState(p);
+   p.DoMarker("Movie");
+ 
++  // A native GX sink renders on its own thread; let it report every marker it
++  // was sent before the video and timing state below is saved or replaced.
++  system.GetGPFifo().FlushBurstSink();
++  system.GetGPFifo().DoBurstSinkState(p);
++  p.DoMarker("GPFifoBurstSink");
++
+   // Begin with video backend, so that it gets a chance to clear its caches and writeback modified
+   // things to RAM
+   g_video_backend->DoState(p);
 diff --git a/Source/Core/VideoCommon/CommandProcessor.h b/Source/Core/VideoCommon/CommandProcessor.h
 index 976592c..4764951 100644
 --- a/Source/Core/VideoCommon/CommandProcessor.h
