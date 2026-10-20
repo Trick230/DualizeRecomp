@@ -11,6 +11,20 @@ index c4b4bf2..aef7fac 100644
  elseif (APPLE)
      target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
  endif ()
+diff --git a/GXRuntime/graphics/aurora/include/aurora/aurora.h b/GXRuntime/graphics/aurora/include/aurora/aurora.h
+index 9d22cc6..3ff9aa3 100644
+--- a/GXRuntime/graphics/aurora/include/aurora/aurora.h
++++ b/GXRuntime/graphics/aurora/include/aurora/aurora.h
+@@ -93,6 +93,9 @@ typedef struct {
+   bool pauseOnFocusLost;
+   bool allowTextureDumps;
+   bool allowCpuAdapter;
++  // The host reads controllers itself: leave SDL's joystick, gamepad, haptic
++  // and sensor subsystems uninitialized, so event polling never scans devices.
++  bool disableInput;
+   int32_t windowPosX;
+   int32_t windowPosY;
+   uint32_t windowWidth;
 diff --git a/GXRuntime/graphics/aurora/include/aurora/gfx.h b/GXRuntime/graphics/aurora/include/aurora/gfx.h
 index 70fa2c1..2a8ba77 100644
 --- a/GXRuntime/graphics/aurora/include/aurora/gfx.h
@@ -23,6 +37,21 @@ index 70fa2c1..2a8ba77 100644
    uint32_t lastVertSize;
    uint32_t lastUniformSize;
    uint32_t lastIndexSize;
+diff --git a/GXRuntime/graphics/aurora/lib/aurora.cpp b/GXRuntime/graphics/aurora/lib/aurora.cpp
+index 8843b7b..a521c0b 100644
+--- a/GXRuntime/graphics/aurora/lib/aurora.cpp
++++ b/GXRuntime/graphics/aurora/lib/aurora.cpp
+@@ -213,7 +213,9 @@ const AuroraEvent* update() noexcept {
+   ZoneScoped;
+   if (g_initialFrame) {
+     g_initialFrame = false;
+-    input::initialize();
++    if (!g_config.disableInput) {
++      input::initialize();
++    }
+   }
+   return window::poll_events();
+ }
 diff --git a/GXRuntime/graphics/aurora/lib/gfx/common.cpp b/GXRuntime/graphics/aurora/lib/gfx/common.cpp
 index 4c67258..2ebb0ea 100644
 --- a/GXRuntime/graphics/aurora/lib/gfx/common.cpp
@@ -137,7 +166,7 @@ index 45a8ba8..58f6fa0 100644
    u32 format() const noexcept { return mFormat != aurora::gfx::InvalidTextureFormat ? mFormat : raw_format(); }
    GXTexWrapMode wrap_s() const noexcept { return static_cast<GXTexWrapMode>(get_bits(mode0, 2, 0)); }
 diff --git a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
-index 5b176e7..d09ea74 100644
+index 5b176e7..6693c43 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
 @@ -14,9 +14,11 @@
@@ -304,7 +333,7 @@ index 5b176e7..d09ea74 100644
            });
          }
          break;
-@@ -1718,6 +1771,34 @@ static void handle_draw_overrun [[noreturn]] (u32 totalVtxBytes, const u8* data,
+@@ -1718,9 +1771,52 @@ static void handle_draw_overrun [[noreturn]] (u32 totalVtxBytes, const u8* data,
    FATAL("draw vertex data overrun: need {} bytes at pos {}, have {}", totalVtxBytes, pos, size);
  }
  
@@ -336,10 +365,54 @@ index 5b176e7..d09ea74 100644
 +  return ranges;
 +}
 +
++// Where each indexed attribute's index sits in a vertex of lastVtxFmt, so a
++// draw finds the array extents it reads without walking every attribute of
++// every vertex. Rebuilt with lastVtxSize.
++struct IndexedAttr {
++  u8 attr;
++  u8 offset;
++  u8 count; // 3 for NBT3 normals
++  bool index16;
++};
++static struct {
++  u32 count = 0;
++  std::array<IndexedAttr, GX_VA_TEX7 - GX_VA_POS + 1> attrs;
++} s_indexedLayout;
++
  // Draw command handler - parses vertices inline and caches results
  static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
    u32 vtxSize = 0;
-@@ -1747,15 +1828,6 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
++  s_indexedLayout.count = 0;
+   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+     switch (g_gxState.vtxDesc[i]) {
+@@ -1733,12 +1829,21 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
+       break;
+     }
+     case GX_INDEX8:
+-      vtxSize += (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3 : 1;
+-      break;
+-    case GX_INDEX16:
+-      vtxSize += (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 6 : 2;
++    case GX_INDEX16: {
++      const bool index16 = g_gxState.vtxDesc[i] == GX_INDEX16;
++      const u32 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3 : 1;
++      if (i >= GX_VA_POS) {
++        s_indexedLayout.attrs[s_indexedLayout.count++] = {
++            .attr = static_cast<u8>(i),
++            .offset = static_cast<u8>(vtxSize),
++            .count = static_cast<u8>(count),
++            .index16 = index16,
++        };
++      }
++      vtxSize += count * (index16 ? 2 : 1);
+       break;
+     }
++    }
+   }
+ 
+   g_gxState.lastVtxFmt = fmt;
+@@ -1747,61 +1852,32 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
    return vtxSize;
  }
  
@@ -352,16 +425,85 @@ index 5b176e7..d09ea74 100644
 -  return false;
 -}
 -
- static void calculate_indexed_array_sizes(GXVtxFmt fmt, u16 vtxCount, const u8* vertices, bool bigEndian,
+-static void calculate_indexed_array_sizes(GXVtxFmt fmt, u16 vtxCount, const u8* vertices, bool bigEndian,
++// The bytes of each indexed array that the vertices of a lastVtxFmt draw read.
++static void calculate_indexed_array_sizes(u16 vtxCount, const u8* vertices, bool bigEndian,
                                            std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
    arraySizes.fill(0);
-@@ -1828,9 +1900,45 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
-   std::array<u32, GX_VA_MAX_ATTR> arraySizes;
-   calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
+-  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+-  const u8* cursor = vertices;
+-
+-  for (u16 v = 0; v < vtxCount; ++v) {
+-    for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+-      const auto attr = static_cast<GXAttr>(i);
+-      switch (g_gxState.vtxDesc[i]) {
+-      case GX_NONE:
+-        break;
+-      case GX_DIRECT:
+-        cursor += comp_type_size(attr, vtxFmt.attrs[i].type) * comp_cnt_count(attr, vtxFmt.attrs[i].cnt);
+-        break;
+-      case GX_INDEX8: {
+-        const u32 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3u : 1u;
+-        for (u32 n = 0; n < count; ++n) {
+-          const u32 index = *cursor++;
+-          if (i >= GX_VA_POS && i <= GX_VA_TEX7) {
+-            const auto& array = g_gxState.arrays[i];
+-            const u32 required = (index + 1u) * array.stride;
+-            if (required > arraySizes[i]) {
+-              arraySizes[i] = required;
+-            }
+-          }
++  if (vtxCount == 0) {
++    return;
++  }
++  const u32 vtxSize = g_gxState.lastVtxSize;
++  for (u32 a = 0; a < s_indexedLayout.count; ++a) {
++    const auto& layout = s_indexedLayout.attrs[a];
++    const u8* cursor = vertices + layout.offset;
++    u32 maxIndex = 0;
++    if (layout.index16) {
++      for (u16 v = 0; v < vtxCount; ++v, cursor += vtxSize) {
++        for (u32 n = 0; n < layout.count; ++n) {
++          maxIndex = std::max<u32>(maxIndex, read_u16(cursor + n * 2, bigEndian));
+         }
+-        break;
+       }
+-      case GX_INDEX16: {
+-        const u32 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3u : 1u;
+-        for (u32 n = 0; n < count; ++n) {
+-          const u32 index = read_u16(cursor, bigEndian);
+-          cursor += 2;
+-          if (i >= GX_VA_POS && i <= GX_VA_TEX7) {
+-            const auto& array = g_gxState.arrays[i];
+-            const u32 required = (index + 1u) * array.stride;
+-            if (required > arraySizes[i]) {
+-              arraySizes[i] = required;
+-            }
+-          }
++    } else {
++      for (u16 v = 0; v < vtxCount; ++v, cursor += vtxSize) {
++        for (u32 n = 0; n < layout.count; ++n) {
++          maxIndex = std::max<u32>(maxIndex, cursor[n]);
+         }
+-        break;
+-      }
+       }
+     }
++    arraySizes[layout.attr] = (maxIndex + 1) * g_gxState.arrays[layout.attr].stride;
+   }
+ }
  
+@@ -1826,11 +1902,47 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
+     UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
+ 
+   std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+-  calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
+-
 -  auto* lastDraw = !g_gxState.stateDirty && !has_indexed_arrays() ? gfx::get_last_draw_command<DrawData>() : nullptr;
 -  const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
 -                        lastDraw->instanceCount == 1;
++  calculate_indexed_array_sizes(vtxCount, data + pos, bigEndian, arraySizes);
++
 +  // Merge into the previous draw when it was built from identical state,
 +  // including the vertex format and the array ranges its uniform block holds.
 +  DrawData* lastDraw = nullptr;
@@ -404,7 +546,7 @@ index 5b176e7..d09ea74 100644
  
    // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
    gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
-@@ -1904,6 +2012,31 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
+@@ -1904,6 +2016,31 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
    push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, arraySizes);
  }
  
@@ -436,7 +578,7 @@ index 5b176e7..d09ea74 100644
  static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                           u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
    // Build pipeline, bind groups, and push draw command
-@@ -1914,22 +2047,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+@@ -1914,22 +2051,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
      }
      auto& array = g_gxState.arrays[i];
      const u32 requiredSize = std::min(array.size, arraySizes[i]);
@@ -464,7 +606,7 @@ index 5b176e7..d09ea74 100644
    uint32_t instanceCount = 1;
    if (prim == GX_LINES) {
      instanceCount = vtxCount / 2;
-@@ -1938,14 +2063,44 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+@@ -1938,14 +2067,44 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
    } else if (prim == GX_POINTS) {
      instanceCount = vtxCount;
    }
@@ -510,7 +652,16 @@ index 5b176e7..d09ea74 100644
        .bindGroups = bindGroups,
        .dstAlpha = g_gxState.dstAlpha,
        .cullMode = g_gxState.cullMode,
-@@ -2203,3 +2358,167 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
+@@ -2181,7 +2340,7 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
+     const u32 totalVtxBytes = vtxCount * vtxSize;
+     CHECK(pos + totalVtxBytes <= size, "GX_AURORA_DRAW_INDEXED vertex data overrun");
+     std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+-    calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
++    calculate_indexed_array_sizes(vtxCount, data + pos, bigEndian, arraySizes);
+     const gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, 4);
+     pos += totalVtxBytes;
+     if (indexCount != 0) {
+@@ -2203,3 +2362,167 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
  }
  
  } // namespace aurora::gx::fifo
@@ -892,7 +1043,7 @@ index 9f5a806..6c9323c 100644
    uint32_t version = GXPipelineConfigVersion;
    uint32_t msaaSamples = 1;
 diff --git a/GXRuntime/graphics/aurora/lib/gx/recomp.cpp b/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
-index 0177d18..34d689e 100644
+index 0177d18..12d8f65 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
 +++ b/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
 @@ -11,7 +11,7 @@ ResolveGuestAddressFn g_resolve_guest_address = nullptr;
@@ -904,6 +1055,33 @@ index 0177d18..34d689e 100644
  }
  
  bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
+@@ -26,12 +26,14 @@ bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
+   }
+ }
+ 
+-std::uint32_t max_lod_for_buffer_size(const GXTexObj_& obj) noexcept {
++// GXGetTexBufferSize takes a level count; mode1 holds the highest LOD index,
++// so a mip-filtered texture clamped to LOD 0 still has its base level.
++std::uint32_t mip_levels_for_buffer_size(const GXTexObj_& obj) noexcept {
+   const auto lod = obj.max_lod();
+   if (!std::isfinite(lod) || lod <= 0.f) {
+-    return 0;
++    return 1;
+   }
+-  return std::min<std::uint32_t>(static_cast<std::uint32_t>(lod), 255u);
++  return std::min<std::uint32_t>(static_cast<std::uint32_t>(lod) + 1, 11u);
+ }
+ } // namespace
+ 
+@@ -67,7 +69,7 @@ std::uint32_t texture_byte_size(const GXTexObj_& obj) noexcept {
+   }
+   const bool mips = obj.has_mips() || retail_texture_has_mips(obj);
+   return GXGetTexBufferSize(static_cast<u16>(width), static_cast<u16>(height), obj.format(), mips ? GX_TRUE : GX_FALSE,
+-                            static_cast<u8>(mips ? max_lod_for_buffer_size(obj) : 0));
++                            static_cast<u8>(mips ? mip_levels_for_buffer_size(obj) : 0));
+ }
+ 
+ bool resolve_texture_data(GXTexObj_& obj) noexcept {
 diff --git a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp b/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
 index da10f50..eb9dd10 100644
 --- a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
