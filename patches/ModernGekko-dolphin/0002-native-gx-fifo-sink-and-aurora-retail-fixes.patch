@@ -1,0 +1,363 @@
+diff --git a/GXRuntime/graphics/aurora/cmake/aurora_core.cmake b/GXRuntime/graphics/aurora/cmake/aurora_core.cmake
+index c4b4bf2..aef7fac 100644
+--- a/GXRuntime/graphics/aurora/cmake/aurora_core.cmake
++++ b/GXRuntime/graphics/aurora/cmake/aurora_core.cmake
+@@ -22,7 +22,7 @@ endif ()
+ 
+ if (CMAKE_SYSTEM_NAME STREQUAL Windows)
+     # stuff for fetching system info.
+-    target_link_libraries(aurora_core PRIVATE wbemuuid.lib comsuppw.lib ntdll.lib DXGI.lib)
++    target_link_libraries(aurora_core PRIVATE wbemuuid ole32 oleaut32 ntdll dxgi)
+ elseif (APPLE)
+     target_sources(aurora_core PRIVATE lib/system_info_mac.mm)
+ endif ()
+diff --git a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
+index 5b176e7..41c2f3b 100644
+--- a/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
++++ b/GXRuntime/graphics/aurora/lib/gx/command_processor.cpp
+@@ -521,7 +521,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
+ // Helper to extract bit fields from a 32-bit register
+ inline static u32 bp_get(u32 reg, u32 size, u32 shift) { return reg >> shift & (1u << size) - 1; }
+ 
+-static u32 texture_physical_base(u32 reg) { return (reg & 0x001FFFFFu) << 5; }
++// 24-bit (address >> 5): Wii MEM2 lives at physical 0x10000000.
++static u32 texture_physical_base(u32 reg) { return (reg & 0x00FFFFFFu) << 5; }
+ 
+ static void mark_recomp_texture_metadata(GXTexObj_& slot) {
+   slot.data = nullptr;
+@@ -958,7 +959,8 @@ static void handle_bp(u32 value, bool bigEndian) {
+   case 0x52: {
+     const bool clear = bp_get(value, 1, 11) != 0;
+     if (bp_get(value, 1, 14) != 0) {
+-      Log.warn("STUB: display copy is not implemented");
++      // Display copy: the EFB is the presented image, so there is nothing to
++      // copy. Retail hosts end the frame on it (recomp::process_stream).
+     } else {
+       resolve_tex_copy_destination_from_bp(value);
+       if (g_gxState.texCopyDest != nullptr) {
+@@ -1597,13 +1599,21 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+           f32 oz = read_f32(xfData + 20, bigEndian);
+           f32 width = sx * 2.0f;
+           f32 height = -sy * 2.0f;
++          // The origin bias is the BP scissor offset (in 2-pixel units) when
++          // the stream sets one, as the retail SDK does (342); Aurora's own
++          // GX layer never writes it and encodes with 340.
++          const u32 scissorOffset = g_gxState.bpRegCache[0x59];
++          const f32 originX = scissorOffset != 0 ? static_cast<f32>(bp_get(scissorOffset, 10, 0) * 2) : 340.0f;
++          const f32 originY = scissorOffset != 0 ? static_cast<f32>(bp_get(scissorOffset, 10, 10) * 2) : 340.0f;
++          // farZ * 16777215 rounds up to 2^24 in f32; WebGPU rejects depth
++          // ranges outside [0, 1] and drops the whole frame.
+           set_logical_viewport({
+-              .left = ox - 340.0f - width / 2.0f,
+-              .top = oy - 340.0f - height / 2.0f,
++              .left = ox - originX - width / 2.0f,
++              .top = oy - originY - height / 2.0f,
+               .width = width,
+               .height = height,
+-              .znear = (oz - sz) / 1.6777215e7f,
+-              .zfar = oz / 1.6777215e7f,
++              .znear = std::clamp((oz - sz) / 1.6777215e7f, 0.0f, 1.0f),
++              .zfar = std::clamp(oz / 1.6777215e7f, 0.0f, 1.0f),
+           });
+         }
+         break;
+@@ -2203,3 +2213,108 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
+ }
+ 
+ } // namespace aurora::gx::fifo
++
++namespace aurora::gx::recomp {
++namespace {
++using namespace fifo;
++
++constexpr u8 BP_PE_DONE = 0x45;
++constexpr u8 BP_PE_TOKEN = 0x47;
++constexpr u8 BP_PE_TOKEN_INT = 0x48;
++constexpr u8 BP_COPY_TRIGGER = 0x52;
++
++// Bytes in the packet starting at data[0], or 0 while it is incomplete.
++u32 packet_size(const u8* data, u32 size) {
++  const u8 cmd = data[0];
++  u32 need;
++  switch (cmd & CP_OPCODE_MASK) {
++  case CP_CMD_LOAD_BP_REG:
++    need = 5;
++    break;
++  case CP_CMD_LOAD_CP_REG:
++    need = 6;
++    break;
++  case CP_CMD_LOAD_XF_REG:
++    if (size < 5) {
++      return 0;
++    }
++    need = 5 + (read_u16(data + 1, true) + 1u) * 4u; // same count field as handle_xf
++    break;
++  case CP_CMD_LOAD_INDX_A:
++  case CP_CMD_LOAD_INDX_B:
++  case CP_CMD_LOAD_INDX_C:
++  case CP_CMD_LOAD_INDX_D:
++    need = 5;
++    break;
++  case CP_CMD_CALL_DL:
++    need = 9;
++    break;
++  default: {
++    if (cmd < 0x80) {
++      return 1; // NOP, INVL_VC or garbage; process_stream sorts them out
++    }
++    if (size < 3) {
++      return 0;
++    }
++    const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
++    const u32 vtxSize = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
++    need = 3 + read_u16(data + 1, true) * vtxSize;
++    break;
++  }
++  }
++  return need <= size ? need : 0;
++}
++
++StreamEvent bp_event(u32 value) {
++  switch (value >> 24) {
++  case BP_PE_DONE:
++    return StreamEvent::DrawDone;
++  case BP_PE_TOKEN:
++    return StreamEvent::Token;
++  case BP_PE_TOKEN_INT:
++    return StreamEvent::TokenInt;
++  case BP_COPY_TRIGGER:
++    return bp_get(value, 1, 14) != 0 ? StreamEvent::DisplayCopy : StreamEvent::None;
++  default:
++    return StreamEvent::None;
++  }
++}
++} // namespace
++
++u32 process_stream(const u8* data, u32 size, StreamEvent* event, u32* value) {
++  ZoneScoped;
++  *event = StreamEvent::None;
++  u32 pos = 0;
++  while (pos < size) {
++    const u8 cmd = data[pos];
++    if (cmd == CP_CMD_NOP || cmd == CP_CMD_INVAL_VTX) {
++      ++pos; // GXFlush pads every burst with NOPs; skip them without dispatching
++      continue;
++    }
++    const u32 len = packet_size(data + pos, size - pos);
++    if (len == 0) {
++      break;
++    }
++    if (cmd < 0x80 && len == 1) {
++      static bool warned = false;
++      if (!warned) {
++        warned = true;
++        Log.warn("Skipping unknown FIFO opcode 0x{:02X}", cmd);
++      }
++      ++pos;
++      continue;
++    }
++    process(data + pos, len, true);
++    pos += len;
++    if ((cmd & CP_OPCODE_MASK) == CP_CMD_LOAD_BP_REG) {
++      const u32 bp = read_u32(data + pos - 4, true);
++      *event = bp_event(bp);
++      if (*event != StreamEvent::None) {
++        *value = bp & 0xFFFF;
++        break;
++      }
++    }
++  }
++  return pos;
++}
++} // namespace aurora::gx::recomp
+diff --git a/GXRuntime/graphics/aurora/lib/gx/recomp.cpp b/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
+index 0177d18..34d689e 100644
+--- a/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
++++ b/GXRuntime/graphics/aurora/lib/gx/recomp.cpp
+@@ -11,7 +11,7 @@ ResolveGuestAddressFn g_resolve_guest_address = nullptr;
+ void* g_resolve_guest_user = nullptr;
+ 
+ std::uint32_t texture_physical_base(std::uint32_t reg) noexcept {
+-  return (reg & 0x001FFFFFu) << 5;
++  return (reg & 0x00FFFFFFu) << 5;  // 24-bit: reaches Wii MEM2
+ }
+ 
+ bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
+diff --git a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp b/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
+index da10f50..42218e0 100644
+--- a/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
++++ b/GXRuntime/graphics/aurora/lib/gx/recomp.hpp
+@@ -32,6 +32,23 @@ void clear_guest_address_resolver();
+ bool resolve_guest_address(std::uint32_t address, std::uint32_t size, AddressSpace space, ResourceKind resource,
+                            const void** data, std::uint32_t* available);
+ 
++// A retail FIFO packet the host has to act on, reported by process_stream.
++enum class StreamEvent : std::uint32_t {
++  None = 0,
++  DrawDone,     // BP PE_DONE (GXSetDrawDone)
++  Token,        // BP PE_TOKEN (GXSetDrawSync without interrupt), value = token
++  TokenInt,     // BP PE_TOKEN_INT, value = token
++  DisplayCopy,  // BP copy trigger to the XFB (GXCopyDisp); the frame is done
++};
++
++// Processes the complete packets at the front of a big-endian retail FIFO
++// stream, as the hardware command processor would, and returns how many bytes
++// it consumed; whatever is left is the start of a packet still being written.
++// It stops right after a packet that raises a StreamEvent so the host can
++// signal the guest in order.
++std::uint32_t process_stream(const std::uint8_t* data, std::uint32_t size, StreamEvent* event,
++                             std::uint32_t* value);
++
+ std::uint32_t texture_byte_size(const GXTexObj_& obj) noexcept;
+ bool resolve_texture_data(GXTexObj_& obj) noexcept;
+ bool resolve_texture_tlut(std::uint32_t textureSlot, GXTlutObj_* out) noexcept;
+diff --git a/GXRuntime/graphics/aurora/lib/gx/shader.cpp b/GXRuntime/graphics/aurora/lib/gx/shader.cpp
+index 3e34858..2ddc8b5 100644
+--- a/GXRuntime/graphics/aurora/lib/gx/shader.cpp
++++ b/GXRuntime/graphics/aurora/lib/gx/shader.cpp
+@@ -1019,10 +1019,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
+         "\n    let clip_base = select(clip_a, clip_b, use_b);"
+         "\n    out.pos = vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw);";
+   }
++  // GX clips to -w <= z <= 0. Retail 2D passes put quads exactly on the near
++  // plane (s16 z = -1 with the SDK ortho matrix), where rounding in the
++  // projection drops them; pull z in by an ulp-sized margin as Dolphin does.
+   if constexpr (UseReversedZ) {
+-    vtxXfrAttrsPre += "\n    out.pos.z = -out.pos.z;";
++    vtxXfrAttrsPre += "\n    out.pos.z = -out.pos.z * (1.0 - 1e-7);";
+   } else {
+-    vtxXfrAttrsPre += "\n    out.pos.z += out.pos.w;";
++    vtxXfrAttrsPre += "\n    out.pos.z = out.pos.z * (1.0 - 1e-7) + out.pos.w;";
+   }
+   vtxXfrAttrsPre += fmt::format(
+       "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+diff --git a/GXRuntime/graphics/aurora/lib/system_info.cpp b/GXRuntime/graphics/aurora/lib/system_info.cpp
+index 2c96d86..2113a59 100644
+--- a/GXRuntime/graphics/aurora/lib/system_info.cpp
++++ b/GXRuntime/graphics/aurora/lib/system_info.cpp
+@@ -6,7 +6,6 @@
+ #include <windows.h>
+ #include <combaseapi.h>
+ #include <Wbemidl.h>
+-#include <comutil.h>
+ #include <dxgi.h>
+ #include <wrl/client.h>
+ 
+@@ -130,7 +129,14 @@ std::string GetCpuModel() {
+   // Connect to the root\cimv2 namespace with
+   // the current user and obtain pointer pSvc
+   // to make IWbemServices calls.
+-  hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), // Object path of WMI namespace
++  // Plain BSTRs (not comutil's _bstr_t) so MinGW builds need no comsuppw.
++  struct Bstr {
++    BSTR str;
++    explicit Bstr(const wchar_t* text) : str(SysAllocString(text)) {}
++    ~Bstr() { SysFreeString(str); }
++  };
++  const Bstr nameSpace{L"ROOT\\CIMV2"};
++  hres = pLoc->ConnectServer(nameSpace.str,           // Object path of WMI namespace
+                              NULL,                    // User name. NULL = current user
+                              NULL,                    // User password. NULL = current
+                              0,                       // Locale. NULL indicates current
+@@ -160,7 +166,9 @@ std::string GetCpuModel() {
+   }
+ 
+   ComPtr<IEnumWbemClassObject> pEnumerator;
+-  hres = pSvc->ExecQuery(bstr_t(L"WQL"), bstr_t(L"select Name from Win32_Processor"),
++  const Bstr language{L"WQL"};
++  const Bstr query{L"select Name from Win32_Processor"};
++  hres = pSvc->ExecQuery(language.str, query.str,
+                          WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+   if (FAILED(hres)) {
+     Log.error("ExecQuery failed");
+diff --git a/GXRuntime/graphics/aurora/lib/webgpu/gpu.cpp b/GXRuntime/graphics/aurora/lib/webgpu/gpu.cpp
+index 37fb564..776089f 100644
+--- a/GXRuntime/graphics/aurora/lib/webgpu/gpu.cpp
++++ b/GXRuntime/graphics/aurora/lib/webgpu/gpu.cpp
+@@ -760,7 +760,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         .requiredFeatureCount = requiredInstanceFeatures.size(),
+         .requiredFeatures = requiredInstanceFeatures.data(),
+     };
+-#ifdef WEBGPU_DAWN
++    // DawnInstanceDescriptor is C++ API whose constructor lives in the DLL; a
++    // MinGW build cannot link against the MSVC-built prebuilt. Its defaults
++    // (validation off) match, and device-level logging is set up below.
++#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
+     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+     dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
+diff --git a/Source/Core/Core/HW/GPFifo.cpp b/Source/Core/Core/HW/GPFifo.cpp
+index 0de434b..fb0fcb0 100644
+--- a/Source/Core/Core/HW/GPFifo.cpp
++++ b/Source/Core/Core/HW/GPFifo.cpp
+@@ -90,6 +90,17 @@ void GPFifoManager::UpdateGatherPipe()
+ 
+   size_t pipe_count = GetGatherPipeCount();
+   size_t processed;
++
++  if (m_burst_sink && system.GetCommandProcessor().IsGPLinked())
++  {
++    processed = pipe_count & ~size_t{GATHER_PIPE_SIZE - 1};
++    m_burst_sink(m_gather_pipe, processed, m_burst_sink_user);
++    pipe_count -= processed;
++    memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
++    SetGatherPipeCount(pipe_count);
++    return;
++  }
++
+   for (processed = 0; pipe_count >= GATHER_PIPE_SIZE; processed += GATHER_PIPE_SIZE)
+   {
+     // copy the GatherPipe
+@@ -111,6 +122,12 @@ void GPFifoManager::UpdateGatherPipe()
+   SetGatherPipeCount(pipe_count);
+ }
+ 
++void GPFifoManager::SetBurstSink(BurstSink sink, void* user)
++{
++  m_burst_sink = sink;
++  m_burst_sink_user = user;
++}
++
+ void GPFifoManager::FastCheckGatherPipe()
+ {
+   if (GetGatherPipeCount() >= GATHER_PIPE_SIZE)
+diff --git a/Source/Core/Core/HW/GPFifo.h b/Source/Core/Core/HW/GPFifo.h
+index 006c8ed..7915ca5 100644
+--- a/Source/Core/Core/HW/GPFifo.h
++++ b/Source/Core/Core/HW/GPFifo.h
+@@ -52,6 +52,12 @@ public:
+   void FastWrite32(u32 value);
+   void FastWrite64(u64 value);
+ 
++  // Native GX: while a sink is set and the GPU is linked to the CPU FIFO,
++  // gather-pipe bursts (whole 32-byte blocks, big-endian) go to the sink on
++  // the CPU thread instead of the emulated FIFO and command processor.
++  using BurstSink = void (*)(const u8* data, size_t size, void* user);
++  void SetBurstSink(BurstSink sink, void* user);
++
+ private:
+   size_t GetGatherPipeCount();
+   void SetGatherPipeCount(size_t size);
+@@ -59,6 +65,9 @@ private:
+   // More room for the fastmodes
+   alignas(GATHER_PIPE_SIZE) u8 m_gather_pipe[GATHER_PIPE_EXTRA_SIZE]{};
+ 
++  BurstSink m_burst_sink = nullptr;
++  void* m_burst_sink_user = nullptr;
++
+   Core::System& m_system;
+ };
+ 
+diff --git a/Source/Core/VideoCommon/CommandProcessor.h b/Source/Core/VideoCommon/CommandProcessor.h
+index 976592c..4764951 100644
+--- a/Source/Core/VideoCommon/CommandProcessor.h
++++ b/Source/Core/VideoCommon/CommandProcessor.h
+@@ -176,6 +176,8 @@ public:
+   void UpdateInterruptsFromVideoBackend(u64 userdata);
+ 
+   bool IsInterruptWaiting() const;
++  // False while the CPU FIFO is redirected away from the GPU (display list recording).
++  bool IsGPLinked() const { return m_cp_ctrl_reg.GPLinkEnable; }
+ 
+   void SetCpClearRegister();
+   void SetCpControlRegister();
