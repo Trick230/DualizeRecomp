@@ -52,10 +52,10 @@ index c0548a0..4ddda40 100644
              vendor/dolphin/Source/Core/DolphinNoGUI/PlatformX11.cpp)
 diff --git a/src/gpu/native_gx_host.cpp b/src/gpu/native_gx_host.cpp
 new file mode 100644
-index 0000000..098a107
+index 0000000..098cbe4
 --- /dev/null
 +++ b/src/gpu/native_gx_host.cpp
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,114 @@
 +#include "native_gx_host.hpp"
 +
 +#include "Core/HW/GPFifo.h"
@@ -79,7 +79,7 @@ index 0000000..098a107
 +constexpr u32 EXRAM_BASE = 0x10000000;
 +
 +// Cached and uncached virtual mirrors both map onto physical MEM1/MEM2.
-+bool Resolve(void* user, uint32_t address, uint32_t size, const void** data)
++bool Resolve(void* user, uint32_t address, uint32_t size, const void** data, uint32_t* available)
 +{
 +  auto& memory = static_cast<Core::System*>(user)->GetMemory();
 +  const u32 physical = address & PHYSICAL_MASK;
@@ -106,6 +106,7 @@ index 0000000..098a107
 +  if (size > limit - offset)
 +    return false;
 +  *data = base + offset;
++  *available = limit - offset;
 +  return true;
 +}
 +
@@ -239,10 +240,10 @@ index 0000000..7d5a789
 +aurora_copy_runtime_dlls(moderngekko_native_gx)
 diff --git a/src/native_gx/native_gx.cpp b/src/native_gx/native_gx.cpp
 new file mode 100644
-index 0000000..46105cc
+index 0000000..3954fac
 --- /dev/null
 +++ b/src/native_gx/native_gx.cpp
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,331 @@
 +#define NATIVE_GX_BUILD
 +#include "native_gx.h"
 +
@@ -251,15 +252,15 @@ index 0000000..46105cc
 +#include <aurora/gfx.h>
 +#include <gx/recomp.hpp>
 +
++#include <SDL3/SDL_mutex.h>
++
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
-+#include <condition_variable>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +#include <memory>
-+#include <mutex>
 +#include <thread>
 +#include <string>
 +#include <vector>
@@ -281,8 +282,9 @@ index 0000000..46105cc
 +  // Set by the consumer before it sleeps, so the producer only pays for a
 +  // wake-up when one is needed.
 +  alignas(64) std::atomic<bool> consumer_waiting{false};
-+  std::mutex mutex;
-+  std::condition_variable wake;
++  // SDL's semaphore is native on every platform; winpthreads' timed condvar
++  // wait was seen sleeping far past its timeout.
++  SDL_Semaphore* wake = nullptr;
 +};
 +
 +NativeGxHost s_host;
@@ -304,7 +306,14 @@ index 0000000..46105cc
 +  uint32_t draw_dones = 0;
 +  uint32_t tokens = 0;
 +  uint32_t draws = 0;
++  uint32_t dropped = 0;  // draws that did not fit Aurora's fixed per-frame buffers
 +  uint32_t stalled_begins = 0;
++  uint32_t peak_uniforms = 0;  // largest per-frame use of Aurora's fixed buffer budgets
++  uint32_t peak_vertices = 0;
++  uint32_t peak_storage = 0;
++  // Render-thread time split: decoding the FIFO into Aurora draws, ending
++  // frames (WebGPU encode, submit, present) and idling for guest data.
++  std::chrono::steady_clock::duration decode{}, end_frame{}, idle{};
 +
 +  void Report()
 +  {
@@ -312,12 +321,20 @@ index 0000000..46105cc
 +    if (!enabled || now - last < std::chrono::seconds(1))
 +      return;
 +    std::fprintf(stderr,
-+                 "[native-gx] %u fps, %u draws, %.2f MB fifo, %u draw-done, %u tokens, "
-+                 "%u stalled frame starts\n",
-+                 frames, draws, bytes / 1048576.0, draw_dones, tokens, stalled_begins);
++                 "[native-gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
++                 "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
++                 "ms decode %lld / end frame %lld / idle %lld\n",
++                 frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
++                 peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
++                 Ms(decode), Ms(end_frame), Ms(idle));
 +    std::fflush(stderr);
 +    *this = Stats{.enabled = true};
 +    last = now;
++  }
++
++  static long long Ms(std::chrono::steady_clock::duration d)
++  {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
 +  }
 +};
 +Stats s_stats;
@@ -334,10 +351,7 @@ index 0000000..46105cc
 +bool Resolve(void*, uint32_t address, uint32_t size, aurora::gx::recomp::AddressSpace,
 +             aurora::gx::recomp::ResourceKind, const void** data, uint32_t* available)
 +{
-+  if (!s_host.resolve(s_host.user, address, size, data))
-+    return false;
-+  *available = size;
-+  return true;
++  return s_host.resolve(s_host.user, address, size, data, available);
 +}
 +
 +// Polls window events; false once the user asked to quit.
@@ -374,11 +388,14 @@ index 0000000..46105cc
 +  {
 +    if (s_stop.load(std::memory_order_relaxed))
 +      return false;
-+    std::unique_lock lock(s_ring.mutex);
 +    s_ring.consumer_waiting.store(true, std::memory_order_seq_cst);
 +    write = s_ring.write.load(std::memory_order_seq_cst);
 +    if (write == read)
-+      s_ring.wake.wait_for(lock, std::chrono::milliseconds(5));
++    {
++      const auto start = std::chrono::steady_clock::now();
++      SDL_WaitSemaphoreTimeout(s_ring.wake, 5);
++      s_stats.idle += std::chrono::steady_clock::now() - start;
++    }
 +    s_ring.consumer_waiting.store(false, std::memory_order_relaxed);
 +    s_stats.Report();
 +    write = s_ring.write.load(std::memory_order_acquire);
@@ -442,8 +459,10 @@ index 0000000..46105cc
 +    {
 +      StreamEvent event;
 +      uint32_t value = 0;
++      const auto decode_start = std::chrono::steady_clock::now();
 +      const uint32_t consumed = aurora::gx::recomp::process_stream(
 +          work.data() + pos, static_cast<uint32_t>(work.size() - pos), &event, &value);
++      s_stats.decode += std::chrono::steady_clock::now() - decode_start;
 +      pos += consumed;
 +      switch (event)
 +      {
@@ -461,8 +480,18 @@ index 0000000..46105cc
 +      case StreamEvent::DisplayCopy:
 +        ++s_stats.frames;
 +        if (const AuroraStats* frame = aurora_get_stats())
++        {
 +          s_stats.draws += frame->drawCallCount;
-+        aurora_end_frame();
++          s_stats.dropped += frame->droppedDrawCallCount;
++          s_stats.peak_uniforms = std::max(s_stats.peak_uniforms, frame->lastUniformSize);
++          s_stats.peak_vertices = std::max(s_stats.peak_vertices, frame->lastVertSize);
++          s_stats.peak_storage = std::max(s_stats.peak_storage, frame->lastStorageSize);
++        }
++        {
++          const auto end_start = std::chrono::steady_clock::now();
++          aurora_end_frame();
++          s_stats.end_frame += std::chrono::steady_clock::now() - end_start;
++        }
 +        if (!PumpEvents())
 +        {
 +          s_host.quit(s_host.user);
@@ -501,12 +530,17 @@ index 0000000..46105cc
 +  s_host = *host;
 +  s_stop.store(false);
 +  s_stats.enabled = std::getenv("NATIVE_GX_STATS") != nullptr;
++  s_ring.wake = SDL_CreateSemaphore(0);
++  if (!s_ring.wake)
++    return false;
 +  std::atomic<int> started{0};
 +  s_thread = std::thread(RenderThread, &started);
 +  started.wait(0, std::memory_order_acquire);
 +  if (started.load(std::memory_order_acquire) < 0)
 +  {
 +    s_thread.join();
++    SDL_DestroySemaphore(s_ring.wake);
++    s_ring.wake = nullptr;
 +    return false;
 +  }
 +  return true;
@@ -526,11 +560,8 @@ index 0000000..46105cc
 +  std::memcpy(s_ring.data.get() + offset, data, first);
 +  std::memcpy(s_ring.data.get(), data + first, size - first);
 +  s_ring.write.store(write + size, std::memory_order_seq_cst);
-+  if (s_ring.consumer_waiting.load(std::memory_order_seq_cst))
-+  {
-+    std::lock_guard lock(s_ring.mutex);
-+    s_ring.wake.notify_one();
-+  }
++  if (s_ring.consumer_waiting.exchange(false, std::memory_order_seq_cst))
++    SDL_SignalSemaphore(s_ring.wake);
 +}
 +
 +void native_gx_stop(void)
@@ -538,19 +569,18 @@ index 0000000..46105cc
 +  if (!s_thread.joinable())
 +    return;
 +  s_stop.store(true);
-+  {
-+    std::lock_guard lock(s_ring.mutex);
-+    s_ring.wake.notify_one();
-+  }
++  SDL_SignalSemaphore(s_ring.wake);
 +  s_thread.join();
++  SDL_DestroySemaphore(s_ring.wake);
++  s_ring.wake = nullptr;
 +}
 +}
 diff --git a/src/native_gx/native_gx.h b/src/native_gx/native_gx.h
 new file mode 100644
-index 0000000..039f177
+index 0000000..5b3b685
 --- /dev/null
 +++ b/src/native_gx/native_gx.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +#pragma once
 +
 +// Native GX: renders a guest's retail GX FIFO with Aurora (WebGPU) on its own
@@ -578,8 +608,10 @@ index 0000000..039f177
 +// Called on the render thread.
 +typedef struct NativeGxHost {
 +  void* user;
-+  // Guest address (virtual or physical) to host memory covering size bytes.
-+  bool (*resolve)(void* user, uint32_t address, uint32_t size, const void** data);
++  // Guest address (virtual or physical) to host memory covering at least size
++  // bytes; available receives the bytes left in that memory region.
++  bool (*resolve)(void* user, uint32_t address, uint32_t size, const void** data,
++                  uint32_t* available);
 +  // The GPU reached a GXSetDrawDone / GXSetDrawSync marker.
 +  void (*draw_done)(void* user);
 +  void (*token)(void* user, uint16_t token, bool interrupt);
