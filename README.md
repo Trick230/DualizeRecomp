@@ -3,9 +3,13 @@
 A static recompilation of **NiGHTS: Journey of Dreams** (Wii) to native PC code.
 
 The game's `main.dol` is translated from PowerPC to C by
-[DolRecomp](https://github.com/ExpansionPak/DolRecomp), compiled into a native
-module, and run on [ModernGekko](https://github.com/ExpansionPak/ModernGekko),
-a runtime built on a Dolphin-derived core for video, audio and HLE.
+[DolRecomp](https://github.com/ExpansionPak/DolRecomp) and compiled into a
+native module. The module runs on
+[ModernGekko](https://github.com/ExpansionPak/ModernGekko), a runtime built on
+a Dolphin-derived core. Every guest instruction runs as native code, with no
+interpreter or JIT fallback. The long-term goal is a fully native port that
+runs at high, interpolated frame rates, with Dolphin reduced to nothing (see
+[Roadmap](#roadmap)).
 
 > [!IMPORTANT]
 > This repository contains **no game code, assets, disc images or keys**, and
@@ -15,39 +19,49 @@ a runtime built on a Dolphin-derived core for video, audio and HLE.
 
 ## Status
 
-Work in progress.
+Work in progress, but playable from boot through the intro, Story Select and
+gameplay.
 
 | | |
 |---|---|
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
-| Boot | Boots to the Sonic Team logo and the intro cutscene; all guest code runs natively (no interpreter/JIT fallback) |
-| Startup | ~6 s to the first frame (asset hash is cached after the first boot) |
-| Speed | Gameplay holds full speed (30 FPS, the game's native rate) with brief dips while areas load; the intro FMV runs at ~19 FPS (CPU bound in the video decoder) |
-| Tested platform | Windows x86_64, MSYS2 Clang 22 (C backend, `-O3`, ThinLTO), Vulkan, i5-9600KF + RTX 4060 |
-| Other platforms | Linux and macOS should work (both tools support them) but are untested |
-| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)); tested with an 8BitDo Ultimate 2 |
+| Gameplay | Full speed: 30 FPS, the game's native rate |
+| Renderers | Dolphin's Vulkan/OpenGL backends (default), or the experimental [native renderer](#native-renderer) |
+| Startup | ~6 s to the first frame (the asset hash is cached after the first boot) |
+| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)) |
+| Tested on | Windows 11 x86_64, MSYS2 UCRT64 (Clang for the game module, `-O3` + ThinLTO), i5-9600KF + RTX 4060 |
+| Untested | Linux and macOS (both tools support them), PAL `R7EP8P` and JP `R7EJ8P` |
 
-Other regions (PAL `R7EP8P`, JP `R7EJ8P`) have not been tested.
+Known limitations:
 
-### Verifying your dump
+- The intro FMV runs at ~19 FPS. It is CPU-bound in the game's video decoder.
+- Without a frame cap, gameplay reaches ~35–40 FPS. The bottleneck is the
+  emulated CPU thread: the game's own OS layer (thread switching, mutexes,
+  message queues) and Dolphin's timing and hardware emulation. The GPU and the
+  native renderer's thread are mostly idle. Phase 3 of the roadmap removes
+  this bottleneck.
 
-The supported USA `main.dol` has this SHA-256:
+## Quick start
 
 ```
-e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20
+git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
+cd DualizeRecomp
+make check                                   # verify your toolchain
+make run ISO=iso/nights.iso                  # first run: build, extract, recompile, play
+make run GAME=nights                         # later runs
+make run GAME=nights RUN_ARGS="--graphics Native"   # with the native renderer
 ```
 
-After extracting (see below), you can check it with
-`sha256sum extracted/nights/sys/main.dol`.
+The sections below cover each step.
 
-## Requirements
+### Requirements
 
-- CMake, Ninja, pkg-config, Git and Python
+- CMake, Ninja, pkg-config, Git and Python 3
 - A C11/C++23 toolchain:
-  - **Windows:** MSYS2 UCRT64 (tested; install `mingw-w64-ucrt-x86_64-clang`
-    and `mingw-w64-ucrt-x86_64-lld` for the fastest build, plus
-    `mingw-w64-ucrt-x86_64-abseil-cpp` for the native renderer) or Visual Studio
-    2022 with the "Desktop development with C++" workload
+  - **Windows:** MSYS2 UCRT64 (tested). Install `mingw-w64-ucrt-x86_64-clang`
+    and `mingw-w64-ucrt-x86_64-lld` for the fastest module build, and
+    `mingw-w64-ucrt-x86_64-abseil-cpp` for the native renderer. Visual Studio
+    2022 with the "Desktop development with C++" workload also works.
   - **Linux:** GCC or Clang, plus the Dolphin NoGUI dev packages:
     ```
     sudo apt-get install -y ninja-build build-essential pkg-config cmake \
@@ -59,40 +73,34 @@ After extracting (see below), you can check it with
 - A 64-bit host
 - Your own NiGHTS: Journey of Dreams (USA) disc image
 
-Run `make check` to verify your environment. If the submodules are missing,
-it offers to fetch them (`make check FETCH=1` does it without asking).
-
-## Getting the source
-
-```
-git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
-cd DualizeRecomp
-```
+`make check` validates all of this. If the submodules are missing, it offers to
+fetch them (`make check FETCH=1` does it without asking).
 
 > [!NOTE]
 > `lib/ModernGekko` vendors a large part of Dolphin's dependency tree, so the
 > first submodule sync downloads a few hundred MB.
 
-## Building and running
+### First run
 
-1. Place your disc image at `iso/nights.iso`. The `iso/` folder is gitignored.
-2. Build everything, extract the disc, recompile and launch:
-   ```
-   make run ISO=iso/nights.iso
-   ```
-   On the first run this builds DolRecomp and ModernGekko, downloads
-   [Wiimms ISO Tools](https://wit.wiimm.de/) into `extern/wit` (needed for
-   Wii extraction), extracts the disc into `extracted/nights/`, recompiles
-   `main.dol` and compiles the native module.
-3. On later runs, use the extracted copy:
-   ```
-   make run GAME=nights
-   ```
+1. Place your disc image at `iso/nights.iso` (the `iso/` folder is gitignored).
+2. Run `make run ISO=iso/nights.iso`. The first time, this:
+   - builds DolRecomp and ModernGekko, applying the local [patches](#patches);
+   - downloads [Wiimms ISO Tools](https://wit.wiimm.de/) into `extern/wit`;
+   - extracts the disc into `extracted/nights/`;
+   - recompiles `main.dol` and compiles the native module;
+   - installs the per-game settings and controller profile, then launches the game.
+3. On later runs, use `make run GAME=nights`.
 
 Compiled modules are cached by DOL hash and toolchain under `build/modules/`,
 so later runs skip recompilation unless something changed.
 
-### Useful targets
+To check your dump, compare `sha256sum extracted/nights/sys/main.dol` with:
+
+```
+e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20
+```
+
+### Make targets
 
 | Target | Description |
 |---|---|
@@ -101,8 +109,8 @@ so later runs skip recompilation unless something changed.
 | `make extract ISO=...` | Extract the disc into `extracted/nights/` |
 | `make recompile GAME=nights` | Recompile and build the module without launching |
 | `make run GAME=nights` | Recompile if needed and launch the game |
-| `make llvm GAME=nights` | Build the module with the optimized LLVM backend |
-| `make llvm-run GAME=nights` | Same, then launch |
+| `make llvm` / `make llvm-run` | Same as `recompile` / `run`, with the LLVM backend |
+| `make symbols GAME=nights` | Identify the SDK functions in `main.dol` (writes `build/symbols/nights.map`) |
 | `make clean-extracted` | Remove the extracted disc and compiled modules |
 | `make clean-tools` | Remove the DolRecomp/ModernGekko build trees |
 | `make clean` | Remove all of the above |
@@ -113,47 +121,58 @@ so later runs skip recompilation unless something changed.
 |---|---|---|
 | `ISO` | *(none)* | Disc image path. Only needed the first time. |
 | `GAME` | *(none)* | Extracted game slug (`nights`). |
-| `BACKEND` | `c` | `c` (portable) or `llvm` (optimized native objects). |
-| `LLVM_DIR` | *(CMake discovery)* | Path to LLVM 19/20's CMake package, if not found automatically. |
-| `TOOLCHAIN` | `clang` if installed, else `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. Clang builds use ThinLTO and are the fastest. `auto` follows the compiler used to build ModernGekko. |
+| `BACKEND` | `c` | `c` (portable) or `llvm` (native objects). |
+| `LLVM_DIR` | *(CMake discovery)* | Path to LLVM 19/20's CMake package, if it isn't found automatically. |
+| `TOOLCHAIN` | `clang` if installed, else `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. Clang builds use ThinLTO and are the fastest. `auto` follows the compiler that built ModernGekko. |
 | `OPT_LEVEL` | `3` | Module optimization level (0-3). |
 | `USER_DIR` | ModernGekko's user directory | Where `make run` installs `config/`. |
 | `CMAKE_BUILD_TYPE` | `Release` | Build type for both tools. |
 | `JOBS` | CPU count | Parallel build jobs. |
-| `RUN_ARGS` | *(empty)* | Extra flags for the runner, e.g. `--headless` or `--graphics Vulkan`. |
+| `RUN_ARGS` | *(empty)* | Extra runner flags, e.g. `--graphics Native`, `--headless` or `--load-state file.sav`. |
 
-Example debug build with Vulkan:
-
-```
-CMAKE_BUILD_TYPE=Debug make run GAME=nights RUN_ARGS="--graphics Vulkan"
-```
-
-### Native renderer (experimental)
+## Native renderer
 
 `RUN_ARGS="--graphics Native"` replaces Dolphin's emulated GPU with
-[Aurora](https://github.com/encounter/aurora) (WebGPU through Dawn: D3D12,
-Vulkan or Metal). The game's GX command stream is taken straight from the
-gather pipe and drawn on a dedicated render thread in its own window; Dolphin
-keeps running the OS, IOS and audio side. This is the base for native,
-interpolated high frame rates. Set `NATIVE_GX_STATS=1` for a once-per-second
-line of frame, draw and FIFO counters, per-frame buffer peaks and the render
-thread's decode / begin-frame / end-frame / idle time split.
+[Aurora](https://github.com/encounter/aurora). Aurora is a GX implementation
+on WebGPU through Dawn, using D3D12, Vulkan or Metal.
 
-Gameplay holds 30 FPS: draws built from unchanged GX state reuse the previous
-pipeline, bind groups and uniforms, and consecutive draws (indexed or not)
-merge into one, so a dense level goes from ~45k to ~1k GPU draws per frame.
-Savestates work with the native renderer: the FIFO decoder's registers and any
-incomplete packet are saved with the state (states made before this change no
-longer load).
+```
+ game module (native PowerPC→C)          render thread (libmoderngekko_native_gx)
+ ┌──────────────────────────────┐        ┌──────────────────────────────────────┐
+ │ GX SDK writes to the gather  │  SPSC  │ decode the retail GX FIFO            │
+ │ pipe ──► GPFifo burst sink   ├──ring─►│ ──► Aurora (pipelines, TEV shaders)  │
+ │ OS / IOS / audio: Dolphin    │◄───────┤ ──► Dawn ──► D3D12 / Vulkan / Metal  │
+ └──────────────────────────────┘ draw-  └──────────────────────────────────────┘
+                                  done / token markers
+```
 
-Known issue: Will's hair renders black in cutscenes (it is correct in gameplay).
+The game's GX command stream comes straight from the gather pipe and is drawn
+on a dedicated thread, in its own window. Dolphin still runs the OS, IOS and
+audio side. This renderer is the foundation for interpolated high frame
+rates.
+
+- **Speed:** gameplay holds 30 FPS while the render thread is busy only ~15%
+  of the time. Draws built from unchanged GX state reuse the previous
+  pipeline, bind groups and uniforms, and consecutive draws merge into one, so
+  a dense level goes from ~45k to ~1k GPU draws per frame.
+- **Savestates:** the FIFO decoder's registers and any incomplete packet are
+  saved with the state.
+- **Stats:** `NATIVE_GX_STATS=1` prints a line once per second with:
+  - frame, draw and FIFO counters;
+  - per-frame buffer peaks;
+  - the render thread's decode / begin-frame / end-frame / idle time split.
+
+> [!WARNING]
+> Overlays that hook the swap chain, such as RivaTuner Statistics Server or
+> Steam's frame pacer, can hang or crash the native renderer at startup. Close
+> them or exclude the game if that happens.
 
 ## Controls
 
-NiGHTS supports the Classic Controller, so `make run` installs
-`config/Config/WiimoteNew.ini`: Wii Remote 1 with a Classic Controller attached,
-driven by the first XInput pad (any Xbox controller, or an 8BitDo pad in
-X-input mode). Buttons follow the physical Xbox layout:
+NiGHTS supports the Classic Controller. `make run` installs
+`config/Config/WiimoteNew.ini`, which sets up Wii Remote 1 with a Classic
+Controller attached, driven by the first XInput pad (any Xbox controller, or
+an 8BitDo pad in X-input mode). Buttons follow the physical Xbox layout:
 
 | Xbox | Classic Controller |
 |---|---|
@@ -166,55 +185,76 @@ X-input mode). Buttons follow the physical Xbox layout:
 
 The profile is only installed when ModernGekko's user directory has no
 `Config/WiimoteNew.ini` yet, so your own remaps are kept. It is a regular
-Dolphin-format file, so one exported from Dolphin works too.
+Dolphin-format file, so one exported from Dolphin also works.
 
-## Project-specific fixes
+## Roadmap
 
-All of these are applied automatically by `make`.
+The goal is a fully native port at high, interpolated frame rates. Dolphin is
+replaced piece by piece rather than extended.
 
-- **`patches/ModernGekko/0001`**: the startup asset hash computes each file's
-  relative path once instead of inside the sort comparator (without it,
-  startup on Windows hangs for well over 5 minutes on NiGHTS' 12k files), and
-  caches the result next to `files/`, keyed by every file's path, size and
-  modification time. Unchanged game files are not re-read on every boot.
-- **`patches/ModernGekko/0002`**: only wires the mod host-call hooks into the
-  recompiler core when mods are actually loaded. Otherwise every dispatched
-  block queried the mod manager (~6% of the CPU thread in gameplay).
-- **`patches/ModernGekko-dolphin/0001`**: faster paired-single paths in
-  GXRuntime, the CPU runtime compiled into the game module. Quantized `psq_st`
-  uses exact power-of-two multiplies instead of libm `ldexp` and is handled
-  inline, and `ps_add` gets an inline path for finite inputs. Results are
-  bit-identical to the interpreter-accurate versions; this took the intro FMV
-  from ~12 to ~19 FPS.
-- **`patches/ModernGekko/0003`**: the native renderer. A separate shared
-  library (`src/native_gx`, so Aurora's dependency tree never meets Dolphin's)
-  receives the FIFO through a lock-free ring (woken through an SDL semaphore;
-  winpthreads' timed condition wait overslept) and reports draw-done and token
-  markers back to Dolphin's pixel engine. Guest addresses resolve together
-  with the bytes left in their memory region, so indexed vertex arrays and
-  indexed matrix loads see their whole array.
-- **`patches/ModernGekko-dolphin/0002`**: the gather-pipe burst sink for the
-  native renderer, MinGW build fixes for Aurora, and fixes to Aurora's retail
-  FIFO decoding: 24-bit texture, copy and TLUT addresses (Wii MEM2), viewport
-  depth clamped to [0, 1] and positioned from the stream's scissor offset, and
-  a 1e-7 near-plane margin so the game's 2D and FMV quads, which sit exactly
-  on the near plane, are not clipped (Dolphin does the same). A disabled TEV
-  texture order reads white, as on hardware. Retail textures (no texture
-  object id) are cached by address and content hash instead of being
-  re-created per draw. Vertex arrays are uploaded once per frame per address
-  until the game invalidates the vertex cache (`GXInvalidateVtxCache`), and
-  identical uniform blocks are shared within a frame, the vertex start moving
-  to `firstInstance`; together these keep a level frame inside Aurora's fixed
-  per-frame buffers (the uniform budget went from 24 to 8 MB and the array
-  budget from 8 to 24 MB). A draw that still does not fit is dropped with a
-  warning instead of aborting.
-- **`config/GameSettings/R7EE8P.ini`**: per-game Dolphin settings, copied to
-  ModernGekko's user directory by `make run` (override with `USER_DIR=`). It
-  enables idle-loop skipping for the game's `for (;;) OSWakeupThread(...)`
-  idle thread, which otherwise holds the game at ~10 FPS, and turns on dual
-  core (`CPUThread`), which this Dolphin fork leaves off on desktop. That
-  moves GPU emulation (FIFO, vertex loading, texture hashing) to its own
-  thread and took gameplay from ~24 to a steady 30 FPS.
+| Phase | | Status |
+|---|---|---|
+| 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
+| 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress |
+| 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
+
+## Patches
+
+`make` applies these to the submodules automatically.
+
+**ModernGekko**
+
+- **`0001` Cached asset hash.** The startup asset hash computes each file's
+  relative path once instead of inside the sort comparator. Without this,
+  startup on Windows hangs for well over 5 minutes on NiGHTS' 12k files. The
+  result is cached next to `files/`, keyed by every file's path, size and
+  modification time.
+- **`0002` No mod hooks without mods.** The mod host-call hooks are only wired
+  into the recompiler core when mods are loaded. Otherwise every dispatched
+  block queried the mod manager, which cost ~6% of the CPU thread.
+- **`0003` Native renderer host.** A separate shared library (`src/native_gx`)
+  keeps Aurora's dependency tree apart from Dolphin's.
+  - It receives the FIFO through a lock-free ring, woken through an SDL
+    semaphore.
+  - It reports draw-done and token markers back to Dolphin's pixel engine.
+  - Guest addresses resolve together with the bytes left in their memory
+    region, so indexed vertex arrays and matrix loads see their whole array.
+  - SDL input stays off: the emulator reads the controllers itself, and
+    window events are pumped at most every 16 ms while idle.
+
+**ModernGekko's Dolphin fork**
+
+- **`0001` Fast paired singles.** Quantized `psq_st` uses exact power-of-two
+  multiplies instead of libm `ldexp`, and `ps_add` gets an inline path for
+  finite inputs. Results are bit-identical to the accurate versions. This took
+  the intro FMV from ~12 to ~19 FPS.
+- **`0002` Native GX sink and Aurora retail fixes.**
+  - The gather-pipe burst sink, plus MinGW build fixes for Aurora.
+  - Retail FIFO fixes:
+    - 24-bit texture, copy and TLUT addresses (Wii MEM2);
+    - viewport depth clamped to [0, 1] and placed from the stream's scissor
+      offset;
+    - a 1e-7 near-plane margin for the game's 2D and FMV quads;
+    - a disabled TEV texture order reads white, as on hardware;
+    - mip-filtered textures size their buffer by level count, not by highest
+      LOD index. This fixed black hair, outfits and eyes on characters.
+  - Speed:
+    - Retail textures are cached by address and content hash.
+    - Vertex arrays are uploaded once per frame per address until the game
+      invalidates the vertex cache.
+    - Identical uniform blocks are shared within a frame.
+    - Indexed draws size their arrays by scanning only the indexed attributes.
+
+**Per-game settings (`config/GameSettings/R7EE8P.ini`)**
+
+`make run` copies these to ModernGekko's user directory (override with
+`USER_DIR=`).
+
+- Idle-loop skipping for the game's `for (;;) OSWakeupThread(...)` idle
+  thread, which otherwise holds the game at ~10 FPS.
+- Dual core (`CPUThread`), which this Dolphin fork leaves off on desktop. It
+  took gameplay from ~24 to a steady 30 FPS.
 
 ## Project layout
 
@@ -222,12 +262,12 @@ All of these are applied automatically by `make`.
 lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
 lib/ModernGekko/    submodule: runtime the recompiled module runs on
 patches/            local fixes applied to the submodules
-config/             per-game runtime settings
-scripts/            build environment checks
+config/             per-game runtime settings and the controller profile
+scripts/            build environment checks, SDK symbol finder
 Makefile            the whole pipeline
 iso/                your disc image (gitignored)
 extracted/          extracted disc (gitignored)
-build/              tool builds and compiled modules (gitignored)
+build/              tool builds, compiled modules, symbol maps (gitignored)
 extern/, database/  tools and title data downloaded on first run (gitignored)
 ```
 
@@ -237,6 +277,8 @@ extern/, database/  tools and title data downloaded on first run (gitignored)
   the pipeline this project is based on
 - [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and
   [ModernGekko](https://github.com/ExpansionPak/ModernGekko)
+- [Aurora](https://github.com/encounter/aurora) and Google's
+  [Dawn](https://dawn.googlesource.com/dawn)
 - The [Dolphin](https://dolphin-emu.org/) team
 - [Wiimms ISO Tools](https://wit.wiimm.de/) and [GameTDB](https://www.gametdb.com/)
 
@@ -247,5 +289,5 @@ SEGA or Nintendo. NiGHTS and NiGHTS: Journey of Dreams are trademarks of SEGA.
 Wii is a trademark of Nintendo.
 
 DolRecomp and ModernGekko are distributed under their own licenses (see
-`lib/DolRecomp/LICENSE` and `lib/ModernGekko/LICENSE`; ModernGekko is
-GPL-3.0-or-later because of its Dolphin-derived runtime).
+`lib/DolRecomp/LICENSE` and `lib/ModernGekko/LICENSE`). ModernGekko is
+GPL-3.0-or-later because of its Dolphin-derived runtime.
