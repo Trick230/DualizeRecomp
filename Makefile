@@ -38,6 +38,13 @@ TOOLCHAIN ?= $(if $(shell command -v clang 2>/dev/null),clang,auto)
 # Optimization level for the per-game module (0-3).
 OPT_LEVEL ?= 3
 
+# Games whose code partly ships in RSO modules get a load layout in
+# config/rso/<disc id>.layout; with it the RSO code is recompiled too.
+GAME_ID = $(shell head -c 6 "$(EXTRACTED_DIR)/sys/boot.bin" 2>/dev/null)
+RSO_LAYOUT = $(wildcard config/rso/$(GAME_ID).layout)
+PORT_ARGS = --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR) \
+	$(if $(RSO_LAYOUT),--rso-layout $(RSO_LAYOUT))
+
 # Extra arguments forwarded after `--` to `moderngekko-run` via `make run`,
 # e.g. RUN_ARGS="--headless" or RUN_ARGS="--graphics Vulkan".
 RUN_ARGS ?=
@@ -205,10 +212,10 @@ extract: $(EXTRACTED_DIR)/sys/main.dol
 # moderngekko-port caches compiled modules by DOL hash + toolchain, so
 # re-running these is cheap once a module has already been built.
 recompile: moderngekko $(EXTRACTED_DIR)/sys/main.dol
-	$(MODERNGEKKO_PORT_BIN) build $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR)
+	$(MODERNGEKKO_PORT_BIN) build $(EXTRACTED_DIR) $(PORT_ARGS)
 
 run: moderngekko config $(EXTRACTED_DIR)/sys/main.dol
-	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR) -- $(RUN_ARGS)
+	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) $(PORT_ARGS) -- $(RUN_ARGS)
 
 # SDK function names found by matching Dolphin's signature database. The map
 # is derived from the user's own DOL, so it is generated, never committed.

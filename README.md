@@ -29,17 +29,17 @@ gameplay.
 | Renderers | Dolphin's Vulkan/OpenGL backends (default), or the experimental [native renderer](#native-renderer) |
 | Startup | ~6 s to the first frame (the asset hash is cached after the first boot) |
 | Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)) |
-| Tested on | Windows 11 x86_64, MSYS2 UCRT64 (Clang for the game module, `-O3` + ThinLTO), i5-9600KF + RTX 4060 |
+| Tested on | Windows 11 x86_64, MSYS2 UCRT64 (Clang for the game module, `-O3`), i5-9600KF + RTX 4060 |
 | Untested | Linux and macOS (both tools support them), PAL `R7EP8P` and JP `R7EJ8P` |
 
 Known limitations:
 
 - The intro FMV runs at ~19 FPS. It is CPU-bound in the game's video decoder.
-- Without a frame cap, gameplay reaches ~35–40 FPS. The bottleneck is the
-  emulated CPU thread: the game's own OS layer (thread switching, mutexes,
-  message queues) and Dolphin's timing and hardware emulation. The GPU and the
-  native renderer's thread are mostly idle. Phase 3 of the roadmap removes
-  this bottleneck.
+- Without a frame cap, gameplay reaches ~57 FPS (it was ~32 before phase 3).
+  The bottleneck is still the emulated CPU thread: the game's own OS layer
+  (thread switching, mutexes, message queues) and Dolphin's timing and
+  hardware emulation. The GPU and the native renderer's thread are mostly
+  idle. The rest of phase 3 goes after this.
 
 ## Quick start
 
@@ -122,8 +122,8 @@ e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20
 | `ISO` | *(none)* | Disc image path. Only needed the first time. |
 | `GAME` | *(none)* | Extracted game slug (`nights`). |
 | `BACKEND` | `c` | `c` (portable) or `llvm` (native objects). |
-| `LLVM_DIR` | *(CMake discovery)* | Path to LLVM 19/20's CMake package, if it isn't found automatically. |
-| `TOOLCHAIN` | `clang` if installed, else `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. Clang builds use ThinLTO and are the fastest. `auto` follows the compiler that built ModernGekko. |
+| `LLVM_DIR` | *(CMake discovery)* | Path to the CMake package of LLVM 19 or newer (22 tested), if it isn't found automatically. |
+| `TOOLCHAIN` | `clang` if installed, else `auto` | Module compiler: `auto`, `clang`, `gcc` or `msvc`. Clang builds are the fastest. `auto` follows the compiler that built ModernGekko. |
 | `OPT_LEVEL` | `3` | Module optimization level (0-3). |
 | `USER_DIR` | ModernGekko's user directory | Where `make run` installs `config/`. |
 | `CMAKE_BUILD_TYPE` | `Release` | Build type for both tools. |
@@ -196,7 +196,7 @@ replaced piece by piece rather than extended.
 |---|---|---|
 | 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
-| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress: CPU-side groundwork done (32 → 57 FPS uncapped) |
 | 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
 
 ## Patches
@@ -222,6 +222,19 @@ replaced piece by piece rather than extended.
     region, so indexed vertex arrays and matrix loads see their whole array.
   - SDL input stays off: the emulator reads the controllers itself, and
     window events are pumped at most every 16 ms while idle.
+- **`0004` CPU ABI 5 and a stricter module cache key.** Mirrors the new
+  RAM slice tables in ModernGekko's `CPUState`. The module cache key also
+  hashes the module template and GXRuntime's CPU sources, so editing them no
+  longer reuses a stale module.
+- **`0005` RSO recompilation.** Much of NiGHTS' code ships in RSO modules
+  (`files/rso`) that the game loads into the heap at runtime, so it used to
+  run on Dolphin's JIT, with a full state sync every time it called into the
+  DOL and back (~300k times a second). `moderngekko-port --rso-layout`
+  links each module ahead of time at the address the game's loader uses
+  (`config/rso/R7EE8P.layout`) and hands its code to the recompiler as extra
+  DOL text. The chunk hash check keeps it native only while RAM holds exactly
+  those bytes, so a module that loads elsewhere just stays on the JIT. This
+  took uncapped gameplay from ~48 to ~57 FPS.
 
 **ModernGekko's Dolphin fork**
 
@@ -245,6 +258,24 @@ replaced piece by piece rather than extended.
       invalidates the vertex cache.
     - Identical uniform blocks are shared within a frame.
     - Indexed draws size their arrays by scanning only the indexed attributes.
+- **`0003` Direct cross-chunk calls.** Generated code calls into another
+  verified chunk directly instead of returning to the chassis for every
+  cross-chunk `bl`/`blr`. The chassis publishes which chunks qualify (verified,
+  not REL-relocated, no mod hooks, lockstep off) and keeps that table in step
+  with the SMC guard. Dispatches per run dropped from 536M to 145M.
+- **`0004` One-load guest RAM access.** `CPUState` carries a host pointer for
+  each 8 MiB guest slice that lies wholly in MEM1/MEM2, so a load or store is
+  one table lookup instead of ~25 instructions of range, reservation and
+  journal checks. MMIO, journaled stores and stores under a live `lwarx`
+  reservation take an out-of-line path with the old semantics.
+
+**DolRecomp, as vendored in ModernGekko's Dolphin fork**
+
+- **`0001` Direct calls, inline cache ops, LLVM 22.** The C emitter's side of
+  direct cross-chunk calls; `dcbf`/`dcbst`/`dcbi` emitted inline instead of
+  ending the block in a fallback; and the LLVM backend builds against
+  LLVM 21/22. (The LLVM backend runs this game ~20% slower than the C one, so
+  `BACKEND=c` stays the default.)
 
 **Per-game settings (`config/GameSettings/R7EE8P.ini`)**
 
@@ -262,7 +293,7 @@ replaced piece by piece rather than extended.
 lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
 lib/ModernGekko/    submodule: runtime the recompiled module runs on
 patches/            local fixes applied to the submodules
-config/             per-game runtime settings and the controller profile
+config/             per-game runtime settings, RSO load layouts, controller profile
 scripts/            build environment checks, SDK symbol finder
 Makefile            the whole pipeline
 iso/                your disc image (gitignored)
