@@ -1,0 +1,23 @@
+# Where NiGHTS: Journey of Dreams' RSO loader places its modules.
+#
+# Much of the game's code ships in RSO modules (files/rso) that the game loads
+# into the heap at runtime. Boot and heap order are deterministic, so each
+# module always lands at the same address; moderngekko-port links them there
+# ahead of time and recompiles their code. If a module ever lands elsewhere,
+# the chassis' chunk hash check sees different bytes and that code simply
+# stays on Dolphin's JIT.
+#
+# Values read back from guest RAM during gameplay (the RSO list starting at
+# the static module header, 0x904B0120). Linking with them reproduces the
+# loaded text of every module below byte for byte.
+
+sel = files/rso/NightsWii.sel
+
+# NightsWii.sel section index -> runtime address (.init, .text, .rodata,
+# .data, .bss, .sdata, .sdata2, .sbss, .sbss2).
+static_sections = 0 0x80004000 0x8000BB20 0 0 0x804E7400 0x8050FA20 0x80581780 0x806F5600 0x806F7120 0 0x806F6640 0x806F7D60
+
+# module = <file> <load address> [<bss address>]
+module = files/rso/global.rso 0x8106E4C0 0x812C7F80
+module = files/rso/play.rso   0x8154B780
+module = files/rso/select.rso 0x81577020 0x815B4580

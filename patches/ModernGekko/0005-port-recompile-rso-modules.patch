@@ -1,0 +1,531 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4ddda40..99af6b1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -636,7 +636,8 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+ 
+     add_executable(moderngekko-port
+         tools/moderngekko_port.cpp
+-        tools/pgo_support.cpp)
++        tools/pgo_support.cpp
++        tools/rso_link.cpp)
+     target_link_libraries(moderngekko-port PRIVATE ModernGekko::Runtime)
+     target_include_directories(moderngekko-port PRIVATE
+         "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+diff --git a/tools/moderngekko_port.cpp b/tools/moderngekko_port.cpp
+index 7b48228..f9d7e99 100644
+--- a/tools/moderngekko_port.cpp
++++ b/tools/moderngekko_port.cpp
+@@ -1,5 +1,6 @@
+ #include "pgo_support.hpp"
+ #include "port_command_line.hpp"
++#include "rso_link.hpp"
+ 
+ #include "moderngekko/game.hpp"
+ #include "moderngekko/module_abi.h"
+@@ -38,6 +39,7 @@ constexpr std::string_view DOLRECOMP_REVISION =
+ 
+ using moderngekko::port::BuildOptions;
+ using moderngekko::port::PgoRunOptions;
++using moderngekko::port::RsoLinkResult;
+ 
+ #if defined(MODERNGEKKO_DOLRECOMP_LLVM)
+ constexpr std::string_view DEFAULT_BACKEND = "llvm";
+@@ -609,6 +611,16 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+     std::cerr << patches.error << '\n';
+     return std::nullopt;
+   }
++  RsoLinkResult rso;
++  if (!options.rso_layout.empty())
++  {
++    rso = moderngekko::port::LinkRsoLayout(options.rso_layout, root);
++    if (!rso)
++    {
++      std::cerr << rso.error << '\n';
++      return std::nullopt;
++    }
++  }
+ 
+   std::string compiler;
+   if (options.toolchain == "auto")
+@@ -705,7 +717,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
+       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
+-      *dolrecomp_hash + "|module_sources=" + module_sources + "|" +
++      *dolrecomp_hash + "|module_sources=" + module_sources + "|rso=" + rso.identity + "|" +
+       moderngekko::pgo::PgoCacheIdentity(options.pgo) + DolRecompCodegenIdentity();
+   std::ostringstream key_tail;
+   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
+@@ -766,6 +778,32 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+     }
+     std::cout << "applied " << patches.entries.size() << " default DOL patches\n";
+   }
++  if (!rso.text.empty())
++  {
++    // RSO code goes to the recompiler as extra DOL text sections; the game
++    // itself still boots the original DOL and loads the RSOs as usual.
++    std::ifstream input(recomp_dol, std::ios::binary);
++    std::vector<std::uint8_t> dol(std::istreambuf_iterator<char>(input), {});
++    std::string rso_error;
++    if (dol.size() < 0x100 ||
++        !moderngekko::port::AppendDolTextSections(dol, rso.text, &rso_error))
++    {
++      std::cerr << (rso_error.empty() ? "malformed DOL " + recomp_dol.string() : rso_error)
++                << '\n';
++      return std::nullopt;
++    }
++    recomp_dol = artifact / "rso-main.dol";
++    std::ofstream output(recomp_dol, std::ios::binary | std::ios::trunc);
++    if (!output.write(reinterpret_cast<const char*>(dol.data()),
++                      static_cast<std::streamsize>(dol.size())))
++    {
++      std::cerr << "can't write " << recomp_dol << '\n';
++      return std::nullopt;
++    }
++    for (const auto& text : rso.text)
++      std::cout << "linked " << text.module << " text at 0x" << std::hex << text.address
++                << " (0x" << text.bytes.size() << " bytes)" << std::dec << '\n';
++  }
+   const fs::path generated_parent = artifact / "dolrecomp-output";
+   ScopedEnvironment recompiler_environment;
+   if (options.backend == "llvm")
+@@ -1150,6 +1188,7 @@ void Usage()
+ {
+   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
+                "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
++               "               [--rso-layout file]\n"
+                "       moderngekko-port run <game-root> [build options] [-- runner options]\n"
+                "       moderngekko-port pgo-run <game-root> [--backend c|llvm] [--toolchain auto|clang] [--opt-level 0-3]\n"
+                "               [--output path] [--profile-dir path] [--llvm-profdata path] [--keep-work]\n"
+diff --git a/tools/port_command_line.hpp b/tools/port_command_line.hpp
+index f2152dc..57a8852 100644
+--- a/tools/port_command_line.hpp
++++ b/tools/port_command_line.hpp
+@@ -17,6 +17,7 @@ struct BuildOptions
+   std::string opt_level;
+   std::string backend;
+   fs::path output;
++  fs::path rso_layout;
+   std::vector<std::string> runner_arguments;
+   pgo::PgoBuildOptions pgo;
+   pgo::ManifestFacts pgo_facts;
+@@ -84,6 +85,8 @@ inline CommandLine ParseCommandLine(int argc, const char* const* argv,
+       parsed.build.opt_level = argv[++i];
+     else if (argument == "--output" && i + 1 < argc)
+       parsed.build.output = fs::path(argv[++i]);
++    else if (argument == "--rso-layout" && i + 1 < argc)
++      parsed.build.rso_layout = fs::path(argv[++i]);
+     else if (argument == "--profile-dir" && i + 1 < argc && is_pgo_run)
+       parsed.pgo_run.profile_dir = fs::path(argv[++i]);
+     else if (argument == "--llvm-profdata" && i + 1 < argc && is_pgo_run)
+diff --git a/tools/rso_link.cpp b/tools/rso_link.cpp
+new file mode 100644
+index 0000000..d7c3f89
+--- /dev/null
++++ b/tools/rso_link.cpp
+@@ -0,0 +1,356 @@
++#include "rso_link.hpp"
++
++#include <moderngekko/game.hpp>
++
++#include <cerrno>
++#include <cstdlib>
++#include <fstream>
++#include <sstream>
++#include <unordered_map>
++
++namespace moderngekko::port
++{
++namespace
++{
++namespace fs = std::filesystem;
++
++constexpr std::uint32_t SECTION_ABSOLUTE = 0xFFF1;  // SHN_ABS
++
++enum : std::uint8_t
++{
++  R_PPC_ADDR32 = 1,
++  R_PPC_ADDR16_LO = 4,
++  R_PPC_ADDR16_HI = 5,
++  R_PPC_ADDR16_HA = 6,
++  R_PPC_REL24 = 10,
++  R_PPC_REL14 = 11,
++};
++
++struct Bytes
++{
++  std::vector<std::uint8_t> data;
++
++  bool Fits(std::uint64_t offset, std::uint64_t size) const
++  {
++    return offset <= data.size() && size <= data.size() - offset;
++  }
++  std::uint32_t U32(std::uint32_t offset) const
++  {
++    return static_cast<std::uint32_t>(data[offset]) << 24 |
++           static_cast<std::uint32_t>(data[offset + 1]) << 16 |
++           static_cast<std::uint32_t>(data[offset + 2]) << 8 | data[offset + 3];
++  }
++  std::string CString(std::uint32_t offset) const
++  {
++    std::string out;
++    while (offset < data.size() && data[offset] != 0)
++      out.push_back(static_cast<char>(data[offset++]));
++    return out;
++  }
++};
++
++// The RSO header fields the linker needs (layout as in Dolphin's RSOView).
++struct RsoHeader
++{
++  std::uint32_t section_count, section_table;
++  std::uint8_t prolog_section, epilog_section, unresolved_section;
++  std::uint32_t unresolved_offset;
++  std::uint32_t internals, internals_size, externals, externals_size;
++  std::uint32_t exports, exports_size, export_names;
++  std::uint32_t imports, imports_size, import_names;
++};
++
++struct Module
++{
++  std::string name;
++  Bytes file;
++  RsoHeader header{};
++  std::uint32_t base = 0;
++  std::vector<std::uint32_t> section_address;
++};
++
++bool ReadFile(const fs::path& path, Bytes* out)
++{
++  std::ifstream input(path, std::ios::binary);
++  if (!input)
++    return false;
++  out->data.assign(std::istreambuf_iterator<char>(input), {});
++  return true;
++}
++
++bool ParseHeader(const Bytes& file, RsoHeader* h)
++{
++  if (!file.Fits(0, 0x58))
++    return false;
++  *h = {file.U32(0x08), file.U32(0x0C), file.data[0x20], file.data[0x21], file.data[0x22],
++        file.U32(0x2C), file.U32(0x30), file.U32(0x34), file.U32(0x38), file.U32(0x3C),
++        file.U32(0x40), file.U32(0x44), file.U32(0x48), file.U32(0x4C), file.U32(0x50),
++        file.U32(0x54)};
++  return file.Fits(h->section_table, static_cast<std::uint64_t>(h->section_count) * 8) &&
++         file.Fits(h->internals, h->internals_size) && file.Fits(h->externals, h->externals_size) &&
++         file.Fits(h->exports, h->exports_size) && file.Fits(h->imports, h->imports_size);
++}
++
++bool ParseU32(const std::string& text, std::uint32_t* value)
++{
++  char* end = nullptr;
++  errno = 0;
++  const unsigned long long parsed = std::strtoull(text.c_str(), &end, 0);
++  if (text.empty() || errno != 0 || *end != '\0' || parsed > 0xFFFFFFFFull)
++    return false;
++  *value = static_cast<std::uint32_t>(parsed);
++  return true;
++}
++
++// Patch one relocation the way the SDK's RSO linker does. S is the target
++// address, P the address of the patched field.
++bool Relocate(std::vector<std::uint8_t>& image, std::uint32_t offset, std::uint8_t type,
++              std::uint32_t S, std::uint32_t P)
++{
++  if (offset > image.size() || image.size() - offset < 4)
++    return false;
++  std::uint8_t* field = image.data() + offset;
++  const auto write16 = [field](std::uint32_t v) {
++    field[0] = static_cast<std::uint8_t>(v >> 8);
++    field[1] = static_cast<std::uint8_t>(v);
++  };
++  std::uint32_t word = static_cast<std::uint32_t>(field[0]) << 24 | field[1] << 16 |
++                       field[2] << 8 | field[3];
++  switch (type)
++  {
++  case R_PPC_ADDR32:
++    word = S;
++    break;
++  case R_PPC_ADDR16_LO:
++    write16(S);
++    return true;
++  case R_PPC_ADDR16_HI:
++    write16(S >> 16);
++    return true;
++  case R_PPC_ADDR16_HA:
++    write16((S + 0x8000u) >> 16);
++    return true;
++  case R_PPC_REL24:
++    word = (word & 0xFC000003u) | ((S - P) & 0x03FFFFFCu);
++    break;
++  case R_PPC_REL14:
++    word = (word & 0xFFFF0003u) | ((S - P) & 0x0000FFFCu);
++    break;
++  default:
++    return false;
++  }
++  field[0] = static_cast<std::uint8_t>(word >> 24);
++  field[1] = static_cast<std::uint8_t>(word >> 16);
++  field[2] = static_cast<std::uint8_t>(word >> 8);
++  field[3] = static_cast<std::uint8_t>(word);
++  return true;
++}
++}  // namespace
++
++RsoLinkResult LinkRsoLayout(const fs::path& layout, const fs::path& game_root)
++{
++  RsoLinkResult result;
++  std::ifstream input(layout);
++  if (!input)
++  {
++    result.error = "can't open RSO layout " + layout.string();
++    return result;
++  }
++
++  std::ostringstream identity;
++  fs::path sel_path;
++  std::vector<std::uint32_t> static_sections;
++  std::vector<Module> modules;
++  std::vector<std::uint32_t> bss_address;
++  std::string line;
++  for (int number = 1; std::getline(input, line); ++number)
++  {
++    identity << line << '\n';
++    line = line.substr(0, line.find_first_of("#;"));
++    const std::size_t equals = line.find('=');
++    if (line.find_first_not_of(" \t\r") == std::string::npos)
++      continue;
++    std::istringstream key_stream(line.substr(0, equals));
++    std::istringstream values(equals == std::string::npos ? std::string() : line.substr(equals + 1));
++    std::string key;
++    key_stream >> key;
++    std::vector<std::string> words;
++    for (std::string word; values >> word;)
++      words.push_back(word);
++
++    bool ok = equals != std::string::npos;
++    if (ok && key == "sel" && words.size() == 1)
++      sel_path = game_root / words[0];
++    else if (ok && key == "static_sections" && !words.empty())
++    {
++      static_sections.resize(words.size());
++      for (std::size_t i = 0; ok && i < words.size(); ++i)
++        ok = ParseU32(words[i], &static_sections[i]);
++    }
++    else if (ok && key == "module" && (words.size() == 2 || words.size() == 3))
++    {
++      Module module;
++      module.name = words[0];
++      std::uint32_t bss = 0;
++      ok = ParseU32(words[1], &module.base) && (words.size() == 2 || ParseU32(words[2], &bss)) &&
++           ReadFile(game_root / words[0], &module.file) &&
++           ParseHeader(module.file, &module.header);
++      modules.push_back(std::move(module));
++      bss_address.push_back(bss);
++    }
++    else
++      ok = false;
++    if (!ok)
++    {
++      result.error = layout.string() + ":" + std::to_string(number) + ": bad or unreadable entry";
++      return result;
++    }
++  }
++
++  // Exports: the static module's are section-relative against the layout's
++  // static section addresses; each RSO's against its own placed sections.
++  std::unordered_map<std::string, std::uint32_t> exports;
++  Bytes sel;
++  RsoHeader sel_header{};
++  if (sel_path.empty() || !ReadFile(sel_path, &sel) || !ParseHeader(sel, &sel_header))
++  {
++    result.error = "RSO layout needs a readable sel = <static module .sel>";
++    return result;
++  }
++  for (std::uint32_t i = 0; i + 16 <= sel_header.exports_size; i += 16)
++  {
++    const std::uint32_t entry = sel_header.exports + i;
++    const std::uint32_t offset = sel.U32(entry + 4), section = sel.U32(entry + 8);
++    if (section == SECTION_ABSOLUTE)
++      exports[sel.CString(sel_header.export_names + sel.U32(entry))] = offset;
++    else if (section < static_sections.size() && static_sections[section] != 0)
++      exports[sel.CString(sel_header.export_names + sel.U32(entry))] =
++          static_sections[section] + offset;
++  }
++
++  for (std::size_t m = 0; m < modules.size(); ++m)
++  {
++    Module& module = modules[m];
++    const RsoHeader& h = module.header;
++    module.section_address.resize(h.section_count);
++    for (std::uint32_t i = 0; i < h.section_count; ++i)
++    {
++      const std::uint32_t offset = module.file.U32(h.section_table + i * 8) & ~1u;
++      const std::uint32_t size = module.file.U32(h.section_table + i * 8 + 4);
++      if (offset != 0)
++        module.section_address[i] = module.base + offset;
++      else if (size != 0 && bss_address[m] == 0)
++      {
++        result.error = module.name + " has a bss section; give its address in the layout";
++        return result;
++      }
++      else if (size != 0)
++        module.section_address[i] = bss_address[m];
++    }
++    for (std::uint32_t i = 0; i + 16 <= h.exports_size; i += 16)
++    {
++      const std::uint32_t entry = h.exports + i;
++      const std::uint32_t section = module.file.U32(entry + 8);
++      if (section < h.section_count)
++        exports[module.file.CString(h.export_names + module.file.U32(entry))] =
++            module.section_address[section] + module.file.U32(entry + 4);
++    }
++  }
++
++  for (Module& module : modules)
++  {
++    const RsoHeader& h = module.header;
++    std::vector<std::uint8_t> image = module.file.data;
++    bool ok = true;
++    for (std::uint32_t i = 0; ok && i + 12 <= h.internals_size; i += 12)
++    {
++      const std::uint32_t entry = h.internals + i;
++      const std::uint32_t offset = module.file.U32(entry), info = module.file.U32(entry + 4);
++      const std::uint32_t section = info >> 8;
++      ok = section < h.section_count &&
++           Relocate(image, offset, static_cast<std::uint8_t>(info),
++                    module.section_address[section] + module.file.U32(entry + 8),
++                    module.base + offset);
++    }
++    // Imports nothing exports stay bound to the module's unresolved stub,
++    // which is also what the game's linker leaves them pointing at.
++    const std::uint32_t unresolved =
++        h.unresolved_section < h.section_count ?
++            module.section_address[h.unresolved_section] + h.unresolved_offset :
++            0;
++    std::uint32_t missing = 0;
++    for (std::uint32_t i = 0; ok && i + 12 <= h.externals_size; i += 12)
++    {
++      const std::uint32_t entry = h.externals + i;
++      const std::uint32_t offset = module.file.U32(entry), info = module.file.U32(entry + 4);
++      const std::uint32_t import = h.imports + (info >> 8) * 12;
++      ok = (info >> 8) * 12 + 12 <= h.imports_size;
++      if (!ok)
++        break;
++      const auto found = exports.find(module.file.CString(h.import_names + module.file.U32(import)));
++      missing += found == exports.end();
++      ok = Relocate(image, offset, static_cast<std::uint8_t>(info),
++                    (found != exports.end() ? found->second : unresolved) +
++                        module.file.U32(entry + 8),
++                    module.base + offset);
++    }
++    if (!ok)
++    {
++      result.error = module.name + ": malformed or unsupported relocation";
++      return result;
++    }
++
++    // Executable sections are the ones holding the prolog/epilog/unresolved
++    // entry points; RSO section tables carry no executable flag of their own.
++    for (const std::uint8_t index : {h.prolog_section, h.epilog_section, h.unresolved_section})
++    {
++      const std::uint32_t offset =
++          index < h.section_count ? module.file.U32(h.section_table + index * 8) & ~1u : 0;
++      const std::uint32_t size =
++          index < h.section_count ? module.file.U32(h.section_table + index * 8 + 4) : 0;
++      bool seen = false;
++      for (const RsoTextSection& text : result.text)
++        seen |= text.address == module.base + offset;
++      if (offset == 0 || size == 0 || seen || !module.file.Fits(offset, size))
++        continue;
++      result.text.push_back({module.name, module.base + offset,
++                             {image.begin() + offset, image.begin() + offset + size}});
++    }
++    identity << module.name << '=' << HashFileSha256(game_root / module.name).value_or("?")
++             << ";missing=" << missing << '\n';
++  }
++  identity << "sel=" << HashFileSha256(sel_path).value_or("?") << '\n';
++  result.identity = identity.str();
++  return result;
++}
++
++bool AppendDolTextSections(std::vector<std::uint8_t>& dol,
++                           const std::vector<RsoTextSection>& sections, std::string* error)
++{
++  const auto field = [&dol](std::uint32_t offset) { return dol.data() + offset; };
++  const auto write32 = [](std::uint8_t* p, std::uint32_t v) {
++    p[0] = static_cast<std::uint8_t>(v >> 24);
++    p[1] = static_cast<std::uint8_t>(v >> 16);
++    p[2] = static_cast<std::uint8_t>(v >> 8);
++    p[3] = static_cast<std::uint8_t>(v);
++  };
++  std::uint32_t slot = 0;
++  for (const RsoTextSection& section : sections)
++  {
++    while (slot < 7 && (field(0x90 + slot * 4)[0] | field(0x90 + slot * 4)[1] |
++                        field(0x90 + slot * 4)[2] | field(0x90 + slot * 4)[3]) != 0)
++      ++slot;
++    if (slot == 7)
++    {
++      *error = "no free DOL text slot for " + section.module;
++      return false;
++    }
++    dol.resize((dol.size() + 31) & ~std::size_t{31});
++    write32(field(slot * 4), static_cast<std::uint32_t>(dol.size()));
++    write32(field(0x48 + slot * 4), section.address);
++    write32(field(0x90 + slot * 4), static_cast<std::uint32_t>(section.bytes.size()));
++    dol.insert(dol.end(), section.bytes.begin(), section.bytes.end());
++  }
++  return true;
++}
++}  // namespace moderngekko::port
+diff --git a/tools/rso_link.hpp b/tools/rso_link.hpp
+new file mode 100644
+index 0000000..1038d88
+--- /dev/null
++++ b/tools/rso_link.hpp
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <cstdint>
++#include <filesystem>
++#include <string>
++#include <vector>
++
++namespace moderngekko::port
++{
++// Code the game loads at runtime from RSO modules (the Wii SDK's relocatable
++// shared objects). Linked ahead of time at the addresses the game's own
++// loader uses, it can be recompiled like DOL text; the chassis' chunk hash
++// check keeps it native only while RAM holds exactly these bytes.
++struct RsoTextSection
++{
++  std::string module;
++  std::uint32_t address = 0;
++  std::vector<std::uint8_t> bytes;
++};
++
++struct RsoLinkResult
++{
++  std::vector<RsoTextSection> text;
++  // Layout text plus the hash of every file it names, for the module cache key.
++  std::string identity;
++  std::string error;
++
++  explicit operator bool() const { return error.empty(); }
++};
++
++// Layout file, one directive per line ('#' or ';' starts a comment):
++//   sel = <path>                    static module export table (.sel)
++//   static_sections = <addr>...     runtime address of each static section index
++//   module = <path> <base> [<bss>]  RSO loaded in place at <base>; bss allocated at <bss>
++// Paths are relative to the game root. Modules may import from each other.
++RsoLinkResult LinkRsoLayout(const std::filesystem::path& layout,
++                            const std::filesystem::path& game_root);
++
++// Place each section in a free DOL text slot, appending its bytes to the file.
++bool AppendDolTextSections(std::vector<std::uint8_t>& dol,
++                           const std::vector<RsoTextSection>& sections, std::string* error);
++}  // namespace moderngekko::port
