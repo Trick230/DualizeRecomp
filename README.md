@@ -246,6 +246,13 @@ replaced piece by piece rather than extended.
   current-thread lookup. Each native handles the common case (a free or
   recursively owned mutex, an unlock that wakes nobody) and declines the rest
   to the guest code. Uncapped gameplay went from ~57 to ~62 FPS.
+- **`0008` Guest calls from automation.** The automation directory gains
+  `command=call address=<fn> args=<r3>,<r4>,... [thread=<OSThread>]
+  [async=1]`, which runs a guest function and writes its r3/f1. A plain call
+  runs on the interpreter with the CPU paused and puts every register back; an
+  async one diverts the guest thread into a small trampoline at 0x80001900 and
+  lets the game run, so the callee can block or wait on hardware.
+  `scripts/automation.py` drives the directory from Python.
 
 **ModernGekko's Dolphin fork**
 
@@ -326,7 +333,8 @@ lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
 lib/ModernGekko/    submodule: runtime the recompiled module runs on
 patches/            local fixes applied to the submodules
 config/             per-game runtime settings, RSO load layouts, native SDK lists, controller profile
-scripts/            build environment checks, SDK symbol finder, natives hashes
+scripts/            build environment checks, SDK symbol finder, natives hashes,
+                    automation client
 Makefile            the whole pipeline
 iso/                your disc image (gitignored)
 extracted/          extracted disc (gitignored)

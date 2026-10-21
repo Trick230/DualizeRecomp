@@ -1,0 +1,411 @@
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 86ca3bf..409a5e0 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -13,6 +13,7 @@
+ #include "Core/HW/Memmap.h"
+ #include "Core/Host.h"
+ #include "Core/NetPlay/NetPlayClient.h"
++#include "Core/PowerPC/Interpreter/Interpreter.h"
+ #include "Core/PowerPC/JitInterface.h"
+ #include "Core/PowerPC/PowerPC.h"
+ #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
+@@ -35,6 +36,7 @@
+ #include "moderngekko/module_loader.hpp"
+ 
+ #include <algorithm>
++#include <bit>
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -284,6 +286,242 @@ std::optional<RuntimeError> WriteAutomationMemory(u32 address,
+   return {};
+ }
+ 
++// Guest register state saved around an automation call.
++struct SavedGuestRegisters
++{
++  u32 pc, npc, msr, fpscr, exceptions, reserve_address;
++  int downcount;
++  u8 xer_ca, xer_so_ov;
++  u16 xer_stringctrl;
++  bool reserve;
++  PowerPC::ConditionRegister cr;
++  std::array<u32, 32> gpr;
++  std::array<PowerPC::PairedSingle, 32> ps;
++  std::array<u32, 1024> spr;
++
++  explicit SavedGuestRegisters(const PowerPC::PowerPCState& ppc)
++      : pc(ppc.pc), npc(ppc.npc), msr(ppc.msr.Hex), fpscr(ppc.fpscr.Hex),
++        exceptions(ppc.Exceptions), reserve_address(ppc.reserve_address),
++        downcount(ppc.downcount), xer_ca(ppc.xer_ca), xer_so_ov(ppc.xer_so_ov),
++        xer_stringctrl(ppc.xer_stringctrl), reserve(ppc.reserve), cr(ppc.cr),
++        spr(std::to_array(ppc.spr))
++  {
++    std::copy_n(ppc.gpr, 32, gpr.begin());
++    std::copy_n(ppc.ps, 32, ps.begin());
++  }
++
++  void Restore(PowerPC::PowerPCState& ppc) const
++  {
++    ppc.pc = pc;
++    ppc.npc = npc;
++    ppc.msr.Hex = msr;
++    ppc.fpscr.Hex = fpscr;
++    ppc.Exceptions = exceptions;
++    ppc.reserve_address = reserve_address;
++    ppc.downcount = downcount;
++    ppc.xer_ca = xer_ca;
++    ppc.xer_so_ov = xer_so_ov;
++    ppc.xer_stringctrl = xer_stringctrl;
++    ppc.reserve = reserve;
++    ppc.cr = cr;
++    std::ranges::copy(gpr, ppc.gpr);
++    std::ranges::copy(ps, ppc.ps);
++    std::ranges::copy(spr, ppc.spr);
++  }
++
++  // Only what an OSContext holds: time (TB, DEC), pending exceptions and the
++  // rest of the machine moved on while the thread ran.
++  void RestoreThreadContext(PowerPC::PowerPCState& ppc) const
++  {
++    ppc.pc = pc;
++    ppc.npc = npc;
++    ppc.msr.Hex = msr;
++    ppc.fpscr.Hex = fpscr;
++    ppc.xer_ca = xer_ca;
++    ppc.xer_so_ov = xer_so_ov;
++    ppc.xer_stringctrl = xer_stringctrl;
++    ppc.reserve = false;
++    ppc.cr = cr;
++    std::ranges::copy(gpr, ppc.gpr);
++    std::ranges::copy(ps, ppc.ps);
++    for (const u32 index : {u32{SPR_LR}, u32{SPR_CTR}, u32{SPR_GQR0}, u32{SPR_GQR0} + 1,
++                            u32{SPR_GQR0} + 2, u32{SPR_GQR0} + 3, u32{SPR_GQR0} + 4,
++                            u32{SPR_GQR0} + 5, u32{SPR_GQR0} + 6, u32{SPR_GQR0} + 7})
++    {
++      ppc.spr[index] = spr[index];
++    }
++  }
++};
++
++constexpr u32 kCurrentThreadAddress = 0x800000E4u;
++
++// Pauses the CPU at a dispatch boundary where `thread` (an OSThread, 0 for
++// any) is current and, if `need_ee`, external interrupts are enabled.
++std::optional<RuntimeError> PauseOnGuestThread(std::optional<Core::CPUThreadGuard>& guard,
++                                               u32 thread, bool need_ee)
++{
++  constexpr int max_attempts = 2000;
++  auto& system = Core::System::GetInstance();
++  for (int attempt = 0;; ++attempt)
++  {
++    guard.emplace(system);
++    const u32 current = system.GetMemory().Read_U32(kCurrentThreadAddress);
++    if ((thread == 0 || current == thread) && (!need_ee || system.GetPPCState().msr.EE))
++      return {};
++    guard.reset();
++    if (attempt == max_attempts)
++    {
++      return RuntimeError{RuntimeErrorCode::InvalidState,
++                          fmt::format("guest thread {:#010x} never became current", thread)};
++    }
++    // Long enough for the CPU to actually run before the next look.
++    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++  }
++}
++
++std::optional<RuntimeError> WriteCallResult(const std::filesystem::path& path, u32 r3, double f1)
++{
++  if (path.empty())
++    return {};
++  std::error_code ec;
++  std::filesystem::create_directories(path.parent_path(), ec);
++  std::ofstream output(path, std::ios::trunc);
++  output << fmt::format("r3={:#010x}\nf1={}\n", r3, f1);
++  if (!output)
++    return RuntimeError{RuntimeErrorCode::InitializationFailed, "could not write call result"};
++  return {};
++}
++
++// Runs one guest function to completion with the CPU paused, on the
++// interpreter, then puts every register back so the paused guest resumes as if
++// nothing happened; only the callee's memory side effects remain. The return
++// address is the low-memory header at 0x80000000, which is never code.
++//
++// A callee that blocks (a contended OSLockMutex) would switch guest threads
++// under us, so the call only starts while `thread` is current (or, for
++// thread 0, while interrupts are enabled, i.e. outside an OS critical
++// section), and fails instead of resuming another thread if the current
++// thread changes. Callees that wait on hardware (DVD, VI) need the async form.
++std::optional<RuntimeError> CallGuestFunctionPaused(const std::filesystem::path& path,
++                                                    u32 address,
++                                                    const std::vector<std::uint32_t>& args,
++                                                    u32 thread)
++{
++  constexpr u32 return_address = 0x80000000u;
++  constexpr u64 max_steps = 200'000'000;
++  auto& system = Core::System::GetInstance();
++  auto& memory = system.GetMemory();
++  std::optional<Core::CPUThreadGuard> guard;
++  if (auto error = PauseOnGuestThread(guard, thread, thread == 0))
++    return error;
++  const u32 caller_thread = memory.Read_U32(kCurrentThreadAddress);
++  auto& ppc = system.GetPPCState();
++  auto& interpreter = system.GetInterpreter();
++  const SavedGuestRegisters saved(ppc);
++
++  for (std::size_t i = 0; i < args.size(); ++i)
++    ppc.gpr[3 + i] = args[i];
++  ppc.msr.EE = 0;
++  ppc.Exceptions = 0;
++  ppc.reserve = false;
++  LR(ppc) = return_address;
++  ppc.pc = ppc.npc = address;
++  u64 steps = 0;
++  bool switched = false;
++  while (ppc.pc != return_address && steps++ < max_steps &&
++         !(switched = memory.Read_U32(kCurrentThreadAddress) != caller_thread))
++  {
++    interpreter.SingleStepInner();
++  }
++  const bool returned = ppc.pc == return_address;
++  const u32 r3 = ppc.gpr[3];
++  const double f1 = ppc.ps[1].PS0AsDouble();
++  saved.Restore(ppc);
++
++  if (switched)
++  {
++    return RuntimeError{RuntimeErrorCode::InvalidState,
++                        fmt::format("guest call {:#010x} blocked and switched threads; guest "
++                                    "state is no longer consistent",
++                                    address)};
++  }
++  if (!returned)
++  {
++    return RuntimeError{RuntimeErrorCode::InvalidState,
++                        fmt::format("guest call {:#010x} did not return within {} steps",
++                                    address, max_steps)};
++  }
++  return WriteCallResult(path, r3, f1);
++}
++
++// Runs one guest function on `thread` while the game keeps running, so the
++// callee may block, take interrupts and wait on hardware like any guest code.
++// The thread is diverted, at a point where interrupts are enabled, into a
++// trampoline in the unused low-memory area at 0x80001900 that calls the
++// function, publishes r3/f1 and a done flag, then spins in place; once the
++// thread is back on the spin, every register is put back as it was.
++std::optional<RuntimeError> CallGuestFunctionAsync(const std::filesystem::path& path,
++                                                   u32 address,
++                                                   const std::vector<std::uint32_t>& args,
++                                                   u32 thread)
++{
++  constexpr u32 trampoline = 0x80001900u;
++  constexpr u32 data = 0x80001980u;  // function, r3, f1 (8 bytes), done
++  constexpr std::array<u32, 10> code = {
++      0x3D808000u,  // lis   r12, 0x8000
++      0x818C1980u,  // lwz   r12, 0x1980(r12)
++      0x7D8903A6u,  // mtctr r12
++      0x4E800421u,  // bctrl
++      0x3D808000u,  // lis   r12, 0x8000
++      0x906C1984u,  // stw   r3, 0x1984(r12)
++      0xD82C1988u,  // stfd  f1, 0x1988(r12)
++      0x38000001u,  // li    r0, 1
++      0x900C1990u,  // stw   r0, 0x1990(r12)
++      0x48000000u,  // b     .
++  };
++  constexpr u32 spin = trampoline + 4 * (code.size() - 1);
++  constexpr auto timeout = std::chrono::minutes(2);
++
++  auto& system = Core::System::GetInstance();
++  auto& memory = system.GetMemory();
++  std::optional<Core::CPUThreadGuard> guard;
++  if (auto error = PauseOnGuestThread(guard, thread, true))
++    return error;
++  const u32 caller_thread = memory.Read_U32(kCurrentThreadAddress);
++  auto& ppc = system.GetPPCState();
++  const SavedGuestRegisters saved(ppc);
++  for (std::size_t i = 0; i < code.size(); ++i)
++    memory.Write_U32(code[i], trampoline + 4 * static_cast<u32>(i));
++  memory.Write_U32(address, data);
++  memory.Write_U32(0, data + 16);
++  for (std::size_t i = 0; i < args.size(); ++i)
++    ppc.gpr[3 + i] = args[i];
++  ppc.pc = ppc.npc = trampoline;
++  guard.reset();
++
++  const auto deadline = std::chrono::steady_clock::now() + timeout;
++  while (std::chrono::steady_clock::now() < deadline)
++  {
++    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    guard.emplace(system);
++    if (memory.Read_U32(data + 16) != 0 &&
++        memory.Read_U32(kCurrentThreadAddress) == caller_thread && ppc.pc == spin)
++    {
++      const u32 r3 = memory.Read_U32(data + 4);
++      const double f1 = std::bit_cast<double>(memory.Read_U64(data + 8));
++      saved.RestoreThreadContext(ppc);
++      return WriteCallResult(path, r3, f1);
++    }
++    guard.reset();
++  }
++  const Core::CPUThreadGuard final_guard(system);
++  return RuntimeError{RuntimeErrorCode::InvalidState,
++                      fmt::format("async guest call {:#010x} did not return (done={}, thread "
++                                  "{:#010x}, pc {:#010x}); the thread is still diverted",
++                                  address, memory.Read_U32(data + 16),
++                                  memory.Read_U32(kCurrentThreadAddress), ppc.pc)};
++}
++
+ std::optional<RuntimeError> ApplyAutomationCommand(Runtime& runtime,
+                                                    RuntimeAutomationState& state,
+                                                    const automation::Command& command,
+@@ -346,6 +584,11 @@ std::optional<RuntimeError> ApplyAutomationCommand(Runtime& runtime,
+     if (auto error = WriteAutomationMemory(command.address, command.data))
+       return error;
+     break;
++  case automation::CommandType::Call:
++    if (auto error = (command.async ? CallGuestFunctionAsync : CallGuestFunctionPaused)(
++            command.path, command.address, command.args, command.thread))
++      return error;
++    break;
+   case automation::CommandType::Stop:
+     runtime.RequestStop();
+     break;
+@@ -365,6 +608,7 @@ bool AutomationCommandNeedsReadyCore(automation::CommandType type)
+   case automation::CommandType::Screenshot:
+   case automation::CommandType::ReadMemory:
+   case automation::CommandType::WriteMemory:
++  case automation::CommandType::Call:
+   case automation::CommandType::PadFrames:
+     return true;
+   case automation::CommandType::Pad:
+diff --git a/tools/automation_protocol.cpp b/tools/automation_protocol.cpp
+index 25f4167..585e912 100644
+--- a/tools/automation_protocol.cpp
++++ b/tools/automation_protocol.cpp
+@@ -171,6 +171,8 @@ std::optional<CommandType> ParseCommandType(std::string_view value)
+     return CommandType::Screenshot;
+   if (text == "read_memory")
+     return CommandType::ReadMemory;
++  if (text == "call")
++    return CommandType::Call;
+   if (text == "write_memory")
+     return CommandType::WriteMemory;
+   if (text == "stop")
+@@ -389,6 +391,81 @@ bool ParseWriteMemoryCommand(const std::map<std::string, std::string>& values, C
+   command->size = static_cast<std::uint32_t>(data->size());
+   return true;
+ }
++
++// call address=<guest function> [args=<r3>,<r4>,...] [thread=<OSThread>] [async=0|1]
++//      [path=<result file>]
++bool ParseCallCommand(const std::map<std::string, std::string>& values, Command* command,
++                      std::string* error)
++{
++  constexpr std::size_t max_args = 8;  // r3..r10
++  for (const auto& [key, value] : values)
++  {
++    if (key != "command" && key != "address" && key != "args" && key != "thread" &&
++        key != "async" && key != "path")
++    {
++      if (error)
++        *error = "unknown call field: " + key;
++      return false;
++    }
++  }
++
++  const auto address_it = values.find("address");
++  const auto address =
++      address_it == values.end() ? std::nullopt : ParseUnsigned(address_it->second);
++  if (!address || (*address & 3) != 0)
++  {
++    if (error)
++      *error = "call requires address=<word-aligned guest function>";
++    return false;
++  }
++
++  if (const auto args_it = values.find("args"); args_it != values.end())
++  {
++    std::string_view rest = args_it->second;
++    while (!Trim(rest).empty())
++    {
++      const std::size_t comma = rest.find(',');
++      const auto arg = ParseUnsigned(rest.substr(0, comma));
++      if (!arg || command->args.size() == max_args)
++      {
++        if (error)
++          *error = "args must be up to 8 comma-separated unsigned values";
++        return false;
++      }
++      command->args.push_back(*arg);
++      rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
++    }
++  }
++
++  if (const auto thread_it = values.find("thread"); thread_it != values.end())
++  {
++    const auto thread = ParseUnsigned(thread_it->second);
++    if (!thread)
++    {
++      if (error)
++        *error = "thread must be an unsigned value";
++      return false;
++    }
++    command->thread = *thread;
++  }
++
++  if (const auto async_it = values.find("async"); async_it != values.end())
++  {
++    const std::string async = Trim(async_it->second);
++    if (async != "0" && async != "1")
++    {
++      if (error)
++        *error = "async must be 0 or 1";
++      return false;
++    }
++    command->async = async == "1";
++  }
++
++  command->address = *address;
++  if (const auto path_it = values.find("path"); path_it != values.end())
++    command->path = Trim(path_it->second);
++  return true;
++}
+ }  // namespace
+ 
+ std::filesystem::path ResolveControlPath(const std::filesystem::path& automation_directory,
+@@ -499,6 +576,10 @@ bool ParseCommandFile(const std::filesystem::path& path, Command* command, std::
+     if (!ParseWriteMemoryCommand(values, &parsed, error))
+       return false;
+     break;
++  case CommandType::Call:
++    if (!ParseCallCommand(values, &parsed, error))
++      return false;
++    break;
+   case CommandType::Pause:
+   case CommandType::Resume:
+   case CommandType::Stop:
+diff --git a/tools/automation_protocol.hpp b/tools/automation_protocol.hpp
+index 2396f01..b636c06 100644
+--- a/tools/automation_protocol.hpp
++++ b/tools/automation_protocol.hpp
+@@ -23,6 +23,7 @@ enum class CommandType
+   Screenshot,
+   ReadMemory,
+   WriteMemory,
++  Call,
+   Stop,
+ };
+ 
+@@ -43,6 +44,9 @@ struct Command
+   std::uint32_t size = 0;
+   std::uint32_t frames = 0;
+   std::vector<std::uint8_t> data;
++  std::vector<std::uint32_t> args;  // call: r3, r4, ...
++  std::uint32_t thread = 0;          // call: OSThread that must be current, 0 = any
++  bool async = false;                // call: run alongside the game instead of paused
+ };
+ 
+ struct Status
