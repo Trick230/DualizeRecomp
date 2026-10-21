@@ -129,8 +129,9 @@ dolrecomp: submodules
 		-DDOLRECOMP_ENABLE_LLVM=$(DOLRECOMP_ENABLE_LLVM) $(LLVM_CMAKE_ARG)
 	cmake --build $(DOLRECOMP_BUILD) --target dolrecomp -j$(JOBS)
 
-# Local fixes on top of the pinned submodules. Each patch is applied once;
-# one that already applies in reverse is left alone.
+# Local fixes on top of the pinned submodules, stacked in order. Later patches
+# can rewrite lines an earlier one added, so only the newest applied patch is
+# guaranteed to reverse-apply: find it from the end and apply the rest.
 # patches/ModernGekko/ targets the submodule itself, patches/ModernGekko-dolphin/
 # its nested vendor/dolphin submodule (GXRuntime, the module CPU runtime) and
 # patches/ModernGekko-dolphin-DolRecomp/ the recompiler vendored inside that.
@@ -140,11 +141,12 @@ PATCH_TARGETS := ModernGekko:$(MODERNGEKKO_DIR) ModernGekko-dolphin:$(MODERNGEKK
 patches: submodules
 	@for target in $(PATCH_TARGETS); do \
 		dir="$${target%%:*}"; repo="$${target#*:}"; \
-		for patch in patches/$$dir/*.patch; do \
-			[ -f "$$patch" ] || continue; \
-			if git -C "$$repo" apply --reverse --check "$(CURDIR)/$$patch" 2>/dev/null; then \
-				continue; \
-			fi; \
+		pending=""; \
+		for patch in $$(ls -r patches/$$dir/*.patch 2>/dev/null); do \
+			git -C "$$repo" apply --reverse --check "$(CURDIR)/$$patch" 2>/dev/null && break; \
+			pending="$$patch $$pending"; \
+		done; \
+		for patch in $$pending; do \
 			echo "Applying $$patch"; \
 			git -C "$$repo" apply "$(CURDIR)/$$patch" || exit 1; \
 		done; \
