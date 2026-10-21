@@ -1,0 +1,159 @@
+diff --git a/GXRuntime/include/core/cpu.h b/GXRuntime/include/core/cpu.h
+index 6654e24..686a96e 100644
+--- a/GXRuntime/include/core/cpu.h
++++ b/GXRuntime/include/core/cpu.h
+@@ -307,6 +307,65 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value
+         ppc_mem_write_slow(cpu, addr, value, 1);
+ }
+ 
++// The same accesses for generated code, which passes the address of the
++// instruction (cia) instead of storing ctx->pc ahead of every load and store:
++// only the slow path can reach anything that reads the pc (MMIO handlers,
++// diagnostics), so only the slow path pays for setting it.
++u64 ppc_mem_read_slow_at(CPUState* cpu, u32 cia, u32 addr, u8 size);
++void ppc_mem_write_slow_at(CPUState* cpu, u32 cia, u32 addr, u64 value, u8 size);
++
++static GXRUNTIME_ALWAYS_INLINE u64 mem_read64_at(CPUState* cpu, u32 cia, u32 addr) {
++    const u8* ptr = ppc_fast_ptr(cpu->fast_read, addr, 8);
++    return ptr ? read_be64(ptr) : ppc_mem_read_slow_at(cpu, cia, addr, 8);
++}
++
++static GXRUNTIME_ALWAYS_INLINE u32 mem_read32_at(CPUState* cpu, u32 cia, u32 addr) {
++    const u8* ptr = ppc_fast_ptr(cpu->fast_read, addr, 4);
++    return ptr ? read_be32(ptr) : (u32)ppc_mem_read_slow_at(cpu, cia, addr, 4);
++}
++
++static GXRUNTIME_ALWAYS_INLINE u16 mem_read16_at(CPUState* cpu, u32 cia, u32 addr) {
++    const u8* ptr = ppc_fast_ptr(cpu->fast_read, addr, 2);
++    return ptr ? read_be16(ptr) : (u16)ppc_mem_read_slow_at(cpu, cia, addr, 2);
++}
++
++static GXRUNTIME_ALWAYS_INLINE u8 mem_read8_at(CPUState* cpu, u32 cia, u32 addr) {
++    const u8* ptr = ppc_fast_ptr(cpu->fast_read, addr, 1);
++    return ptr ? *ptr : (u8)ppc_mem_read_slow_at(cpu, cia, addr, 1);
++}
++
++static GXRUNTIME_ALWAYS_INLINE void mem_write64_at(CPUState* cpu, u32 cia, u32 addr, u64 value) {
++    u8* ptr = ppc_fast_write_ptr(cpu, addr, 8);
++    if (ptr)
++        write_be64(ptr, value);
++    else
++        ppc_mem_write_slow_at(cpu, cia, addr, value, 8);
++}
++
++static GXRUNTIME_ALWAYS_INLINE void mem_write32_at(CPUState* cpu, u32 cia, u32 addr, u32 value) {
++    u8* ptr = ppc_fast_write_ptr(cpu, addr, 4);
++    if (ptr)
++        write_be32(ptr, value);
++    else
++        ppc_mem_write_slow_at(cpu, cia, addr, value, 4);
++}
++
++static GXRUNTIME_ALWAYS_INLINE void mem_write16_at(CPUState* cpu, u32 cia, u32 addr, u16 value) {
++    u8* ptr = ppc_fast_write_ptr(cpu, addr, 2);
++    if (ptr)
++        write_be16(ptr, value);
++    else
++        ppc_mem_write_slow_at(cpu, cia, addr, value, 2);
++}
++
++static GXRUNTIME_ALWAYS_INLINE void mem_write8_at(CPUState* cpu, u32 cia, u32 addr, u8 value) {
++    u8* ptr = ppc_fast_write_ptr(cpu, addr, 1);
++    if (ptr)
++        *ptr = value;
++    else
++        ppc_mem_write_slow_at(cpu, cia, addr, value, 1);
++}
++
+ #undef GXRUNTIME_ALWAYS_INLINE
+ 
+ bool cpu_init(CPUState* cpu);
+diff --git a/GXRuntime/src/core/cpu.c b/GXRuntime/src/core/cpu.c
+index 4e3b714..3d6298c 100644
+--- a/GXRuntime/src/core/cpu.c
++++ b/GXRuntime/src/core/cpu.c
+@@ -64,6 +64,16 @@ void ppc_mem_write_slow(CPUState* cpu, u32 addr, u64 value, u8 size) {
+     }
+ }
+ 
++u64 ppc_mem_read_slow_at(CPUState* cpu, u32 cia, u32 addr, u8 size) {
++    cpu->pc = cia;
++    return ppc_mem_read_slow(cpu, addr, size);
++}
++
++void ppc_mem_write_slow_at(CPUState* cpu, u32 cia, u32 addr, u64 value, u8 size) {
++    cpu->pc = cia;
++    ppc_mem_write_slow(cpu, addr, value, size);
++}
++
+ bool cpu_init(CPUState* cpu) {
+     memset(cpu, 0, sizeof(*cpu));
+ 
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index 91e662d..67063e6 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -122,6 +122,7 @@ private:
+   };
+ 
+   void OnICacheInvalidate(u32 address, u32 length);
++  bool LineMayHoldCode(u32 ea);
+   // Every chunk state change goes through here so the direct-call table the
+   // module reads stays in step with the SMC guard.
+   void SetChunkState(u32 index, ChunkState state)
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+index 7b3d845..e11b875 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+@@ -341,7 +341,8 @@ void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32
+ 
+   if (!ppc.m_enable_dcache)
+   {
+-    core->m_system.GetJitInterface().InvalidateICacheLine(ea);
++    if (core->LineMayHoldCode(ea))
++      core->m_system.GetJitInterface().InvalidateICacheLine(ea);
+     return;
+   }
+ 
+@@ -362,6 +363,32 @@ void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32
+   }
+ }
+ 
++// With the data cache off, dcbst/dcbf/dcbi only matter to the code caches: each
++// invalidates one icache line. Nearly every call flushes plain data
++// (DCFlushRange over vertex and texture buffers), so lines that hold neither
++// module code nor a fallback JIT block skip the invalidation, exactly as
++// Jit64::dcbx tests the block cache's valid_block bits before calling out.
++bool StaticRecompCore::LineMayHoldCode(u32 ea)
++{
++  const u32 line = ea & ~31u;
++  if (ChunkIndexOf(line) >= 0 || ChunkIndexOf(line + 28) >= 0)
++    return true;
++  if (!m_fallback_jit)
++    return false;
++
++  u32 physical = line;
++  if (m_guest.msr & PPC_MSR_IR)
++  {
++    const u32 bat = m_system.GetMMU().GetIBATTable()[line >> PowerPC::BAT_INDEX_SHIFT];
++    // Page-table translation: leave it to the full invalidation path.
++    if ((bat & PowerPC::BAT_MAPPED_BIT) == 0)
++      return true;
++    physical = (bat & PowerPC::BAT_RESULT_MASK) | (line & (PowerPC::BAT_PAGE_SIZE - 1));
++  }
++  const u32* valid_block = m_fallback_jit->GetBlockCache()->GetBlockBitSet();
++  return ((valid_block[physical >> 10] >> ((physical >> 5) & 31u)) & 1u) != 0;
++}
++
+ void StaticRecompCore::HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia)
+ {
+   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+@@ -395,7 +422,7 @@ void StaticRecompCore::HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia)
+       const u32 ea = (ra ? cpu->gpr[ra] : 0u) + cpu->gpr[rb];
+       if (xo == 982u)
+         ppc.iCache.Invalidate(system.GetMemory(), system.GetJitInterface(), ea);
+-      else
++      else if (core->LineMayHoldCode(ea))
+         system.GetJitInterface().InvalidateICacheLine(ea);
+       // These bypass SingleStepInner, so charge Dolphin's PPCTables cost
+       // here (icbi 4, dcbf/dcbst/dcbi 5); their emitted block cost is zero.
