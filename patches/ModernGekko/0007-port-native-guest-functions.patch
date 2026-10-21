@@ -1,0 +1,301 @@
+diff --git a/src/module_natives/rvl_os.c b/src/module_natives/rvl_os.c
+new file mode 100644
+index 0000000..8df56fc
+--- /dev/null
++++ b/src/module_natives/rvl_os.c
+@@ -0,0 +1,202 @@
++// Host implementations of Revolution SDK OS functions, linked into the
++// recompiled module and wired up by DolRecomp --natives (see natives.h there).
++//
++// Each one either performs the whole call and returns true, or returns false
++// before touching guest state so the recompiled SDK code runs instead. The
++// structure offsets below belong to one SDK build; the natives file pins every
++// entry to the exact guest bytes it replaces, so a different build is refused
++// at recompile time instead of corrupting memory here.
++//
++// Interrupt masking is elided: the module delivers interrupts only between
++// dispatches, never inside a call, so the guest's disable/restore pair around
++// these bodies has no observable effect. Volatile registers other than the
++// return value are left as they are; the SDK is compiled to the PPC EABI and
++// no caller reads them after a call.
++
++#include "core/cpu.h"
++
++// Lomem
++#define OS_CURRENT_THREAD 0x800000E4u
++
++// OSThread
++#define THREAD_PRIORITY 720u
++#define THREAD_BASE 724u
++#define THREAD_MUTEX 752u
++#define THREAD_MUTEX_QUEUE_HEAD 756u
++#define THREAD_MUTEX_QUEUE_TAIL 760u
++#define THREAD_SIZE 764u
++
++// OSMutex
++#define MUTEX_QUEUE_HEAD 0u
++#define MUTEX_THREAD 8u
++#define MUTEX_COUNT 12u
++#define MUTEX_LINK_NEXT 16u
++#define MUTEX_LINK_PREV 20u
++#define MUTEX_SIZE 24u
++
++// __OSRunQueueHint, a small-data global
++#define RUN_QUEUE_HINT_SDA_OFFSET (-27532)
++
++static inline u32 load(const u8* base, u32 offset) {
++    return read_be32(base + offset);
++}
++
++static inline void store(u8* base, u32 offset, u32 value) {
++    write_be32(base + offset, value);
++}
++
++// Host view of a guest object that can be read and written in place, or NULL
++// when any byte of it needs the out-of-line memory path.
++static inline u8* object(CPUState* ctx, u32 address, u32 size) {
++    return address ? ppc_fast_write_ptr(ctx, address, size) : NULL;
++}
++
++static inline u8* current_thread(CPUState* ctx, u32* address) {
++    const u8* slot = ppc_fast_ptr(ctx->fast_read, OS_CURRENT_THREAD, 4);
++    if (!slot)
++        return NULL;
++    *address = read_be32(slot);
++    return object(ctx, *address, THREAD_SIZE);
++}
++
++static inline u32 msr_ee(u32 msr) {
++    return (msr >> 15) & 1u;
++}
++
++static inline void set_cr0_compare_zero(CPUState* ctx, s32 value) {
++    u32 bits = value < 0 ? 0x8u : value > 0 ? 0x4u : 0x2u;
++    bits |= (ctx->xer >> 31) & 1u;
++    ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (bits << 28);
++}
++
++// BOOL OSDisableInterrupts(void)
++bool rvl_OSDisableInterrupts(CPUState* ctx) {
++    const u32 msr = ctx->msr;
++    ctx->gpr[4] = msr & ~PPC_MSR_EE;
++    ctx->msr = ctx->gpr[4];
++    ctx->gpr[3] = msr_ee(msr);
++    ctx->downcount -= 5;
++    return true;
++}
++
++// BOOL OSEnableInterrupts(void)
++bool rvl_OSEnableInterrupts(CPUState* ctx) {
++    const u32 msr = ctx->msr;
++    ctx->gpr[4] = msr | PPC_MSR_EE;
++    ctx->msr = ctx->gpr[4];
++    ctx->gpr[3] = msr_ee(msr);
++    ctx->downcount -= 5;
++    return true;
++}
++
++// BOOL OSRestoreInterrupts(BOOL level)
++bool rvl_OSRestoreInterrupts(CPUState* ctx) {
++    const u32 msr = ctx->msr;
++    set_cr0_compare_zero(ctx, (s32)ctx->gpr[3]);
++    ctx->gpr[4] = msr;
++    ctx->gpr[5] = ctx->gpr[3] ? msr | PPC_MSR_EE : msr & ~PPC_MSR_EE;
++    ctx->msr = ctx->gpr[5];
++    ctx->gpr[3] = msr_ee(msr);
++    ctx->downcount -= 7;
++    return true;
++}
++
++// OSThread* OSGetCurrentThread(void)
++bool rvl_OSGetCurrentThread(CPUState* ctx) {
++    const u8* slot = ppc_fast_ptr(ctx->fast_read, OS_CURRENT_THREAD, 4);
++    if (!slot)
++        return false;
++    ctx->gpr[3] = read_be32(slot);
++    ctx->downcount -= 3;
++    return true;
++}
++
++// void OSLockMutex(OSMutex* mutex)
++//
++// Takes a free mutex or recurses into an owned one. Contention sleeps the
++// thread, which only the guest scheduler can do.
++bool rvl_OSLockMutex(CPUState* ctx) {
++    const u32 mutex_address = ctx->gpr[3];
++    u32 thread_address;
++    u8* thread = current_thread(ctx, &thread_address);
++    u8* mutex = object(ctx, mutex_address, MUTEX_SIZE);
++    if (!thread || !mutex)
++        return false;
++
++    const u32 owner = load(mutex, MUTEX_THREAD);
++    if (owner == thread_address) {
++        store(mutex, MUTEX_COUNT, load(mutex, MUTEX_COUNT) + 1u);
++        ctx->downcount -= 30;
++        return true;
++    }
++    if (owner != 0)
++        return false;
++
++    // EnqueueTail(&thread->queueMutex, mutex, link)
++    const u32 tail_address = load(thread, THREAD_MUTEX_QUEUE_TAIL);
++    u8* tail = NULL;
++    if (tail_address && !(tail = object(ctx, tail_address, MUTEX_SIZE)))
++        return false;
++    store(mutex, MUTEX_THREAD, thread_address);
++    store(mutex, MUTEX_COUNT, load(mutex, MUTEX_COUNT) + 1u);
++    if (tail)
++        store(tail, MUTEX_LINK_NEXT, mutex_address);
++    else
++        store(thread, THREAD_MUTEX_QUEUE_HEAD, mutex_address);
++    store(mutex, MUTEX_LINK_PREV, tail_address);
++    store(mutex, MUTEX_LINK_NEXT, 0);
++    store(thread, THREAD_MUTEX_QUEUE_TAIL, mutex_address);
++    ctx->downcount -= 40;
++    return true;
++}
++
++// void OSUnlockMutex(OSMutex* mutex)
++//
++// Handles unlocks that wake nobody: a recursive release, or a final release
++// with no waiter, no inherited priority to drop and no reschedule pending.
++bool rvl_OSUnlockMutex(CPUState* ctx) {
++    const u32 mutex_address = ctx->gpr[3];
++    u32 thread_address;
++    u8* thread = current_thread(ctx, &thread_address);
++    u8* mutex = object(ctx, mutex_address, MUTEX_SIZE);
++    if (!thread || !mutex)
++        return false;
++
++    if (load(mutex, MUTEX_THREAD) != thread_address) {
++        ctx->downcount -= 25;
++        return true;
++    }
++    const u32 count = load(mutex, MUTEX_COUNT) - 1u;
++    if (count != 0) {
++        store(mutex, MUTEX_COUNT, count);
++        ctx->downcount -= 30;
++        return true;
++    }
++
++    const u8* hint = ppc_fast_ptr(ctx->fast_read,
++                                  ctx->gpr[13] + (u32)RUN_QUEUE_HINT_SDA_OFFSET, 4);
++    if (!hint || read_be32(hint) != 0 || load(mutex, MUTEX_QUEUE_HEAD) != 0 ||
++        (s32)load(thread, THREAD_PRIORITY) < (s32)load(thread, THREAD_BASE))
++        return false;
++
++    // DequeueItem(&thread->queueMutex, mutex, link)
++    const u32 next_address = load(mutex, MUTEX_LINK_NEXT);
++    const u32 prev_address = load(mutex, MUTEX_LINK_PREV);
++    u8* next = NULL;
++    u8* prev = NULL;
++    if ((next_address && !(next = object(ctx, next_address, MUTEX_SIZE))) ||
++        (prev_address && !(prev = object(ctx, prev_address, MUTEX_SIZE))))
++        return false;
++    store(mutex, MUTEX_COUNT, 0);
++    if (next)
++        store(next, MUTEX_LINK_PREV, prev_address);
++    else
++        store(thread, THREAD_MUTEX_QUEUE_TAIL, prev_address);
++    if (prev)
++        store(prev, MUTEX_LINK_NEXT, next_address);
++    else
++        store(thread, THREAD_MUTEX_QUEUE_HEAD, next_address);
++    store(mutex, MUTEX_THREAD, 0);
++    ctx->downcount -= 60;
++    return true;
++}
+diff --git a/tools/moderngekko_port.cpp b/tools/moderngekko_port.cpp
+index 9482f20..02f4196 100644
+--- a/tools/moderngekko_port.cpp
++++ b/tools/moderngekko_port.cpp
+@@ -459,7 +459,7 @@ std::string ModuleSourcesIdentity(const fs::path& source_root)
+ {
+   std::vector<std::pair<std::string, fs::path>> files;
+   for (const char* dir : {"vendor/dolphin/module-template", "vendor/dolphin/GXRuntime/include",
+-                          "vendor/dolphin/GXRuntime/src/core"})
++                          "vendor/dolphin/GXRuntime/src/core", "src/module_natives"})
+   {
+     std::error_code ec;
+     for (fs::recursive_directory_iterator it(source_root / dir, ec), end; !ec && it != end;
+@@ -718,13 +718,39 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+   // so edits there must miss the cache even when no ABI version moved.
+   const std::string module_sources = ModuleSourcesIdentity(source_root);
+ 
++  // Host implementations of guest functions: the list picks which guest
++  // functions they replace, the sources in src/module_natives provide them.
++  std::string natives_identity = "none";
++  std::string natives_sources;
++  if (!options.natives.empty())
++  {
++    const auto natives_hash = moderngekko::HashFileSha256(options.natives);
++    if (!natives_hash)
++    {
++      std::cerr << "natives list is unreadable: " << options.natives << '\n';
++      return std::nullopt;
++    }
++    natives_identity = *natives_hash;
++    std::vector<std::string> sources;
++    std::error_code ec;
++    for (fs::directory_iterator it(source_root / "src/module_natives", ec), end; !ec && it != end;
++         it.increment(ec))
++    {
++      if (it->path().extension() == ".c")
++        sources.push_back(it->path().generic_string());
++    }
++    std::ranges::sort(sources);
++    for (const std::string& source : sources)
++      natives_sources += (natives_sources.empty() ? "" : ";") + source;
++  }
++
+   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
+       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
+       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
+       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
+       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
+-      *dolrecomp_hash + "|module_sources=" + module_sources + "|rso=" + rso.identity + "|" +
++      *dolrecomp_hash + "|module_sources=" + module_sources + "|rso=" + rso.identity + "|natives=" + natives_identity + "|" +
+       moderngekko::pgo::PgoCacheIdentity(options.pgo) + DolRecompCodegenIdentity();
+   std::ostringstream key_tail;
+   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
+@@ -836,6 +862,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+   else
+     generate += "--cpu broadway " + Quote(recomp_dol) + " " + game.disc_id + " " +
+                 Quote(generated_parent);
++  if (!options.natives.empty())
++    generate += " --natives " + Quote(fs::absolute(options.natives));
+   if (!RunCommand(generate))
+     return std::nullopt;
+ 
+@@ -880,6 +908,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+            : " -DRECOMPCORE_MODULE_OPT_LEVEL=" + options.opt_level) +
+       " -DCHASSIS_ABI_DIR=" +
+       Quote(source_root / "vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp");
++  if (!natives_sources.empty())
++    configure += " -DMODULE_EXTRA_SOURCES=" + QuoteText(natives_sources);
+   if (!pgo_compile_flags.empty())
+     configure += " -DCMAKE_C_FLAGS=" + QuoteText(pgo_compile_flags) +
+                  " -DCMAKE_SHARED_LINKER_FLAGS=" + QuoteText(pgo_compile_flags);
+diff --git a/tools/port_command_line.hpp b/tools/port_command_line.hpp
+index 57a8852..c17cddd 100644
+--- a/tools/port_command_line.hpp
++++ b/tools/port_command_line.hpp
+@@ -18,6 +18,7 @@ struct BuildOptions
+   std::string backend;
+   fs::path output;
+   fs::path rso_layout;
++  fs::path natives;
+   std::vector<std::string> runner_arguments;
+   pgo::PgoBuildOptions pgo;
+   pgo::ManifestFacts pgo_facts;
+@@ -87,6 +88,8 @@ inline CommandLine ParseCommandLine(int argc, const char* const* argv,
+       parsed.build.output = fs::path(argv[++i]);
+     else if (argument == "--rso-layout" && i + 1 < argc)
+       parsed.build.rso_layout = fs::path(argv[++i]);
++    else if (argument == "--natives" && i + 1 < argc)
++      parsed.build.natives = fs::path(argv[++i]);
+     else if (argument == "--profile-dir" && i + 1 < argc && is_pgo_run)
+       parsed.pgo_run.profile_dir = fs::path(argv[++i]);
+     else if (argument == "--llvm-profdata" && i + 1 < argc && is_pgo_run)

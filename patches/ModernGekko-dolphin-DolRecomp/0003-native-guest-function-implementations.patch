@@ -1,0 +1,484 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5d17efd..6a265c9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -212,6 +212,7 @@ add_library(dr_app STATIC
+     src/app/setup.c
+     src/app/paths.c
+     src/app/pipeline.c
++    src/app/natives.c
+ )
+ target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
+ # The generated-object cache must invalidate when the code that generates those
+@@ -271,6 +272,13 @@ add_test(NAME source_policy
+         -DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/check_source_policy.cmake)
+ 
++add_executable(test_natives tests/test_natives.c)
++target_link_libraries(test_natives PRIVATE dr_app)
++if(DOLRECOMP_ENABLE_LLVM)
++    set_property(TARGET test_natives PROPERTY LINKER_LANGUAGE CXX)
++endif()
++add_test(NAME natives COMMAND test_natives)
++
+ add_executable(test_opcodes tests/test_opcodes.c)
+ target_link_libraries(test_opcodes PRIVATE dr_frontend)
+ add_test(NAME opcodes COMMAND test_opcodes)
+diff --git a/src/app/cli.c b/src/app/cli.c
+index 63cd6cc..1404df3 100644
+--- a/src/app/cli.c
++++ b/src/app/cli.c
+@@ -27,6 +27,7 @@ void print_usage(const char* argv0) {
+     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
+     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
+     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
++    fprintf(stderr, "  --natives <path>               Host implementations for listed guest functions (C backend)\n");
+     fprintf(stderr, "  --setup                        Download titles database and optionally install wit\n");
+     fprintf(stderr, "\n");
+     fprintf(stderr, "Examples:\n");
+@@ -443,6 +444,16 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
+             continue;
+         }
+ 
++        if (strcmp(arg, "--natives") == 0 || strncmp(arg, "--natives=", 10) == 0) {
++            const char* path = arg[9] == '=' ? arg + 10 : (i + 1 < argc ? argv[++i] : "");
++            if (path[0] == '\0') {
++                fprintf(stderr, "error: --natives needs a path\n");
++                return 0;
++            }
++            opts->natives_path = path;
++            continue;
++        }
++
+         if (arg[0] == '-' && arg[1] != '\0') {
+             fprintf(stderr, "error: unknown option '%s'\n", arg);
+             return 0;
+diff --git a/src/app/cli.h b/src/app/cli.h
+index a088f1f..ed8f334 100644
+--- a/src/app/cli.h
++++ b/src/app/cli.h
+@@ -15,6 +15,7 @@ typedef struct {
+     const char* title_id_arg;
+     const char* output_arg;
+     const char* map_path;
++    const char* natives_path;
+     const char* llvm_targets;
+     const char* profile_generate_path;
+     const char* profile_use_path;
+diff --git a/src/app/natives.c b/src/app/natives.c
+new file mode 100644
+index 0000000..dab1327
+--- /dev/null
++++ b/src/app/natives.c
+@@ -0,0 +1,135 @@
++#include "app/natives.h"
++
++#include <ctype.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static u64 fnv1a64(const u8* data, u32 size) {
++    u64 hash = 0xCBF29CE484222325ull;
++    for (u32 i = 0; i < size; ++i) {
++        hash ^= data[i];
++        hash *= 0x100000001B3ull;
++    }
++    return hash;
++}
++
++static int valid_symbol(const char* name) {
++    if (!isalpha((unsigned char)name[0]) && name[0] != '_')
++        return 0;
++    for (const char* c = name; *c; ++c) {
++        if (!isalnum((unsigned char)*c) && *c != '_')
++            return 0;
++    }
++    return 1;
++}
++
++int natives_load(DolRecompNativeList* list, const char* path) {
++    memset(list, 0, sizeof(*list));
++    FILE* file = fopen(path, "r");
++    if (!file) {
++        fprintf(stderr, "error: cannot open natives file %s\n", path);
++        return 0;
++    }
++
++    u32 capacity = 0;
++    char line[512];
++    u32 line_number = 0;
++    int ok = 1;
++    while (ok && fgets(line, sizeof(line), file)) {
++        ++line_number;
++        char* comment = strchr(line, '#');
++        if (comment)
++            *comment = '\0';
++        unsigned address = 0, size = 0;
++        unsigned long long hash = 0;
++        char name[256];
++        int fields = sscanf(line, "%x %x %llx %255s", &address, &size, &hash, name);
++        if (fields <= 0)
++            continue;
++        if (fields != 4 || size == 0 || (address & 3u) != 0 || (size & 3u) != 0 ||
++            !valid_symbol(name)) {
++            fprintf(stderr, "error: %s:%u: expected '<address> <size> <hash> <symbol>'\n",
++                    path, line_number);
++            ok = 0;
++            break;
++        }
++        if (list->count && list->entries[list->count - 1].address >= address) {
++            fprintf(stderr, "error: %s:%u: entries must be sorted by address\n", path,
++                    line_number);
++            ok = 0;
++            break;
++        }
++        if (list->count == capacity) {
++            capacity = capacity ? capacity * 2 : 16;
++            DolRecompNative* entries = realloc(list->entries, capacity * sizeof(*entries));
++            u32* sizes = realloc(list->sizes, capacity * sizeof(*sizes));
++            u64* hashes = realloc(list->hashes, capacity * sizeof(*hashes));
++            if (entries)
++                list->entries = entries;
++            if (sizes)
++                list->sizes = sizes;
++            if (hashes)
++                list->hashes = hashes;
++            if (!entries || !sizes || !hashes) {
++                fprintf(stderr, "error: out of memory reading %s\n", path);
++                ok = 0;
++                break;
++            }
++        }
++        char* owned = malloc(strlen(name) + 1);
++        if (!owned) {
++            fprintf(stderr, "error: out of memory reading %s\n", path);
++            ok = 0;
++            break;
++        }
++        strcpy(owned, name);
++        list->entries[list->count].address = address;
++        list->entries[list->count].name = owned;
++        list->sizes[list->count] = size;
++        list->hashes[list->count] = hash;
++        ++list->count;
++    }
++    fclose(file);
++    if (!ok)
++        natives_free(list);
++    return ok;
++}
++
++int natives_verify(const DolRecompNativeList* list, const LoadedCodeSection* sections,
++                   u32 section_count) {
++    for (u32 i = 0; i < list->count; ++i) {
++        const u32 address = list->entries[i].address;
++        const u32 size = list->sizes[i];
++        const LoadedCodeSection* section = NULL;
++        for (u32 s = 0; s < section_count && !section; ++s) {
++            if (address >= sections[s].address &&
++                (u64)address + size <= (u64)sections[s].address + sections[s].size)
++                section = &sections[s];
++        }
++        if (!section) {
++            fprintf(stderr, "error: native %s at %08X is outside the code sections\n",
++                    list->entries[i].name, address);
++            return 0;
++        }
++        const u64 hash = fnv1a64(section->data + (address - section->address), size);
++        if (hash != list->hashes[i]) {
++            fprintf(stderr,
++                    "error: native %s at %08X expects code hash %016llX, found %016llX "
++                    "(different SDK build)\n",
++                    list->entries[i].name, address, (unsigned long long)list->hashes[i],
++                    (unsigned long long)hash);
++            return 0;
++        }
++    }
++    return 1;
++}
++
++void natives_free(DolRecompNativeList* list) {
++    for (u32 i = 0; i < list->count; ++i)
++        free((char*)list->entries[i].name);
++    free(list->entries);
++    free(list->sizes);
++    free(list->hashes);
++    memset(list, 0, sizeof(*list));
++}
+diff --git a/src/app/natives.h b/src/app/natives.h
+new file mode 100644
+index 0000000..5591794
+--- /dev/null
++++ b/src/app/natives.h
+@@ -0,0 +1,24 @@
++#ifndef DOLRECOMP_APP_NATIVES_H
++#define DOLRECOMP_APP_NATIVES_H
++
++#include "analysis/code_section.h"
++#include "backend/emitter.h"
++
++// --natives file: one guest function per line,
++//   <address> <size> <fnv1a64 of its code bytes> <host symbol>
++// all numbers hex, '#' starts a comment. A host implementation hard-codes the
++// structure layout of the exact SDK build it was written against, so every
++// entry is pinned to the guest bytes it replaces and a mismatch is an error.
++typedef struct {
++    DolRecompNative* entries;  // sorted by address, names owned by the list
++    u32* sizes;
++    u64* hashes;
++    u32 count;
++} DolRecompNativeList;
++
++int natives_load(DolRecompNativeList* list, const char* path);
++int natives_verify(const DolRecompNativeList* list, const LoadedCodeSection* sections,
++                   u32 section_count);
++void natives_free(DolRecompNativeList* list);
++
++#endif
+diff --git a/src/app/pipeline.c b/src/app/pipeline.c
+index 682d0be..8299945 100644
+--- a/src/app/pipeline.c
++++ b/src/app/pipeline.c
+@@ -1,5 +1,6 @@
+ #include "app/pipeline.h"
+ #include "app/paths.h"
++#include "app/natives.h"
+ #include "platform/fs.h"
+ #include "platform/pathlist.h"
+ #include "platform/strutil.h"
+@@ -1508,9 +1509,27 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
+         section->embedded_data_mode = EMBEDDED_DATA_DOL;
+     }
+ 
+-    return emit_code_sections_split(sections, section_count, output_path, cpu,
+-                                    dol->header.entry_point, jobs,
+-                                    local_chunks_dir, symbols, options);
++    DolRecompNativeList natives = {0};
++    if (options->natives_path) {
++        if (options->backend != DOLRECOMP_BACKEND_C) {
++            fprintf(stderr, "error: --natives needs the C backend\n");
++            return 0;
++        }
++        if (!natives_load(&natives, options->natives_path))
++            return 0;
++        if (!natives_verify(&natives, sections, section_count)) {
++            natives_free(&natives);
++            return 0;
++        }
++        printf("natives: %u guest functions with host implementations\n", natives.count);
++        emit_set_natives(natives.entries, natives.count);
++    }
++    int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
++                                      dol->header.entry_point, jobs,
++                                      local_chunks_dir, symbols, options);
++    emit_set_natives(NULL, 0);
++    natives_free(&natives);
++    return ok;
+ }
+ 
+ int emit_rpx_split(const RPXFile* rpx, const char* output_path,
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 4835338..848b2c2 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -323,6 +323,26 @@ void emit_set_chunk_table(const u32* starts, u32 count) {
+     g_chunk_count = count ? count : 0;
+ }
+ 
++static const DolRecompNative* g_natives = NULL;
++static u32 g_native_count = 0;
++
++void emit_set_natives(const DolRecompNative* natives, u32 count) {
++    g_natives = count ? natives : NULL;
++    g_native_count = count ? count : 0;
++}
++
++static const char* native_for(u32 addr) {
++    u32 lo = 0, hi = g_native_count;
++    while (lo < hi) {
++        u32 mid = lo + (hi - lo) / 2u;
++        if (g_natives[mid].address < addr)
++            lo = mid + 1u;
++        else
++            hi = mid;
++    }
++    return lo < g_native_count && g_natives[lo].address == addr ? g_natives[lo].name : NULL;
++}
++
+ // The index of the chunk whose func_<start>() covers `addr`, or -1 if none
+ // does. Chunks tile the text sections but the first one does not start on the
+ // common stride, so this binary-searches rather than dividing.
+@@ -392,6 +412,19 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
+ 
+     if (inst->lk) {
+         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
++        // A native callee resumes straight after the call, skipping both the
++        // guest body and the return dispatch; if it declines, a local callee
++        // is entered past its own (already tried) native check.
++        const char* native = native_for(inst->branch_target);
++        if (native && branch_target_is_local(func_start, func_end, inst->address + 4u)) {
++            fprintf(out, "            {\n");
++            fprintf(out, "                bool %s(CPUState* ctx);\n", native);
++            fprintf(out, "                if (%s(ctx))\n", native);
++            fprintf(out, "                    goto label_%08X;\n", inst->address + 4u);
++            fprintf(out, "            }\n");
++        } else {
++            native = NULL;
++        }
+         if (local_target) {
+             if (local_backward) {
+                 fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
+@@ -399,7 +432,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
+                 fprintf(out, "                return;\n");
+                 fprintf(out, "            }\n");
+             }
+-            fprintf(out, "            goto label_%08X;\n", inst->branch_target);
++            fprintf(out, "            goto %s_%08X;\n", native ? "native_declined" : "label",
++                    inst->branch_target);
+         } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
+             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+             fprintf(out, "            return;\n");
+@@ -2007,6 +2041,20 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+ 
+     for (u32 i = 0; i < count; i++) {
+         fprintf(out, "label_%08X:\n", insts[i].address);
++        // Entry check for callers that did not try the native themselves:
++        // tail calls, indirect calls and chassis dispatch.
++        const char* native = native_for(insts[i].address);
++        if (native) {
++            fprintf(out, "    {\n");
++            fprintf(out, "        bool %s(CPUState* ctx);\n", native);
++            fprintf(out, "        if (%s(ctx)) {\n", native);
++            fprintf(out, "            ctx->pc = ctx->lr & ~3u;\n");
++            fprintf(out, has_local_returns ? "            goto return_dispatch_%08X;\n"
++                                           : "            return;\n", func_addr);
++            fprintf(out, "        }\n");
++            fprintf(out, "    }\n");
++            fprintf(out, "native_declined_%08X: __attribute__((unused));\n", insts[i].address);
++        }
+         if (cfg.loop_ends[i] != UINT32_MAX) {
+             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
+             fprintf(out, "    loop_%08X(ctx);\n", insts[i].address);
+diff --git a/src/backend/emitter.h b/src/backend/emitter.h
+index 39d8f3c..e4aae86 100644
+--- a/src/backend/emitter.h
++++ b/src/backend/emitter.h
+@@ -23,6 +23,16 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
+ // passing count == 0 restores the safe return-to-chassis form.
+ void emit_set_chunk_table(const u32* starts, u32 count);
+ 
++// A guest function with a host implementation, `bool name(CPUState*)`, that
++// the module links in. It returns true after doing the whole call (registers,
++// memory, cycles) and false, with no side effects, when the guest code has to
++// run instead. Same lifetime rules as the chunk table; sorted by address.
++typedef struct {
++    u32 address;
++    const char* name;
++} DolRecompNative;
++void emit_set_natives(const DolRecompNative* natives, u32 count);
++
+ // emit a single recompiled function as C code
+ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
+ 
+diff --git a/tests/test_natives.c b/tests/test_natives.c
+new file mode 100644
+index 0000000..ad716fd
+--- /dev/null
++++ b/tests/test_natives.c
+@@ -0,0 +1,95 @@
++#include "app/natives.h"
++#include "backend/emitter.h"
++#include "frontend/decoder.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define CHECK(x) do { if (!(x)) { fprintf(stderr, "check failed: %s:%d: %s\n", \
++    __FILE__, __LINE__, #x); return 1; } } while (0)
++
++static int write_text(const char* path, const char* text) {
++    FILE* file = fopen(path, "w");
++    if (!file)
++        return 0;
++    fputs(text, file);
++    return fclose(file) == 0;
++}
++
++static char* read_text(const char* path) {
++    FILE* file = fopen(path, "rb");
++    if (!file)
++        return NULL;
++    fseek(file, 0, SEEK_END);
++    long size = ftell(file);
++    fseek(file, 0, SEEK_SET);
++    char* text = malloc((size_t)size + 1);
++    if (text && fread(text, 1, (size_t)size, file) != (size_t)size) {
++        free(text);
++        text = NULL;
++    }
++    if (text)
++        text[size] = '\0';
++    fclose(file);
++    return text;
++}
++
++int main(void) {
++    // blr; li r3,0. FNV-1a 64 of the first four bytes is B6F2E0C4BC8017BB.
++    static const u8 code[] = {0x4E, 0x80, 0x00, 0x20, 0x38, 0x60, 0x00, 0x00};
++    LoadedCodeSection section = {0};
++    section.data = code;
++    section.address = 0x80001000u;
++    section.size = sizeof(code);
++
++    const char* path = "test_natives.list";
++    DolRecompNativeList list;
++
++    CHECK(write_text(path, "# comment\n"
++                           "80001000 4 B6F2E0C4BC8017BB host_leaf\n"
++                           "80001004 4 0 host_other  # trailing comment\n"));
++    CHECK(natives_load(&list, path));
++    CHECK(list.count == 2);
++    CHECK(list.entries[0].address == 0x80001000u);
++    CHECK(strcmp(list.entries[1].name, "host_other") == 0);
++    CHECK(!natives_verify(&list, &section, 1));  // second hash is wrong
++    natives_free(&list);
++    CHECK(write_text(path, "80001000 4 B6F2E0C4BC8017BB host_leaf\n"));
++    CHECK(natives_load(&list, path));
++    CHECK(natives_verify(&list, &section, 1));
++    natives_free(&list);
++
++    CHECK(write_text(path, "80001004 4 0 b\n80001000 4 0 a\n"));
++    CHECK(!natives_load(&list, path));  // unsorted
++    CHECK(write_text(path, "80001000 4 0 not-a-symbol\n"));
++    CHECK(!natives_load(&list, path));
++    CHECK(write_text(path, "80002000 4 0 outside\n"));
++    CHECK(natives_load(&list, path));
++    CHECK(!natives_verify(&list, &section, 1));
++    natives_free(&list);
++
++    // A bl to a native resumes after the call when the native accepts, and a
++    // native function entry checks it before running its guest body.
++    static const DolRecompNative natives[] = {{0x80001008u, "host_leaf"}};
++    PPCInst insts[3];
++    const u32 words[3] = {0x48000009u /* bl +8 */, 0x60000000u, 0x4E800020u};
++    for (u32 i = 0; i < 3; ++i)
++        insts[i] = ppc_decode(words[i], 0x80001000u + i * 4u);
++    const char* out_path = "test_natives.c.out";
++    FILE* out = fopen(out_path, "wb");
++    CHECK(out);
++    emit_set_natives(natives, 1);
++    CHECK(emit_function(out, insts, 3, 0x80001000u));
++    emit_set_natives(NULL, 0);
++    fclose(out);
++    char* text = read_text(out_path);
++    CHECK(text);
++    CHECK(strstr(text, "if (host_leaf(ctx))\n                    goto label_80001004;"));
++    CHECK(strstr(text, "goto native_declined_80001008;"));
++    CHECK(strstr(text, "label_80001008:\n    {\n        bool host_leaf(CPUState* ctx);"));
++    free(text);
++    remove(out_path);
++    remove(path);
++    return 0;
++}
