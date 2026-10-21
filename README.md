@@ -253,6 +253,13 @@ replaced piece by piece rather than extended.
   async one diverts the guest thread into a small trampoline at 0x80001900 and
   lets the game run, so the callee can block or wait on hardware.
   `scripts/automation.py` drives the directory from Python.
+- **`0009` Native scheduler and memory routines.** The thread switch itself
+  goes native: `OSSaveContext`, `OSLoadContext` and `SelectThread`'s switching
+  path (it declines when nothing switches, on the idle wait, and under a
+  non-default switch callback), plus `OSWakeupThread` when the woken threads
+  don't outrank the caller, `OSTryLockMutex`, and the runtime's byte-wise
+  `memcpy`/`__fill_mem`. The port also points the module link at a ThinLTO
+  cache in `build/modules/<disc id>/thinlto-cache`.
 
 **ModernGekko's Dolphin fork**
 
@@ -297,6 +304,11 @@ replaced piece by piece rather than extended.
   twice per flushed line (whose miss path rescanned RAM for REL headers).
 - **`0008` Extra module sources.** The module template links
   `MODULE_EXTRA_SOURCES`, which carries the native SDK functions.
+- **`0009` Module ThinLTO with lld.** MSYS2's Clang has no LLVMgold plugin, so
+  the IPO check always failed and modules linked without cross-unit inlining.
+  The template now links with `ld.lld`, runs 4 ThinLTO jobs (one per core ran a
+  16 GiB machine out of memory) and takes an optional
+  `RECOMPCORE_MODULE_LTO_CACHE`.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 
@@ -315,6 +327,10 @@ replaced piece by piece rather than extended.
   indirect calls. Every entry carries the FNV-1a hash of the guest bytes it
   replaces (`scripts/natives_hash.py`), so a different SDK build is rejected
   at recompile time.
+- **`0004` Jump natives.** An entry marked `jump` ends somewhere other than
+  its return address (a context load ending in `rfi`): it sets `ctx->pc` and
+  its callers return to the dispatcher. Native call sites also hand the
+  chassis's idle-loop pc back to it, as direct calls do.
 
 **Per-game settings (`config/GameSettings/R7EE8P.ini`)**
 

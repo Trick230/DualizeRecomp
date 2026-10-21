@@ -1,9 +1,16 @@
-# Revolution SDK functions with host implementations (lib/ModernGekko/src/module_natives).
-# <address> <size> <fnv1a64 of the code bytes> <symbol>; regenerate hashes with
+# Revolution SDK and runtime functions with host implementations (lib/ModernGekko/src/module_natives).
+# <address> <size> <fnv1a64 of the code bytes> <symbol> [jump]; regenerate hashes with
 # scripts/natives_hash.py. Hashes pin each entry to the SDK build the native was written for.
+8000626C 0050 48D07741FF0575B4 msl_memcpy
+800062BC 00B4 09D5BFD0A62A498D msl_fill_mem
+8044F4F8 0080 A3372C43D7CB29E1 rvl_OSSaveContext
+8044F578 00D8 22EA12277BF65A20 rvl_OSLoadContext jump
 80453414 0014 048E9E3D231E7B0A rvl_OSDisableInterrupts
 80453428 0014 E8E5E8E3873637F0 rvl_OSEnableInterrupts
 8045343C 0024 8C558AAEA8697424 rvl_OSRestoreInterrupts
 80454600 00DC 724D7B14254D7A7B rvl_OSLockMutex
 804546DC 00C8 D7E7E3DB1C0BFD87 rvl_OSUnlockMutex
+80454810 00BC 526D952080AF416F rvl_OSTryLockMutex
 80455F74 000C FA8D762CBEE00D2A rvl_OSGetCurrentThread
+804562E0 0228 AB48CF3E5A0AB486 rvl_SelectThread jump
+804570DC 00F4 B9334A3FF05227B7 rvl_OSWakeupThread
