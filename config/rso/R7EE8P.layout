@@ -21,3 +21,4 @@ static_sections = 0 0x80004000 0x8000BB20 0 0 0x804E7400 0x8050FA20 0x80581780 0
 module = files/rso/global.rso 0x8106E4C0 0x812C7F80
 module = files/rso/play.rso   0x8154B780
 module = files/rso/select.rso 0x81577020 0x815B4580
+module = files/rso/title.rso  0x81732020 0x81731FA0
