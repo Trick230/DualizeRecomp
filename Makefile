@@ -42,8 +42,11 @@ OPT_LEVEL ?= 3
 # config/rso/<disc id>.layout; with it the RSO code is recompiled too.
 GAME_ID = $(shell head -c 6 "$(EXTRACTED_DIR)/sys/boot.bin" 2>/dev/null)
 RSO_LAYOUT = $(wildcard config/rso/$(GAME_ID).layout)
+# SDK functions with host implementations (C backend only) are listed in
+# config/natives/<disc id>.natives.
+NATIVES = $(if $(filter c,$(BACKEND)),$(wildcard config/natives/$(GAME_ID).natives))
 PORT_ARGS = --backend $(BACKEND) --toolchain $(TOOLCHAIN) --opt-level $(OPT_LEVEL) --output $(MODULES_DIR) \
-	$(if $(RSO_LAYOUT),--rso-layout $(RSO_LAYOUT))
+	$(if $(RSO_LAYOUT),--rso-layout $(RSO_LAYOUT)) $(if $(NATIVES),--natives $(NATIVES))
 
 # Extra arguments forwarded after `--` to `moderngekko-run` via `make run`,
 # e.g. RUN_ARGS="--headless" or RUN_ARGS="--graphics Vulkan".

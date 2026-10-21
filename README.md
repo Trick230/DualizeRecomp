@@ -35,11 +35,11 @@ gameplay.
 Known limitations:
 
 - The intro FMV runs at ~19 FPS. It is CPU-bound in the game's video decoder.
-- Without a frame cap, gameplay reaches ~57 FPS (it was ~32 before phase 3).
+- Without a frame cap, gameplay reaches ~62 FPS (it was ~32 before phase 3).
   The bottleneck is still the emulated CPU thread: the game's own OS layer
-  (thread switching, mutexes, message queues) and Dolphin's timing and
-  hardware emulation. The GPU and the native renderer's thread are mostly
-  idle. The rest of phase 3 goes after this.
+  (thread switching, message queues) and Dolphin's timing and hardware
+  emulation. The GPU and the native renderer's thread are mostly idle. The
+  rest of phase 3 goes after this.
 
 ## Quick start
 
@@ -196,7 +196,7 @@ replaced piece by piece rather than extended.
 |---|---|---|
 | 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
-| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress: CPU-side groundwork done (32 → 57 FPS uncapped) |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress: CPU-side groundwork and first native SDK functions (32 → 62 FPS uncapped) |
 | 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
 
 ## Patches
@@ -235,6 +235,17 @@ replaced piece by piece rather than extended.
   DOL text. The chunk hash check keeps it native only while RAM holds exactly
   those bytes, so a module that loads elsewhere just stays on the JIT. This
   took uncapped gameplay from ~48 to ~57 FPS.
+- **`0006` Host-CPU modules.** Modules are compiled for the machine that
+  builds them (`-march=native` on x86-64), so the inline FP paths use a
+  hardware `fma`.
+- **`0007` Native SDK functions.** `moderngekko-port --natives <list>` passes
+  the list to DolRecomp and links the host implementations in
+  `src/module_natives` into the module. `make` uses
+  `config/natives/<disc id>.natives` when it exists. NiGHTS replaces the
+  Revolution SDK's mutex lock/unlock, interrupt enable/disable/restore and
+  current-thread lookup. Each native handles the common case (a free or
+  recursively owned mutex, an unlock that wakes nobody) and declines the rest
+  to the guest code. Uncapped gameplay went from ~57 to ~62 FPS.
 
 **ModernGekko's Dolphin fork**
 
@@ -268,6 +279,17 @@ replaced piece by piece rather than extended.
   one table lookup instead of ~25 instructions of range, reservation and
   journal checks. MMIO, journaled stores and stores under a live `lwarx`
   reservation take an out-of-line path with the old semantics.
+- **`0005` Data-only cache flushes.** With the data cache off, `dcbst`/`dcbf`/
+  `dcbi` only invalidate an icache line, so lines that hold no compiled code
+  skip it.
+- **`0006` Inline FP paths and host ISA.** The CPU runtime side of DolRecomp's
+  `0002`: always-inline FPU and paired-single fast paths for finite operands,
+  and memory accessors that take the instruction address.
+- **`0007` Precomputed code lines.** That code-line check reads a bitmap of
+  DOL chunk lines plus the loaded REL sections, instead of resolving chunks
+  twice per flushed line (whose miss path rescanned RAM for REL headers).
+- **`0008` Extra module sources.** The module template links
+  `MODULE_EXTRA_SOURCES`, which carries the native SDK functions.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 
@@ -276,6 +298,16 @@ replaced piece by piece rather than extended.
   ending the block in a fallback; and the LLVM backend builds against
   LLVM 21/22. (The LLVM backend runs this game ~20% slower than the C one, so
   `BACKEND=c` stays the default.)
+- **`0002` pc only on slow paths, inline FP.** Memory accesses pass the
+  instruction address instead of storing `ctx->pc` before each one, and
+  arithmetic FPU/paired-single instructions get inline paths for finite
+  operands.
+- **`0003` Native guest functions.** `--natives <list>` names guest functions
+  with host implementations (`bool name(CPUState*)`). A `bl` to one calls it
+  and resumes after the call if it accepts; its entry checks it for tail and
+  indirect calls. Every entry carries the FNV-1a hash of the guest bytes it
+  replaces (`scripts/natives_hash.py`), so a different SDK build is rejected
+  at recompile time.
 
 **Per-game settings (`config/GameSettings/R7EE8P.ini`)**
 
@@ -293,8 +325,8 @@ replaced piece by piece rather than extended.
 lib/DolRecomp/      submodule: PowerPC DOL -> C / LLVM static recompiler
 lib/ModernGekko/    submodule: runtime the recompiled module runs on
 patches/            local fixes applied to the submodules
-config/             per-game runtime settings, RSO load layouts, controller profile
-scripts/            build environment checks, SDK symbol finder
+config/             per-game runtime settings, RSO load layouts, native SDK lists, controller profile
+scripts/            build environment checks, SDK symbol finder, natives hashes
 Makefile            the whole pipeline
 iso/                your disc image (gitignored)
 extracted/          extracted disc (gitignored)
