@@ -1,0 +1,495 @@
+diff --git a/src/module_natives/msl_string.c b/src/module_natives/msl_string.c
+new file mode 100644
+index 0000000..2a3376b
+--- /dev/null
++++ b/src/module_natives/msl_string.c
+@@ -0,0 +1,53 @@
++// Host implementations of the Metrowerks runtime's memory routines (see
++// rvl_os.c for the contract every native follows).
++//
++// Ranges that leave fast guest memory, or straddle two of its slices, decline
++// to the guest code, which goes through the out-of-line memory path.
++
++#include "core/cpu.h"
++
++#include <string.h>
++
++// Host view of `size` guest bytes, or NULL; ppc_fast_ptr's bound assumes
++// accesses no larger than a slice.
++static inline const u8* source(CPUState* ctx, u32 address, u32 size) {
++    return size <= PPC_FAST_SLICE_SIZE ? ppc_fast_ptr(ctx->fast_read, address, size) : NULL;
++}
++
++static inline u8* destination(CPUState* ctx, u32 address, u32 size) {
++    return size <= PPC_FAST_SLICE_SIZE ? ppc_fast_write_ptr(ctx, address, size) : NULL;
++}
++
++// void* memcpy(void* dst, const void* src, size_t n)
++//
++// The runtime's copy is byte-wise in whichever direction is safe for
++// overlapping ranges, so it behaves as memmove.
++bool msl_memcpy(CPUState* ctx) {
++    const u32 size = ctx->gpr[5];
++    if (size == 0) {
++        ctx->downcount -= 4;
++        return true;
++    }
++    u8* dst = destination(ctx, ctx->gpr[3], size);
++    const u8* src = source(ctx, ctx->gpr[4], size);
++    if (!dst || !src)
++        return false;
++    memmove(dst, src, size);
++    ctx->downcount -= 4 + (s32)(size >> 1);
++    return true;
++}
++
++// void __fill_mem(void* dst, int value, size_t n)
++bool msl_fill_mem(CPUState* ctx) {
++    const u32 size = ctx->gpr[5];
++    if (size == 0) {
++        ctx->downcount -= 4;
++        return true;
++    }
++    u8* dst = destination(ctx, ctx->gpr[3], size);
++    if (!dst)
++        return false;
++    memset(dst, (u8)ctx->gpr[4], size);
++    ctx->downcount -= 8 + (s32)(size >> 3);
++    return true;
++}
+diff --git a/src/module_natives/rvl_os.c b/src/module_natives/rvl_os.c
+index 8df56fc..eedd744 100644
+--- a/src/module_natives/rvl_os.c
++++ b/src/module_natives/rvl_os.c
+@@ -111,32 +111,30 @@ bool rvl_OSGetCurrentThread(CPUState* ctx) {
+     return true;
+ }
+ 
+-// void OSLockMutex(OSMutex* mutex)
+-//
+-// Takes a free mutex or recurses into an owned one. Contention sleeps the
+-// thread, which only the guest scheduler can do.
+-bool rvl_OSLockMutex(CPUState* ctx) {
+-    const u32 mutex_address = ctx->gpr[3];
++// Takes `mutex` for the current thread: a free one is queued on the thread,
++// an owned one recurses. Returns 1 when it was taken, 0 when another thread
++// holds it, and -1 when guest memory needs the slow path (nothing written).
++static int try_lock_mutex(CPUState* ctx, u32 mutex_address) {
+     u32 thread_address;
+     u8* thread = current_thread(ctx, &thread_address);
+     u8* mutex = object(ctx, mutex_address, MUTEX_SIZE);
+     if (!thread || !mutex)
+-        return false;
++        return -1;
+ 
+     const u32 owner = load(mutex, MUTEX_THREAD);
+     if (owner == thread_address) {
+         store(mutex, MUTEX_COUNT, load(mutex, MUTEX_COUNT) + 1u);
+         ctx->downcount -= 30;
+-        return true;
++        return 1;
+     }
+     if (owner != 0)
+-        return false;
++        return 0;
+ 
+     // EnqueueTail(&thread->queueMutex, mutex, link)
+     const u32 tail_address = load(thread, THREAD_MUTEX_QUEUE_TAIL);
+     u8* tail = NULL;
+     if (tail_address && !(tail = object(ctx, tail_address, MUTEX_SIZE)))
+-        return false;
++        return -1;
+     store(mutex, MUTEX_THREAD, thread_address);
+     store(mutex, MUTEX_COUNT, load(mutex, MUTEX_COUNT) + 1u);
+     if (tail)
+@@ -147,6 +145,24 @@ bool rvl_OSLockMutex(CPUState* ctx) {
+     store(mutex, MUTEX_LINK_NEXT, 0);
+     store(thread, THREAD_MUTEX_QUEUE_TAIL, mutex_address);
+     ctx->downcount -= 40;
++    return 1;
++}
++
++// void OSLockMutex(OSMutex* mutex)
++//
++// Contention sleeps the thread, which only the guest scheduler can do.
++bool rvl_OSLockMutex(CPUState* ctx) {
++    return try_lock_mutex(ctx, ctx->gpr[3]) > 0;
++}
++
++// BOOL OSTryLockMutex(OSMutex* mutex)
++bool rvl_OSTryLockMutex(CPUState* ctx) {
++    const int taken = try_lock_mutex(ctx, ctx->gpr[3]);
++    if (taken < 0)
++        return false;
++    if (!taken)
++        ctx->downcount -= 25;
++    ctx->gpr[3] = (u32)taken;
+     return true;
+ }
+ 
+@@ -200,3 +216,351 @@ bool rvl_OSUnlockMutex(CPUState* ctx) {
+     ctx->downcount -= 60;
+     return true;
+ }
++
++// OSContext
++#define CONTEXT_GPR 0u
++#define CONTEXT_CR 128u
++#define CONTEXT_LR 132u
++#define CONTEXT_CTR 136u
++#define CONTEXT_XER 140u
++#define CONTEXT_SRR0 408u
++#define CONTEXT_SRR1 412u
++#define CONTEXT_STATE 418u  // u16
++#define CONTEXT_GQR 420u
++#define CONTEXT_SIZE 452u   // through gqr[7]; the FPU half is saved lazily
++
++#define CONTEXT_STATE_EXC 0x2u  // saved by an exception: r5-r12 are live too
++
++// OSDisableInterrupts' mtmsr window: a context interrupted inside it resumes
++// at the function start so the disable is redone.
++#define OS_DISABLE_INTERRUPTS 0x80453414u
++#define OS_DISABLE_INTERRUPTS_END 0x80453420u
++
++// u32 OSSaveContext(OSContext* context)
++//
++// Returns 0 now; a later OSLoadContext of this context returns 1 from here.
++bool rvl_OSSaveContext(CPUState* ctx) {
++    u8* context = object(ctx, ctx->gpr[3], CONTEXT_SIZE);
++    if (!context)
++        return false;
++    for (u32 i = 13; i < 32; ++i)
++        store(context, CONTEXT_GPR + 4u * i, ctx->gpr[i]);
++    for (u32 i = 1; i < 8; ++i)
++        store(context, CONTEXT_GQR + 4u * i, ctx->gqr[i]);
++    store(context, CONTEXT_CR, ctx->cr);
++    store(context, CONTEXT_LR, ctx->lr);
++    store(context, CONTEXT_SRR0, ctx->lr);
++    store(context, CONTEXT_SRR1, ctx->msr);
++    store(context, CONTEXT_CTR, ctx->ctr);
++    store(context, CONTEXT_XER, ctx->xer);
++    store(context, CONTEXT_GPR + 4u, ctx->gpr[1]);
++    store(context, CONTEXT_GPR + 8u, ctx->gpr[2]);
++    store(context, CONTEXT_GPR + 12u, 1);
++    ctx->gpr[0] = 1;
++    ctx->gpr[3] = 0;
++    ctx->downcount -= 32;
++    return true;
++}
++
++static inline u16 load16(const u8* base, u32 offset) {
++    return (u16)(base[offset] << 8 | base[offset + 1]);
++}
++
++static inline void store16(u8* base, u32 offset, u16 value) {
++    base[offset] = (u8)(value >> 8);
++    base[offset + 1] = (u8)value;
++}
++
++// Resumes `context` the way OSLoadContext's closing rfi does: at its SRR0
++// with its SRR1, never at the caller.
++static void resume_context(CPUState* ctx, u8* context) {
++    u32 srr0 = load(context, CONTEXT_SRR0);
++    if (srr0 > OS_DISABLE_INTERRUPTS && srr0 < OS_DISABLE_INTERRUPTS_END) {
++        srr0 = OS_DISABLE_INTERRUPTS;
++        store(context, CONTEXT_SRR0, srr0);
++    }
++    const u32 state = load16(context, CONTEXT_STATE);
++    u32 first = 13;
++    if (state & CONTEXT_STATE_EXC) {
++        store16(context, CONTEXT_STATE, (u16)(state & ~CONTEXT_STATE_EXC));
++        first = 5;
++    }
++    ctx->gpr[0] = load(context, CONTEXT_GPR);
++    ctx->gpr[1] = load(context, CONTEXT_GPR + 4u);
++    ctx->gpr[2] = load(context, CONTEXT_GPR + 8u);
++    for (u32 i = first; i < 32; ++i)
++        ctx->gpr[i] = load(context, CONTEXT_GPR + 4u * i);
++    for (u32 i = 1; i < 8; ++i)
++        ctx->gqr[i] = load(context, CONTEXT_GQR + 4u * i);
++    ctx->cr = load(context, CONTEXT_CR);
++    ctx->lr = load(context, CONTEXT_LR);
++    ctx->ctr = load(context, CONTEXT_CTR);
++    ctx->xer = load(context, CONTEXT_XER);
++    ctx->srr0 = srr0;
++    ctx->srr1 = load(context, CONTEXT_SRR1);
++    ctx->gpr[4] = load(context, CONTEXT_GPR + 16u);
++    ctx->gpr[3] = load(context, CONTEXT_GPR + 12u);
++
++    // mtmsr (EE and RI off), then rfi.
++    const u32 msr = ctx->msr & ~(PPC_MSR_EE | PPC_MSR_RI);
++    ctx->msr = ((msr & ~PPC_MSR_RFI_MASK) | (ctx->srr1 & PPC_MSR_RFI_MASK)) & ~PPC_MSR_POW;
++    ctx->pc = srr0 & ~3u;
++}
++
++// void OSLoadContext(OSContext* context)
++//
++// A jump native: it ends where the loaded context resumes.
++bool rvl_OSLoadContext(CPUState* ctx) {
++    u8* context = object(ctx, ctx->gpr[3], CONTEXT_SIZE);
++    if (!context || (ctx->msr & PPC_MSR_PR))
++        return false;
++    resume_context(ctx, context);
++    ctx->downcount -= 50;
++    return true;
++}
++
++// Lomem, as offsets from OS_CURRENT_CONTEXT_PHYSICAL
++#define OS_CURRENT_CONTEXT_PHYSICAL 0x800000C0u
++#define OS_CURRENT_CONTEXT_OFFSET 0x14u
++#define OS_FPU_CONTEXT_OFFSET 0x18u
++#define OS_CURRENT_THREAD_OFFSET 0x24u
++#define OS_LOMEM_SIZE 0x28u
++
++// OSThread scheduling fields
++#define THREAD_STATE 712u  // u16
++#define THREAD_STATE_READY 1u
++#define THREAD_STATE_RUNNING 2u
++#define THREAD_QUEUE 732u
++#define THREAD_LINK_NEXT 736u
++#define THREAD_LINK_PREV 740u
++
++// RunQueue[32], each an OSThreadQueue {head, tail}
++#define RUN_QUEUE 0x8068F5B0u
++#define RUN_QUEUE_SIZE 256u
++
++// Small-data scheduler globals
++#define RUN_QUEUE_BITS_SDA_OFFSET (-27528)
++#define RESCHEDULE_SDA_OFFSET (-27536)
++#define SWITCH_THREAD_CALLBACK_SDA_OFFSET (-29752)
++
++#define DEFAULT_SWITCH_THREAD_CALLBACK 0x80455CDCu  // the SDK's empty one
++#define SELECT_THREAD_SAVE_RETURN 0x804563E0u       // after its OSSaveContext call
++#define SELECT_THREAD_FRAME 16u
++
++// static OSThread* SelectThread(BOOL yield)
++//
++// A jump native for the switching path: the current thread gives way to the
++// head of the highest-priority run queue, which resumes wherever it was saved.
++// Calls that switch nothing, the idle wait on an empty run queue and a
++// non-default switch callback stay with the guest.
++bool rvl_SelectThread(CPUState* ctx) {
++    if (ctx->msr & PPC_MSR_PR)
++        return false;
++    const u32 sda = ctx->gpr[13];
++    u8* bits_slot = object(ctx, sda + (u32)RUN_QUEUE_BITS_SDA_OFFSET, 4);
++    u8* hint_slot = object(ctx, sda + (u32)RUN_QUEUE_HINT_SDA_OFFSET, 4);
++    const u8* reschedule_slot =
++        ppc_fast_ptr(ctx->fast_read, sda + (u32)RESCHEDULE_SDA_OFFSET, 4);
++    const u8* callback_slot =
++        ppc_fast_ptr(ctx->fast_read, sda + (u32)SWITCH_THREAD_CALLBACK_SDA_OFFSET, 4);
++    u8* lomem = object(ctx, OS_CURRENT_CONTEXT_PHYSICAL, OS_LOMEM_SIZE);
++    u8* queues = object(ctx, RUN_QUEUE, RUN_QUEUE_SIZE);
++    if (!bits_slot || !hint_slot || !reschedule_slot || !callback_slot || !lomem ||
++        !queues || (s32)read_be32(reschedule_slot) > 0 ||
++        read_be32(callback_slot) != DEFAULT_SWITCH_THREAD_CALLBACK)
++        return false;
++
++    const u32 current_address = load(lomem, OS_CURRENT_THREAD_OFFSET);
++    u8* current = object(ctx, current_address, THREAD_SIZE);
++    if (!current || load(lomem, OS_CURRENT_CONTEXT_OFFSET) != current_address)
++        return false;
++
++    // A running thread goes back on its run queue when yielding or outranked.
++    const u32 yield = ctx->gpr[3];
++    u32 bits = load(bits_slot, 0);
++    const u32 priority = load(current, THREAD_PRIORITY);
++    u8* old_tail = NULL;
++    const bool requeue = load16(current, THREAD_STATE) == THREAD_STATE_RUNNING;
++    if (requeue) {
++        const s32 highest = bits ? __builtin_clz(bits) : 32;
++        if (priority > 31u || (!yield && (s32)priority <= highest))
++            return false;  // nothing outranks it: no switch
++        const u32 tail_address = load(queues, 8u * priority + 4u);
++        if (tail_address && !(old_tail = object(ctx, tail_address, THREAD_SIZE)))
++            return false;
++        bits |= 1u << (31u - priority);
++    }
++    if (bits == 0)
++        return false;  // the idle wait
++
++    // The thread that runs next, checked before anything is written. Its
++    // queue is empty now only when the requeue is what fills it.
++    const u32 index = (u32)__builtin_clz(bits);
++    u32 next_address = load(queues, 8u * index);
++    if (!next_address) {
++        if (!requeue || index != priority)
++            return false;
++        next_address = current_address;
++    }
++    u8* next = next_address == current_address
++                   ? current
++                   : object(ctx, next_address, THREAD_SIZE);
++    if (!next)
++        return false;
++    u32 after_address = next == current ? 0 : load(next, THREAD_LINK_NEXT);
++    if (requeue && !after_address && next != current && index == priority)
++        after_address = current_address;
++    u8* after = after_address == current_address
++                    ? current
++                    : after_address ? object(ctx, after_address, THREAD_SIZE) : NULL;
++    u8* frame = object(ctx, ctx->gpr[1] - SELECT_THREAD_FRAME, SELECT_THREAD_FRAME + 8u);
++    if ((after_address && !after) || !frame)
++        return false;
++
++    // Prologue: stwu r1,-16(r1), then save lr, r31 and r30; r30 = yield.
++    store(frame, 0, ctx->gpr[1]);
++    store(frame, SELECT_THREAD_FRAME + 4u, ctx->lr);
++    store(frame, 12, ctx->gpr[31]);
++    store(frame, 8, ctx->gpr[30]);
++    ctx->gpr[1] -= SELECT_THREAD_FRAME;
++    ctx->gpr[30] = yield;
++
++    if (requeue) {
++        // EnqueueTail(&RunQueue[priority], current, link)
++        u8* queue = queues + 8u * priority;
++        store16(current, THREAD_STATE, THREAD_STATE_READY);
++        store(current, THREAD_QUEUE, RUN_QUEUE + 8u * priority);
++        if (old_tail)
++            store(old_tail, THREAD_LINK_NEXT, current_address);
++        else
++            store(queue, 0, current_address);
++        store(current, THREAD_LINK_PREV, load(queue, 4));
++        store(current, THREAD_LINK_NEXT, 0);
++        store(queue, 4, current_address);
++        store(bits_slot, 0, bits);
++        store(hint_slot, 0, 1);
++    }
++
++    if (!(load16(current, CONTEXT_STATE) & CONTEXT_STATE_EXC)) {
++        // OSSaveContext(current) from the call before SELECT_THREAD_SAVE_RETURN,
++        // where cr0 holds the EQ of the rlwinm. that tested the state.
++        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (0x2u | (ctx->xer >> 31)) << 28;
++        ctx->lr = SELECT_THREAD_SAVE_RETURN;
++        ctx->gpr[3] = current_address;
++        rvl_OSSaveContext(ctx);
++    }
++
++    // Dequeue the head of RunQueue[index].
++    u8* queue = queues + 8u * index;
++    store(hint_slot, 0, 0);
++    if (after)
++        store(after, THREAD_LINK_PREV, 0);
++    else
++        store(queue, 4, 0);
++    store(queue, 0, after_address);
++    if (!after)
++        store(bits_slot, 0, bits & ~(1u << (31u - index)));
++    store(next, THREAD_QUEUE, 0);
++    store16(next, THREAD_STATE, THREAD_STATE_RUNNING);
++
++    // OSSetCurrentContext(next): its SRR1 keeps FP only if it owns the FPU.
++    store(lomem, OS_CURRENT_THREAD_OFFSET, next_address);
++    store(lomem, OS_CURRENT_CONTEXT_OFFSET, next_address);
++    store(lomem, 0, next_address & 0x3FFFFFFFu);
++    const u32 srr1 = load(next, CONTEXT_SRR1);
++    store(next, CONTEXT_SRR1,
++          load(lomem, OS_FPU_CONTEXT_OFFSET) == next_address ? srr1 | PPC_MSR_FP
++                                                              : srr1 & ~PPC_MSR_FP);
++
++    resume_context(ctx, next);
++    ctx->downcount -= 150;
++    return true;
++}
++
++#define THREAD_SUSPEND 716u
++#define WAKEUP_MAX_THREADS 64u
++
++// void OSWakeupThread(OSThreadQueue* queue)
++//
++// Readies every thread waiting on `queue`. When that leaves nothing that
++// outranks the current thread, the trailing SelectThread switches nothing
++// and the whole call is done here; otherwise the guest runs it.
++bool rvl_OSWakeupThread(CPUState* ctx) {
++    const u32 queue_address = ctx->gpr[3];
++    const u32 sda = ctx->gpr[13];
++    u8* wait_queue = object(ctx, queue_address, 8);
++    u8* bits_slot = object(ctx, sda + (u32)RUN_QUEUE_BITS_SDA_OFFSET, 4);
++    u8* hint_slot = object(ctx, sda + (u32)RUN_QUEUE_HINT_SDA_OFFSET, 4);
++    const u8* reschedule_slot =
++        ppc_fast_ptr(ctx->fast_read, sda + (u32)RESCHEDULE_SDA_OFFSET, 4);
++    u8* queues = object(ctx, RUN_QUEUE, RUN_QUEUE_SIZE);
++    u32 current_address;
++    u8* current = current_thread(ctx, &current_address);
++    if (!wait_queue || !bits_slot || !hint_slot || !reschedule_slot || !queues || !current)
++        return false;
++
++    // Check the waiters and what readying them does to the run queue.
++    u8* waiters[WAKEUP_MAX_THREADS];
++    u32 count = 0;
++    u32 bits = load(bits_slot, 0);
++    bool readied = false;
++    for (u32 address = load(wait_queue, 0); address; ++count) {
++        u8* thread = count < WAKEUP_MAX_THREADS ? object(ctx, address, THREAD_SIZE) : NULL;
++        if (!thread)
++            return false;
++        if ((s32)load(thread, THREAD_SUSPEND) <= 0) {
++            const u32 priority = load(thread, THREAD_PRIORITY);
++            const u32 tail_address = load(queues, 8u * priority + 4u);
++            if (priority > 31u || (tail_address && !object(ctx, tail_address, THREAD_SIZE)))
++                return false;
++            bits |= 1u << (31u - priority);
++            readied = true;
++        }
++        waiters[count] = thread;
++        address = load(thread, THREAD_LINK_NEXT);
++    }
++
++    // SelectThread(FALSE) switches nothing when rescheduling is held off or
++    // the current thread still outranks every ready one.
++    if ((readied || load(hint_slot, 0) != 0) && (s32)read_be32(reschedule_slot) <= 0) {
++        const u8* lomem =
++            ppc_fast_ptr(ctx->fast_read, OS_CURRENT_CONTEXT_PHYSICAL, OS_LOMEM_SIZE);
++        if (!lomem || read_be32(lomem + OS_CURRENT_CONTEXT_OFFSET) == current_address) {
++            const s32 highest = bits ? __builtin_clz(bits) : 32;
++            if (!lomem || load16(current, THREAD_STATE) != THREAD_STATE_RUNNING ||
++                (s32)load(current, THREAD_PRIORITY) > highest)
++                return false;
++        }
++    }
++
++    for (u32 i = 0; i < count; ++i) {
++        u8* thread = waiters[i];
++        const u32 thread_address = load(wait_queue, 0);
++        // DequeueHead(queue, thread, link)
++        const u32 next_address = load(thread, THREAD_LINK_NEXT);
++        if (next_address)
++            store(waiters[i + 1], THREAD_LINK_PREV, 0);
++        else
++            store(wait_queue, 4, 0);
++        store(wait_queue, 0, next_address);
++        store16(thread, THREAD_STATE, THREAD_STATE_READY);
++        if ((s32)load(thread, THREAD_SUSPEND) > 0)
++            continue;
++        // EnqueueTail(&RunQueue[priority], thread, link)
++        const u32 priority = load(thread, THREAD_PRIORITY);
++        u8* queue = queues + 8u * priority;
++        const u32 tail_address = load(queue, 4);
++        store(thread, THREAD_QUEUE, RUN_QUEUE + 8u * priority);
++        if (tail_address)
++            store(object(ctx, tail_address, THREAD_SIZE), THREAD_LINK_NEXT, thread_address);
++        else
++            store(queue, 0, thread_address);
++        store(thread, THREAD_LINK_PREV, tail_address);
++        store(thread, THREAD_LINK_NEXT, 0);
++        store(queue, 4, thread_address);
++        store(bits_slot, 0, load(bits_slot, 0) | 1u << (31u - priority));
++        store(hint_slot, 0, 1);
++    }
++    ctx->downcount -= 40 + 30 * (s32)count;
++    return true;
++}
+diff --git a/tools/moderngekko_port.cpp b/tools/moderngekko_port.cpp
+index 02f4196..9a4f688 100644
+--- a/tools/moderngekko_port.cpp
++++ b/tools/moderngekko_port.cpp
+@@ -910,6 +910,9 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
+       Quote(source_root / "vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp");
+   if (!natives_sources.empty())
+     configure += " -DMODULE_EXTRA_SOURCES=" + QuoteText(natives_sources);
++  // Shared by every build of this game's module; it only speeds up linking.
++  configure += " -DRECOMPCORE_MODULE_LTO_CACHE=" +
++               Quote(options.output / game.disc_id / "thinlto-cache");
+   if (!pgo_compile_flags.empty())
+     configure += " -DCMAKE_C_FLAGS=" + QuoteText(pgo_compile_flags) +
+                  " -DCMAKE_SHARED_LINKER_FLAGS=" + QuoteText(pgo_compile_flags);

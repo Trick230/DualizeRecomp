@@ -1,0 +1,77 @@
+diff --git a/module-template/CMakeLists.txt b/module-template/CMakeLists.txt
+index 14d0c7f..f19e5f0 100644
+--- a/module-template/CMakeLists.txt
++++ b/module-template/CMakeLists.txt
+@@ -139,25 +139,56 @@ if(NOT RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[0-3]$")
+     "RECOMPCORE_MODULE_OPT_LEVEL must be one of 0, 1, 2, or 3")
+ endif()
+ if(RECOMPCORE_MODULE_ENABLE_IPO AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+-  include(CheckIPOSupported)
+-  # moderngekko-port configures with CMAKE_NINJA_FORCE_RESPONSE_FILE=1, which the
+-  # module needs: it links thousands of chunk objects and the command line does
+-  # not fit in ARG_MAX. But check_ipo_supported's try-compile inherits the
+-  # environment, and its static-library step then runs `ar qc libfoo.a @foo.rsp`
+-  # -- Apple's /usr/bin/ar has no @file support, so the check fails with
+-  # "ar: @CMakeFiles/foo.rsp: No such file or directory" and IPO is silently
+-  # disabled. The manifest still records -flto=thin. Every module built this way
+-  # had NO cross-translation-unit inlining. Scope the variable off for the check
+-  # only, then restore it before the generator reads it.
+-  set(_module_forced_rsp "$ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE}")
+-  unset(ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE})
+-  check_ipo_supported(RESULT RECOMPCORE_MODULE_IPO_SUPPORTED
+-                      OUTPUT RECOMPCORE_MODULE_IPO_ERROR LANGUAGES C)
+-  if(_module_forced_rsp)
+-    set(ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE} "${_module_forced_rsp}")
++  if(NOT APPLE AND NOT MSVC)
++    # ThinLTO needs a linker that reads LLVM bitcode. GNU ld only does so
++    # through the LLVMgold plugin, which MSYS2's Clang does not ship, so
++    # check_ipo_supported (its try-compile links with the default linker and
++    # ignores our linker flags) failed and every module linked without
++    # cross-unit inlining. lld reads bitcode natively.
++    find_program(RECOMPCORE_MODULE_LLD NAMES ld.lld)
++    if(RECOMPCORE_MODULE_LLD)
++      set(RECOMPCORE_MODULE_IPO_SUPPORTED TRUE)
++      target_link_options(${MODULE_NAME} PRIVATE -fuse-ld=lld)
++    else()
++      set(RECOMPCORE_MODULE_IPO_SUPPORTED FALSE)
++      set(RECOMPCORE_MODULE_IPO_ERROR "ld.lld not found")
++    endif()
++  else()
++    include(CheckIPOSupported)
++    # moderngekko-port configures with CMAKE_NINJA_FORCE_RESPONSE_FILE=1, which the
++    # module needs: it links thousands of chunk objects and the command line does
++    # not fit in ARG_MAX. But check_ipo_supported's try-compile inherits the
++    # environment, and its static-library step then runs `ar qc libfoo.a @foo.rsp`
++    # -- Apple's /usr/bin/ar has no @file support, so the check fails with
++    # "ar: @CMakeFiles/foo.rsp: No such file or directory" and IPO is silently
++    # disabled. The manifest still records -flto=thin. Every module built this way
++    # had NO cross-translation-unit inlining. Scope the variable off for the check
++    # only, then restore it before the generator reads it.
++    set(_module_forced_rsp "$ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE}")
++    unset(ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE})
++    check_ipo_supported(RESULT RECOMPCORE_MODULE_IPO_SUPPORTED
++                        OUTPUT RECOMPCORE_MODULE_IPO_ERROR LANGUAGES C)
++    if(_module_forced_rsp)
++      set(ENV{CMAKE_NINJA_FORCE_RESPONSE_FILE} "${_module_forced_rsp}")
++    endif()
+   endif()
+   if(RECOMPCORE_MODULE_IPO_SUPPORTED)
+     set_property(TARGET ${MODULE_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
++    # Each ThinLTO backend job holds a few large chunks in memory; one per
++    # core exhausted a 16 GiB machine, so the link runs a bounded number.
++    set(RECOMPCORE_MODULE_LTO_JOBS "4" CACHE STRING "Parallel ThinLTO backend jobs at link time")
++    # A cache shared by successive builds of a game's module: a rebuild only
++    # re-optimizes the chunks whose code (or whose inlined callees) changed.
++    set(RECOMPCORE_MODULE_LTO_CACHE "" CACHE PATH "ThinLTO cache directory, empty for none")
++    if(NOT APPLE AND NOT MSVC)
++      target_link_options(${MODULE_NAME} PRIVATE
++        "LINKER:--thinlto-jobs=${RECOMPCORE_MODULE_LTO_JOBS}")
++      if(RECOMPCORE_MODULE_LTO_CACHE)
++        target_link_options(${MODULE_NAME} PRIVATE
++          "LINKER:--thinlto-cache-dir=${RECOMPCORE_MODULE_LTO_CACHE}"
++          "LINKER:--thinlto-cache-policy=cache_size_bytes=4g")
++      endif()
++    endif()
+   else()
+     message(STATUS "Module IPO disabled: ${RECOMPCORE_MODULE_IPO_ERROR}")
+   endif()
