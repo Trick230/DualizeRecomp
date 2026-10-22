@@ -1,0 +1,25 @@
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 409a5e0..7bd390d 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -1073,6 +1073,11 @@ RuntimeRunResult Runtime::Run() {
+                          "Dolphin could not boot sys/main.dol"}};
+   }
+   m_impl->booted = true;
++  // Keep the display awake while the game runs, as Dolphin's frontends do:
++  // with it off, presentation blocks and the game crawls.
++  const bool inhibit_screen_saver = Config::Get(Config::MAIN_DISABLE_SCREENSAVER);
++  if (inhibit_screen_saver)
++    UICommon::InhibitScreenSaver(true);
+   m_impl->present_hook =
+       GetVideoEvents().after_present_event.Register([this](const PresentInfo &info) {
+         m_impl->automation_state.frame_count.store(info.frame_count,
+@@ -1102,6 +1107,8 @@ RuntimeRunResult Runtime::Run() {
+     title_thread.join();
+   m_impl->platform->SaveWindowGeometry();
+   StopAutomation();
++  if (inhibit_screen_saver)
++    UICommon::InhibitScreenSaver(false);
+   Core::Stop(Core::System::GetInstance());
+   Core::Shutdown(Core::System::GetInstance());
+ #ifdef MODERNGEKKO_NATIVE_GX

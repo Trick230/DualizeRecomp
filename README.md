@@ -266,6 +266,9 @@ replaced piece by piece rather than extended.
 - **`0010` Classic Controller automation.** `pad`/`pad_frames` take
   `classic_*` controls (the game's profile uses a Classic Controller), so
   scripts can play: `Game.pad(frames, classic_ly=1.0)`.
+- **`0011` Display stays awake.** The runtime inhibits the screen saver while
+  the game runs (honouring Dolphin's `DisableScreenSaver`); with the display
+  asleep, presentation blocks and the game drops to a few frames per second.
 
 **ModernGekko's Dolphin fork**
 
