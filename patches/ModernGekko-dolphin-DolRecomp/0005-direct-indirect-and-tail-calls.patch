@@ -1,0 +1,332 @@
+diff --git a/src/app/pipeline.c b/src/app/pipeline.c
+index 8299945..ec8c6e0 100644
+--- a/src/app/pipeline.c
++++ b/src/app/pipeline.c
+@@ -1409,18 +1409,20 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
+         for (u32 i = 1; i < funcs.count; ++i)
+             chunks_ascending &= funcs.ranges[i - 1u].start < funcs.ranges[i].start;
+         if (chunks_ascending && funcs.count)
+-            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
++            chunk_starts = (u32*)malloc((size_t)funcs.count * 2u * sizeof(u32));
+         if (chunk_starts) {
+-            for (u32 i = 0; i < funcs.count; ++i)
++            for (u32 i = 0; i < funcs.count; ++i) {
+                 chunk_starts[i] = funcs.ranges[i].start;
+-            emit_set_chunk_table(chunk_starts, funcs.count);
++                chunk_starts[funcs.count + i] = funcs.ranges[i].end;
++            }
++            emit_set_chunk_table(chunk_starts, chunk_starts + funcs.count, funcs.count);
+         }
+ 
+         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
+         printf("  writing %u chunks with %u job%s\n",
+                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
+         bool chunks_written = run_chunk_jobs(chunk_jobs, section_job_count, jobs);
+-        emit_set_chunk_table(NULL, 0);
++        emit_set_chunk_table(NULL, NULL, 0);
+         free(chunk_starts);
+         if (!chunks_written) {
+             smc_analysis_free(&smc);
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 3c7ebe0..8ae5395 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -316,10 +316,12 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
+ // read-only thereafter, so no locking. NULL means "no table": every cross-chunk
+ // branch takes the safe return-to-chassis path.
+ static const u32* g_chunk_starts = NULL;
++static const u32* g_chunk_ends = NULL;
+ static u32 g_chunk_count = 0;
+ 
+-void emit_set_chunk_table(const u32* starts, u32 count) {
++void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count) {
+     g_chunk_starts = count ? starts : NULL;
++    g_chunk_ends = count ? ends : NULL;
+     g_chunk_count = count ? count : 0;
+ }
+ 
+@@ -357,10 +359,54 @@ static s32 chunk_index_for(u32 addr) {
+         else
+             hi = mid;
+     }
+-    return lo ? (s32)(lo - 1u) : -1;
++    if (!lo || addr >= g_chunk_ends[lo - 1u])
++        return -1;
++    return (s32)(lo - 1u);
+ }
+ 
+ 
++// Enter the module at a run-time target through the host's line table, then
++// resume at `continuation` if the callee came back there (see
++// emit_cross_chunk_call for why any other pc returns to the chassis).
++static void emit_indirect_resume(FILE* out, const char* target, u32 continuation) {
++    fprintf(out, "            if (dolrecomp_enter_indirect(ctx, %s) &&\n", target);
++    fprintf(out, "                ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
++            continuation, continuation);
++    fprintf(out, "                goto label_%08X;\n", continuation);
++}
++
++// A branch out of the function that does not link is a tail call: the callee
++// returns to our caller, so enter it directly and then leave with whatever pc
++// it stopped at. A native target runs in place and returns through the lr.
++static void emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
++    const u32 target = inst->branch_target;
++    const DolRecompNative* native = native_for(target);
++    fprintf(out, "            ctx->pc = 0x%08Xu;\n", target);
++    if (native) {
++        fprintf(out, "            {\n");
++        fprintf(out, "                bool %s(CPUState* ctx);\n", native->name);
++        fprintf(out, "                if (%s(ctx)) {\n", native->name);
++        if (!native->jump)
++            fprintf(out, "                    ctx->pc = ctx->lr & ~3u;\n");
++        fprintf(out, "                    return;\n");
++        fprintf(out, "                }\n");
++        fprintf(out, "            }\n");
++    }
++    const s32 target_chunk = chunk_index_for(target);
++    if (target_chunk >= 0) {
++        fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
++                target_chunk);
++        fprintf(out, "                dolrecomp_call_enter()) {\n");
++        fprintf(out, "                void func_%08X(CPUState* ctx);\n", g_chunk_starts[target_chunk]);
++        fprintf(out, "                func_%08X(ctx);\n", g_chunk_starts[target_chunk]);
++        fprintf(out, "                dolrecomp_call_leave();\n");
++        fprintf(out, "            }\n");
++    } else {
++        fprintf(out, "            (void)dolrecomp_enter_indirect(ctx, 0x%08Xu);\n", target);
++    }
++    fprintf(out, "            return;\n");
++}
++
+ // A cross-chunk `bl` whose target chunk is known: call it directly instead of
+ // returning to the chassis. The chassis round trip costs two rel-section scans,
+ // two IsHostCallAddress hash lookups, a ModManager dispatch and a downcount
+@@ -382,12 +428,20 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
+                                   u32 func_start, u32 func_end) {
+     u32 continuation = inst->address + 4u;
+     s32 target_chunk = chunk_index_for(inst->branch_target);
+-    if (target_chunk < 0)
+-        return false;
+     // Without a local continuation label there is nothing to resume into, so
+     // the call would buy nothing over the plain return.
+     if (!branch_target_is_local(func_start, func_end, continuation))
+         return false;
++    if (target_chunk < 0) {
++        // A chunk of a later section is not in the table yet: look it up at
++        // run time instead.
++        char target[16];
++        snprintf(target, sizeof(target), "0x%08Xu", inst->branch_target);
++        fprintf(out, "            ctx->pc = %s;\n", target);
++        emit_indirect_resume(out, target, continuation);
++        fprintf(out, "            return;\n");
++        return true;
++    }
+ 
+     u32 target_start = g_chunk_starts[target_chunk];
+     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+@@ -470,15 +524,21 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
+     } else if (local_target) {
+         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+     } else {
+-        fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+-        fprintf(out, "            return;\n");
++        emit_cross_chunk_tail(out, inst);
+     }
+ }
+ 
++// `indirect` marks a bcctr: its target is a function pointer or a jump-table
++// entry rather than a return address, so it is entered directly -- a local
++// target through the function's own entry switch (`entry_dispatch`; a
++// counted-loop helper has none), any other through the host's line table. A
++// linking one resumes inline like a direct call.
+ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+                                 const char* target_expr,
+                                 bool route_local_returns,
+-                                u32 function_address) {
++                                u32 function_address, u32 function_end,
++                                bool indirect, bool entry_dispatch) {
++    const u32 continuation = inst->address + 4u;
+     fprintf(out, "    {\n");
+     fprintf(out, "        u32 target = %s;\n", target_expr);
+     emit_branch_condition(out, inst->bo, inst->bi);
+@@ -487,10 +547,26 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
+         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+     }
+     fprintf(out, "            ctx->pc = target;\n");
+-    if (route_local_returns)
++    if (indirect && inst->lk &&
++        branch_target_is_local(function_address, function_end, continuation)) {
++        emit_indirect_resume(out, "target", continuation);
++        fprintf(out, "            return;\n");
++    } else if (indirect && !inst->lk) {
++        if (entry_dispatch) {
++            fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu) {\n", function_address,
++                    function_end - function_address);
++            fprintf(out, "                if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)\n");
++            fprintf(out, "                    return;\n");
++            fprintf(out, "                goto entry_dispatch_%08X;\n", function_address);
++            fprintf(out, "            }\n");
++        }
++        fprintf(out, "            (void)dolrecomp_enter_indirect(ctx, target);\n");
++        fprintf(out, "            return;\n");
++    } else if (route_local_returns) {
+         fprintf(out, "            goto return_dispatch_%08X;\n", function_address);
+-    else
++    } else {
+         fprintf(out, "            return;\n");
++    }
+     fprintf(out, "        }\n");
+     fprintf(out, "    }\n");
+ }
+@@ -572,6 +648,12 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+         "/* Published by the host; see emit_cross_chunk_call in DolRecomp. */\n"
+         "extern const unsigned char* dolrecomp_direct_ok;\n"
+         "extern u32 dolrecomp_idle_pc;\n"
++        "/* The same flags per line of MEM1 for targets known only at run time\n"
++        "   (virtual calls, jump tables, later sections); see emit_indirect_resume. */\n"
++        "#define DOLRECOMP_DIRECT_LINE_SHIFT 7\n"
++        "extern const unsigned char* dolrecomp_direct_lines;\n"
++        "extern u32 dolrecomp_direct_lines_size;\n"
++        "void dolrecomp_indirect_dispatch(CPUState* ctx, u32 address);\n"
+         "static inline int dolrecomp_call_enter(void) {\n"
+         "    if (dolrecomp_call_depth >= (unsigned)DOLRECOMP_C_MAX_CALL_DEPTH)\n"
+         "        return 0;\n"
+@@ -582,6 +664,16 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
+         "    if (dolrecomp_call_depth)\n"
+         "        dolrecomp_call_depth--;\n"
+         "}\n"
++        "static inline int dolrecomp_enter_indirect(CPUState* ctx, u32 target) {\n"
++        "    const u32 offset = target - 0x80000000u;\n"
++        "    if (offset >= dolrecomp_direct_lines_size ||\n"
++        "        !dolrecomp_direct_lines[offset >> DOLRECOMP_DIRECT_LINE_SHIFT] ||\n"
++        "        !dolrecomp_call_enter())\n"
++        "        return 0;\n"
++        "    dolrecomp_indirect_dispatch(ctx, target);\n"
++        "    dolrecomp_call_leave();\n"
++        "    return 1;\n"
++        "}\n"
+         "\n"
+         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
+         "    sh &= 31u;\n"
+@@ -720,7 +812,8 @@ static bool instruction_uses_cia_accessors(PPCOpcode op) {
+ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+                                         u32 func_start, u32 func_end,
+                                         bool direct_backedge,
+-                                        bool route_local_returns) {
++                                        bool route_local_returns,
++                                        bool entry_dispatch) {
+     char disasm[64];
+     ppc_disasm(disasm, sizeof(disasm), inst);
+     fprintf(out, "    // %08X: %s\n", inst->address, disasm);
+@@ -1788,11 +1881,12 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+ 
+     case PPC_OP_BCLR:
+         emit_dynamic_branch(out, inst, "ctx->lr & ~3u",
+-                            route_local_returns, func_start);
++                            route_local_returns, func_start, func_end, false, false);
+         break;
+ 
+     case PPC_OP_BCCTR:
+-        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", false, func_start);
++        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", false, func_start, func_end,
++                            true, entry_dispatch);
+         break;
+ 
+     case PPC_OP_TWI:
+@@ -2006,7 +2100,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+ }
+ 
+ void emit_instruction(FILE* out, const PPCInst* inst) {
+-    emit_instruction_with_range(out, inst, 0, (u32)-1, false, false);
++    emit_instruction_with_range(out, inst, 0, (u32)-1, false, false, false);
+ }
+ 
+ static void emit_counted_loop(FILE* out, const PPCInst* insts,
+@@ -2020,7 +2114,7 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
+     fprintf(out, "    ctx->downcount -= %u;\n", cfg->block_cycles[first]);
+     for (u32 i = first; i <= last; ++i) {
+         emit_instruction_with_range(out, &insts[i], function_address,
+-                                    function_end, i == last, false);
++                                    function_end, i == last, false, false);
+     }
+     fprintf(out, "    ctx->pc = 0x%08Xu;\n", continuation);
+     fprintf(out, "}\n\n");
+@@ -2047,6 +2141,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     }
+ 
+     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
++    fprintf(out, "entry_dispatch_%08X: __attribute__((unused));\n", func_addr);
+     fprintf(out, "    switch (ctx->pc) {\n");
+     for (u32 i = 0; i < count; i++) {
+         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+@@ -2093,10 +2188,22 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+         emit_instruction_with_range(
+             out, &insts[i], func_addr, func_end,
+             c_function_cfg_can_loop_directly(&cfg, insts, func_addr, i),
+-            has_local_returns);
++            has_local_returns, true);
+     }
+ 
+-    fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
++    // Running off the end continues in the next chunk, as a tail call would.
++    {
++        const s32 next = chunk_index_for(func_end);
++        fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
++        if (next >= 0 && g_chunk_starts[next] == func_end) {
++            fprintf(out, "    if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] && dolrecomp_call_enter()) {\n",
++                    next);
++            fprintf(out, "        void func_%08X(CPUState* ctx);\n", func_end);
++            fprintf(out, "        func_%08X(ctx);\n", func_end);
++            fprintf(out, "        dolrecomp_call_leave();\n");
++            fprintf(out, "    }\n");
++        }
++    }
+     if (has_local_returns) {
+         fprintf(out, "    return;\n");
+         fprintf(out, "return_dispatch_%08X:\n", func_addr);
+diff --git a/src/backend/emitter.h b/src/backend/emitter.h
+index 1374968..1c20c28 100644
+--- a/src/backend/emitter.h
++++ b/src/backend/emitter.h
+@@ -21,7 +21,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
+ // Direct calls bypass chassis dispatch checks and must not be enabled by a
+ // runtime that validates mutable guest code there. Call before worker emission;
+ // passing count == 0 restores the safe return-to-chassis form.
+-void emit_set_chunk_table(const u32* starts, u32 count);
++void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count);
+ 
+ // A guest function with a host implementation, `bool name(CPUState*)`, that
+ // the module links in. It returns true after doing the whole call (registers,
+diff --git a/src/cpu/cpu.c b/src/cpu/cpu.c
+index b1ab77e..9be008f 100644
+--- a/src/cpu/cpu.c
++++ b/src/cpu/cpu.c
+@@ -340,6 +340,10 @@ unsigned dolrecomp_call_depth = 0;
+    idle-loop pc, both owned by the host. NULL keeps every call on the host. */
+ const unsigned char* dolrecomp_direct_ok = NULL;
+ u32 dolrecomp_idle_pc = 0;
++/* The same flags per 2^DOLRECOMP_DIRECT_LINE_SHIFT-byte line of MEM1, for calls
++   whose target is known only at run time; a size of 0 keeps them on the host. */
++const unsigned char* dolrecomp_direct_lines = NULL;
++u32 dolrecomp_direct_lines_size = 0;
+ 
+ bool ppc_fp_available(CPUState* cpu, u32 cia) {
+     if (cpu->msr & PPC_MSR_FP)
+diff --git a/tests/test_c_execute.c b/tests/test_c_execute.c
+index 512af36..8fc9635 100644
+--- a/tests/test_c_execute.c
++++ b/tests/test_c_execute.c
+@@ -10,6 +10,13 @@ void func_80004060(CPUState* ctx);
+ void func_80004068(CPUState* ctx);
+ void func_80004070(CPUState* ctx);
+ 
++/* Host hook for call targets known only at run time. Never reached: this test
++   publishes no direct-line table, so such calls return to the loop below. */
++void dolrecomp_indirect_dispatch(CPUState* ctx, u32 address) {
++    (void)ctx;
++    (void)address;
++}
++
+ static u64 bits_of(f64 value) {
+     u64 bits;
+     memcpy(&bits, &value, sizeof(bits));
