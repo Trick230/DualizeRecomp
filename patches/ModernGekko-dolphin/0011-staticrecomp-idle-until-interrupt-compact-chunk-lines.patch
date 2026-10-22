@@ -1,0 +1,235 @@
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+index d5d6fbb..84b0230 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+@@ -342,7 +342,7 @@ void StaticRecompCore::LoadModule()
+   m_failed_chunks = 0;
+   m_lookup_ram_size = 0;
+   m_lookup_exram_size = 0;
+-  m_chunk_lookup_table.clear();
++  m_chunk_lines.clear();
+ 
+   m_direct_call_ok.assign(desc->num_chunk_ranges, 0);
+   m_direct_call_eligible.assign(desc->num_chunk_ranges, 0);
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index 009b142..92b7776 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -214,21 +214,42 @@ private:
+   u64 m_verifications = 0;    // chunk hash checks performed
+   u64 m_reverify_events = 0;  // invalidations that reset a chunk to Unverified
+ 
+-  // Lookup table optimization for O(1) chunk searches
+-  std::vector<int> m_chunk_lookup_table;
++  // Chunk of each 128-byte line of the lookup space, consulted on every
++  // dispatch: the chunk index when one chunk covers the whole line, NO_CHUNK
++  // when none touches it, SPLIT_LINE when a chunk boundary falls inside it. Two
++  // bytes per line keep the hot part of the table in cache.
++  static constexpr u32 CHUNK_LINE_SHIFT = 7;
++  static constexpr s16 NO_CHUNK = -1;
++  static constexpr s16 SPLIT_LINE = -2;
++  std::vector<s16> m_chunk_lines;
++  int ChunkAtSplitLine(u32 address) const;
++  int ChunkAtLinked(u32 address) const
++  {
++    const int index = GetAddressLookupIndex(address);
++    if (index < 0)
++      return NO_CHUNK;
++    const u32 line = static_cast<u32>(index) >> (CHUNK_LINE_SHIFT - 2);
++    if (line >= m_chunk_lines.size())
++      return NO_CHUNK;
++    const s16 chunk = m_chunk_lines[line];
++    return chunk == SPLIT_LINE ? ChunkAtSplitLine(address) : chunk;
++  }
+   // One bit per 32-byte line of the lookup index space: set when the line
+   // overlaps a DOL chunk. REL chunks move with their module and are checked
+   // against m_active_rel_sections instead.
+   std::vector<u64> m_dol_code_lines;
+   u32 m_lookup_ram_size = 0;
+   u32 m_lookup_exram_size = 0;
+-  int GetAddressLookupIndex(u32 address) const;
++  int GetAddressLookupIndex(u32 address) const
++  {
++    if (address - 0x80000000u < m_lookup_ram_size)
++      return static_cast<int>((address - 0x80000000u) >> 2);
++    if (address - 0x90000000u < m_lookup_exram_size)
++      return static_cast<int>((m_lookup_ram_size >> 2) + ((address - 0x90000000u) >> 2));
++    return -1;
++  }
+   void InitLookupTable(u32 ram_size, u32 exram_size);
+ 
+-  // Dispatch locality: most control transfers stay inside one chunk, so the
+-  // last hit short-circuits the chunk binary search on the hot path.
+-  mutable u32 m_last_chunk_index = 0;
+-
+   bool m_collect_dispatch_samples = false;
+   bool m_has_rel_modules = false;
+   u32 m_idle_pc = 0;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+index 6a03dff..b60be4c 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -69,21 +69,9 @@ void StaticRecompCore::Run()
+   const auto fast_dispatchable_at = [this](u32 address) {
+     if (m_has_rel_modules || !m_forced_fallback_ranges.empty())
+       return FastDispatchableAt(address);
+-    if (!m_module_active || m_chunk_lookup_table.empty())
++    if (!m_module_active || m_chunk_lines.empty())
+       return false;
+-
+-    int lookup_index = -1;
+-    if (address >= 0x80000000u && address < 0x80000000u + m_lookup_ram_size)
+-    {
+-      lookup_index = static_cast<int>((address - 0x80000000u) >> 2);
+-    }
+-    else if (address >= 0x90000000u && address < 0x90000000u + m_lookup_exram_size)
+-    {
+-      lookup_index = static_cast<int>((m_lookup_ram_size >> 2) + ((address - 0x90000000u) >> 2));
+-    }
+-    if (lookup_index < 0 || lookup_index >= static_cast<int>(m_chunk_lookup_table.size()))
+-      return false;
+-    const int chunk = m_chunk_lookup_table[lookup_index];
++    const int chunk = ChunkAtLinked(address);
+     return chunk >= 0 && m_chunk_state[chunk] == CHUNK_VERIFIED;
+   };
+ 
+@@ -122,6 +110,15 @@ void StaticRecompCore::Run()
+   while (*state_ptr == CPU::State::Running)
+   {
+     core_timing.Advance();
++    // At the idle pc the guest only spins waking its sleeping threads so they
++    // can poll for work, and nothing they poll changes until an interrupt is
++    // taken. Keep skipping to the next event while none is, instead of
++    // re-running the whole wake/poll/sleep round after every event.
++    while (m_idle_pc != 0 && ppc.pc == m_idle_pc && *state_ptr == CPU::State::Running)
++    {
++      core_timing.Idle();
++      core_timing.Advance();
++    }
+     const std::string current_game_id = SConfig::GetInstance().GetGameID();
+     m_module_active = m_module && (current_game_id.empty() || current_game_id == m_module->game_id);
+ 
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
+index 8a13ca8..65fadc8 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
+@@ -120,17 +120,13 @@ bool StaticRecompCore::ResolveNativeAddress(u32 runtime_address, u32* linked_add
+   };
+   if (resolve_active())
+     return true;
+-  const int direct_index = GetAddressLookupIndex(runtime_address);
+-  if (direct_index >= 0 && direct_index < static_cast<int>(m_chunk_lookup_table.size()))
++  const int chunk = ChunkAtLinked(runtime_address);
++  if (chunk >= 0 && m_chunk_rel_sections[chunk] < 0)
+   {
+-    const int chunk = m_chunk_lookup_table[direct_index];
+-    if (chunk >= 0 && m_chunk_rel_sections[chunk] < 0)
+-    {
+-      *linked_address = runtime_address;
+-      if (rel_section_index)
+-        *rel_section_index = 0xffffffffu;
+-      return true;
+-    }
++    *linked_address = runtime_address;
++    if (rel_section_index)
++      *rel_section_index = 0xffffffffu;
++    return true;
+   }
+   RefreshRelSections();
+   return resolve_active();
+@@ -158,13 +154,21 @@ u32 StaticRecompCore::TranslateRelAddress(u32 linked_address)
+   return runtime_address;
+ }
+ 
+-int StaticRecompCore::GetAddressLookupIndex(u32 address) const
++int StaticRecompCore::ChunkAtSplitLine(u32 address) const
+ {
+-  if (address >= 0x80000000u && address < 0x80000000u + m_lookup_ram_size)
+-    return static_cast<int>((address - 0x80000000u) >> 2);
+-  if (address >= 0x90000000u && address < 0x90000000u + m_lookup_exram_size)
+-    return static_cast<int>((m_lookup_ram_size >> 2) + ((address - 0x90000000u) >> 2));
+-  return -1;
++  const StaticRecompRange* ranges = m_module->chunk_ranges;
++  u32 lo = 0;
++  u32 hi = m_module->num_chunk_ranges;
++  while (lo < hi)
++  {
++    const u32 mid = (lo + hi) / 2;
++    if (ranges[mid].end <= address)
++      lo = mid + 1;
++    else
++      hi = mid;
++  }
++  return lo < m_module->num_chunk_ranges && ranges[lo].start <= address ? static_cast<int>(lo) :
++                                                                          NO_CHUNK;
+ }
+ 
+ void StaticRecompCore::InitLookupTable(u32 ram_size, u32 exram_size)
+@@ -177,47 +181,47 @@ void StaticRecompCore::InitLookupTable(u32 ram_size, u32 exram_size)
+ 
+   if (!m_module)
+   {
+-    m_chunk_lookup_table.clear();
++    m_chunk_lines.clear();
+     m_dol_code_lines.clear();
+     return;
+   }
+ 
+-  u32 total_instructions = (ram_size + exram_size) >> 2;
+-  m_chunk_lookup_table.assign(total_instructions, -1);
++  constexpr u32 insns_per_line = 1u << (CHUNK_LINE_SHIFT - 2);
++  const u32 total_instructions = (ram_size + exram_size) >> 2;
++  m_chunk_lines.assign((total_instructions + insns_per_line - 1) / insns_per_line, NO_CHUNK);
+   m_dol_code_lines.assign((total_instructions / 8 + 63) / 64, 0);
+ 
+   for (u32 i = 0; i < m_module->num_chunk_ranges; ++i)
+   {
+     const auto& chunk = m_module->chunk_ranges[i];
+-    int start_idx = GetAddressLookupIndex(chunk.start);
+-    int end_idx = GetAddressLookupIndex(chunk.end);
+-
+-    if (start_idx >= 0 && end_idx >= start_idx)
++    const int start = GetAddressLookupIndex(chunk.start);
++    if (start < 0)
++      continue;
++    const u32 first = static_cast<u32>(start);
++    const u32 last = std::min(first + ((chunk.end - chunk.start) >> 2), total_instructions);
++    for (u32 line = first / insns_per_line; line * insns_per_line < last; ++line)
+     {
+-      const bool dol_chunk = m_chunk_rel_sections[i] < 0;
+-      for (int idx = start_idx; idx < end_idx; ++idx)
+-      {
+-        m_chunk_lookup_table[idx] = static_cast<int>(i);
+-        if (dol_chunk)
+-          m_dol_code_lines[idx >> 9] |= u64{1} << ((idx >> 3) & 63);
+-      }
++      const bool whole = first <= line * insns_per_line && (line + 1) * insns_per_line <= last;
++      s16& entry = m_chunk_lines[line];
++      entry = whole && entry == NO_CHUNK && i < 0x7FFFu ? static_cast<s16>(i) : SPLIT_LINE;
++    }
++    if (m_chunk_rel_sections[i] < 0)
++    {
++      for (u32 line = first >> 3; line << 3 < last; ++line)
++        m_dol_code_lines[line >> 6] |= u64{1} << (line & 63);
+     }
+   }
+ }
+ 
+ int StaticRecompCore::ChunkIndexOf(u32 address)
+ {
+-  if (!m_module_active || m_chunk_lookup_table.empty())
++  if (!m_module_active || m_chunk_lines.empty())
+     return -1;
+ 
+   u32 linked_address = address;
+   if (!ResolveNativeAddress(address, &linked_address, nullptr))
+     return -1;
+-  int idx = GetAddressLookupIndex(linked_address);
+-  if (idx < 0 || idx >= static_cast<int>(m_chunk_lookup_table.size()))
+-    return -1;
+-
+-  return m_chunk_lookup_table[idx];
++  return ChunkAtLinked(linked_address);
+ }
+ 
+ bool StaticRecompCore::FastDispatchableAt(u32 address)
