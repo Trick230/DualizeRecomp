@@ -1,0 +1,415 @@
+diff --git a/GXRuntime/include/core/cpu.h b/GXRuntime/include/core/cpu.h
+index e5a946b..0ba3b94 100644
+--- a/GXRuntime/include/core/cpu.h
++++ b/GXRuntime/include/core/cpu.h
+@@ -37,7 +37,15 @@ extern "C" {
+ //   offset on both sides; hosts that do not meter guest time may ignore it.
+ // - ABI v5 appends the `fast_read`/`fast_write` RAM slice tables, which the
+ //   host fills with ppc_build_fast_memory() once `ram`/`exram` are set.
+-#define GXRUNTIME_CPU_ABI_VERSION 5u
++// - ABI v6 appends `cache_range`: one dcbf/dcbst/dcbi over `lines`
++//   consecutive 32-byte lines, for natives of the DC*Range SDK loops. NULL
++//   means the host has none and callers fall back to cache_control per line.
++//   It also appends the host's write-gather pipe (`gather_pipe_ptr`, the
++//   host's own write pointer, and `gather_pipe_base`): stores that leave the
++//   pipe short of a 32-byte burst append to it directly, and only the store
++//   that completes a burst reaches external_write. NULL keeps every gather
++//   pipe store on external_write.
++#define GXRUNTIME_CPU_ABI_VERSION 6u
+ #define GXRUNTIME_CPU_ABI_DOLRECOMP_PREFIX 1u
+ #define GXRUNTIME_CPU_ABI_EXTERNAL_POINTER_EXTENSION 1u
+ 
+@@ -112,6 +120,7 @@ typedef bool (*PPCHostCall)(CPUState* cpu, u32 address);
+ typedef u32 (*PPCSPRRead)(CPUState* cpu, u16 spr, u32 cia);
+ typedef void (*PPCSPRWrite)(CPUState* cpu, u16 spr, u32 value, u32 cia);
+ typedef void (*PPCCacheControl)(CPUState* cpu, u8 operation, u32 ea, u32 cia);
++typedef void (*PPCCacheRange)(CPUState* cpu, u8 operation, u32 ea, u32 lines);
+ 
+ enum {
+     PPC_CACHE_DCBST,
+@@ -180,6 +189,9 @@ struct CPUState {
+     // ppc_build_fast_memory().
+     u8* fast_read[1u << 9];
+     u8* fast_write[1u << 9];
++    PPCCacheRange cache_range;
++    u8** gather_pipe_ptr;
++    u8* gather_pipe_base;
+ };
+ 
+ #define PPC_FAST_SLICE_SHIFT 23u
+diff --git a/GXRuntime/include/core/types.h b/GXRuntime/include/core/types.h
+index dcdb36a..350f601 100644
+--- a/GXRuntime/include/core/types.h
++++ b/GXRuntime/include/core/types.h
+@@ -108,8 +108,8 @@ static inline f64 f64_value(u64 bits) {
+ 
+ /* Widening a single for lfs/psq_l: the normal case is a few shifts and is
+  * forced inline, since a 16 KiB chunk function exhausts the inliner's budget
+- * and would otherwise call out for every load. Zero, denormal, infinite and
+- * NaN inputs take the out-of-line path. */
++ * and would otherwise call out for every load. Zeroes stay inline as well;
++ * denormal, infinite and NaN inputs take the out-of-line path. */
+ #if defined(_MSC_VER)
+ #define DOLRECOMP_TYPES_ALWAYS_INLINE static __forceinline
+ #define DOLRECOMP_TYPES_NOINLINE static __declspec(noinline)
+@@ -147,6 +147,8 @@ DOLRECOMP_TYPES_ALWAYS_INLINE u64 convert_to_double(u32 value) {
+         u64 z = (y << 61) | (y << 60) | (y << 59);
+         return ((x & 0xC0000000u) << 32) | z | ((x & 0x3FFFFFFFu) << 29);
+     }
++    if ((value << 1) == 0) /* +-0, as common as any normal value */
++        return x << 32;
+     return convert_to_double_special(value);
+ }
+ 
+diff --git a/GXRuntime/src/core/cpu.c b/GXRuntime/src/core/cpu.c
+index a718ad5..70f0ad7 100644
+--- a/GXRuntime/src/core/cpu.c
++++ b/GXRuntime/src/core/cpu.c
+@@ -45,7 +45,27 @@ u64 ppc_mem_read_slow(CPUState* cpu, u32 addr, u8 size) {
+     }
+ }
+ 
++// A store to the write-gather pipe page that leaves the pipe short of a full
++// 32-byte burst only appends to the host's buffer.
++static bool gather_pipe_append(CPUState* cpu, u32 addr, u64 value, u8 size) {
++    if ((addr & 0xFFFFF000u) != 0xCC008000u || cpu->gather_pipe_ptr == NULL)
++        return false;
++    u8* ptr = *cpu->gather_pipe_ptr;
++    if ((size_t)(ptr - cpu->gather_pipe_base) + size >= 32u)
++        return false;
++    switch (size) {
++    case 1: *ptr = (u8)value; break;
++    case 2: write_be16(ptr, (u16)value); break;
++    case 4: write_be32(ptr, (u32)value); break;
++    default: write_be64(ptr, value); break;
++    }
++    *cpu->gather_pipe_ptr = ptr + size;
++    return true;
++}
++
+ void ppc_mem_write_slow(CPUState* cpu, u32 addr, u64 value, u8 size) {
++    if (gather_pipe_append(cpu, addr, value, size))
++        return;
+     u32 offset;
+     u8* ptr = get_ram_ptr(cpu, addr, size, &offset);
+     if (ptr == NULL) {
+@@ -111,6 +131,9 @@ void cpu_reset(CPUState* cpu) {
+     PPCSPRRead spr_read = cpu->spr_read;
+     PPCSPRWrite spr_write = cpu->spr_write;
+     PPCCacheControl cache_control = cpu->cache_control;
++    PPCCacheRange cache_range = cpu->cache_range;
++    u8** gather_pipe_ptr = cpu->gather_pipe_ptr;
++    u8* gather_pipe_base = cpu->gather_pipe_base;
+ 
+     memset(cpu, 0, sizeof(*cpu));
+     cpu->ram = ram;
+@@ -128,6 +151,9 @@ void cpu_reset(CPUState* cpu) {
+     cpu->spr_read = spr_read;
+     cpu->spr_write = spr_write;
+     cpu->cache_control = cache_control;
++    cpu->cache_range = cache_range;
++    cpu->gather_pipe_ptr = gather_pipe_ptr;
++    cpu->gather_pipe_base = gather_pipe_base;
+ 
+     ppc_build_fast_memory(cpu, g_mem_write_journal == NULL);
+ 
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+index 59705b4..b7aa064 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+@@ -174,6 +174,7 @@ void StaticRecompCore::Init()
+   m_guest.spr_read = HookSPRRead;
+   m_guest.spr_write = HookSPRWrite;
+   m_guest.cache_control = HookCacheControl;
++  m_guest.cache_range = HookCacheRange;
+   m_guest.instruction_fallback = HookInstructionFallback;
+   m_guest.host_call = m_module_source.host_call ? HookHostCall : nullptr;
+   m_guest.external_user_data = this;
+@@ -239,6 +240,19 @@ void StaticRecompCore::Shutdown()
+                (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
+                (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
+                (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
++  std::vector<std::pair<u32, u64>> entry_misses(m_entry_misses.begin(), m_entry_misses.end());
++  std::sort(entry_misses.begin(), entry_misses.end(),
++            [](const auto& left, const auto& right) { return left.second > right.second; });
++  u64 entry_miss_total = 0;
++  for (const auto& miss : entry_misses)
++    entry_miss_total += miss.second;
++  std::fprintf(stderr, "[staticrecomp] entry misses: %llu at %zu pcs\n",
++               static_cast<unsigned long long>(entry_miss_total), entry_misses.size());
++  for (std::size_t i = 0; i < std::min<std::size_t>(entry_misses.size(), 8); ++i)
++  {
++    std::fprintf(stderr, "[staticrecomp] entry miss pc=%08x count=%llu\n", entry_misses[i].first,
++                 static_cast<unsigned long long>(entry_misses[i].second));
++  }
+   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
+                                                     m_dispatch_samples.end());
+   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index 680a6be..b86f895 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -160,6 +160,7 @@ private:
+   static u32 HookSPRRead(CPUState* cpu, u16 spr, u32 cia);
+   static void HookSPRWrite(CPUState* cpu, u16 spr, u32 value, u32 cia);
+   static void HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32 cia);
++  static void HookCacheRange(CPUState* cpu, u8 operation, u32 ea, u32 lines);
+   static void HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia);
+   static bool HookHostCall(CPUState* cpu, u32 address);
+ 
+@@ -184,6 +185,8 @@ private:
+   u64 m_native_dispatches = 0;
+   u64 m_fallback_steps = 0;
+   u64 m_native_exceptions = 0;
++  // Dispatches the module had no entry case for, stepped by the interpreter.
++  std::unordered_map<u32, u64> m_entry_misses;
+   u64 m_hook_fallback_instructions = 0;
+   u64 m_timebase_cycle_remainder = 0;
+   std::unordered_map<u32, u64> m_dispatch_samples;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+index a02e904..b9a979b 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+@@ -14,13 +14,10 @@
+ #include "Common/Swap.h"
+ 
+ #include <cstdio>
+-#include <cstring>
+-#include <optional>
+ 
+ namespace
+ {
+ constexpr u32 LOCKED_CACHE_BASE = 0xE0000000u;
+-constexpr u32 HW_PAGE_SIZE = 0x1000u;
+ }
+ 
+ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
+@@ -30,30 +27,25 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
+          core->m_module_source.host_call(cpu, address, core->m_module_source.host_call_user);
+ }
+ 
+-// The locked cache bytes an access within one page maps to, or null. Once the
+-// effective address translates into the L1 window the MMU would only copy
+-// big-endian bytes to or from it, which the hooks below then do directly.
++// The locked cache bytes an access maps to, or null. The MMU would only copy
++// big-endian bytes to or from the L1 window, which the hooks below then do
++// directly. Like the RAM slice tables and HookExternalPointer, this takes the
++// OS's identity BAT mapping of 0xE0000000 as given.
+ u8* StaticRecompCore::LockedCacheBytes(u32 ea, u32 size)
+ {
+-  if ((ea >> 28) != (LOCKED_CACHE_BASE >> 28) || ((ea ^ (ea + size - 1)) & ~(HW_PAGE_SIZE - 1)))
+-    return nullptr;
+   auto& memory = m_system.GetMemory();
+-  if (!memory.GetL1Cache())
+-    return nullptr;
+-  PropagateGuestMSR();
+-  const std::optional<u32> physical = m_system.GetMMU().GetTranslatedAddress(ea);
+-  if (!physical || (*physical >> 28) != (LOCKED_CACHE_BASE >> 28) ||
+-      (*physical & 0x0FFFFFFFu) + size > memory.GetL1CacheSize())
++  const u32 offset = ea - LOCKED_CACHE_BASE;
++  if (offset >= memory.GetL1CacheSize() || size > memory.GetL1CacheSize() - offset ||
++      !memory.GetL1Cache())
+   {
+     return nullptr;
+   }
+-  return memory.GetL1Cache() + (*physical & 0x0FFFFFFFu);
++  return memory.GetL1Cache() + offset;
+ }
+ 
+ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
+ {
+   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+-  ea = core->TranslateRelAddress(ea);
+   if (const u8* bytes = core->LockedCacheBytes(ea, size))
+   {
+     switch (size)
+@@ -68,6 +60,7 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
+       return Common::swap64(bytes);
+     }
+   }
++  ea = core->TranslateRelAddress(ea);
+   if (ea == 0)
+     std::fprintf(stderr, "[zero-access] read size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
+                  cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
+@@ -103,16 +96,15 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
+ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
+ {
+   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+-  ea = core->TranslateRelAddress(ea);
+-  if (ea == 0)
+-    std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
+-                 cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
+ 
++  // Neither the gather pipe nor the locked cache is ever a linked REL
++  // address, so both are checked before the REL translation.
+   // Gather-pipe fast path: stores to the write-gather pipe page at effective
+   // 0xCC008000 go straight to GPFifo, mirroring the MMU's masked-write
+   // special case without an MMU round trip. Keying on the effective page is
+   // the same shortcut Dolphin's JITs take (optimizeGatherPipe). GPFifo
+-  // maintains ppc_state.gather_pipe_ptr internally.
++  // maintains ppc_state.gather_pipe_ptr internally. Only bursts are checked:
++  // CheckGatherPipe's JIT profiling hint has no block to mark here.
+   if ((ea & 0xFFFFF000) == 0xCC008000u)
+   {
+     if (core->m_lockstep_verifier->m_ls_journaling)
+@@ -121,22 +113,25 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
+     switch (size)
+     {
+     case 1:
+-      gpfifo.Write8(static_cast<u8>(value));
+-      return;
++      gpfifo.FastWrite8(static_cast<u8>(value));
++      break;
+     case 2:
+-      gpfifo.Write16(static_cast<u16>(value));
+-      return;
++      gpfifo.FastWrite16(static_cast<u16>(value));
++      break;
+     case 4:
+-      gpfifo.Write32(static_cast<u32>(value));
+-      return;
++      gpfifo.FastWrite32(static_cast<u32>(value));
++      break;
+     default:
+       for (u32 i = size * 8u; i > 0;)
+       {
+         i -= 8;
+-        gpfifo.Write8(static_cast<u8>(value >> i));
++        gpfifo.FastWrite8(static_cast<u8>(value >> i));
++        gpfifo.FastCheckGatherPipe();
+       }
+       return;
+     }
++    gpfifo.FastCheckGatherPipe();
++    return;
+   }
+ 
+   if (u8* bytes = core->LockedCacheBytes(ea, size))
+@@ -158,6 +153,10 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
+     }
+   }
+ 
++  ea = core->TranslateRelAddress(ea);
++  if (ea == 0)
++    std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
++                 cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
+   core->PropagateGuestMSR();
+   auto& mmu = core->m_system.GetMMU();
+   if (core->m_lockstep_verifier->m_ls_journaling &&
+@@ -431,6 +430,58 @@ void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32
+ // (DCFlushRange over vertex and texture buffers), so lines that hold neither
+ // module code nor a fallback JIT block skip the invalidation, exactly as
+ // Jit64::dcbx tests the block cache's valid_block bits before calling out.
++void StaticRecompCore::HookCacheRange(CPUState* cpu, u8 operation, u32 ea, u32 lines)
++{
++  auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
++  auto& ppc = core->m_system.GetPPCState();
++
++  // The common case of HookCacheControl, one line after another: with the
++  // data cache off only lines that may hold code need their icache dropped.
++  // LineMayHoldCode's tests are hoisted out of the loop.
++  if (operation == PPC_CACHE_ICBI || ppc.m_enable_dcache || !core->m_active_rel_sections.empty())
++  {
++    for (u32 i = 0; i < lines && !cpu->exception; ++i)
++      HookCacheControl(cpu, operation, ea + i * 32u, cpu->pc);
++    return;
++  }
++
++  const u64* dol_lines = core->m_module_active ? core->m_dol_code_lines.data() : nullptr;
++  const size_t dol_words = core->m_dol_code_lines.size();
++  const u32* jit_blocks =
++      core->m_fallback_jit ? core->m_fallback_jit->GetBlockCache()->GetBlockBitSet() : nullptr;
++  const u32* ibat =
++      jit_blocks && (core->m_guest.msr & PPC_MSR_IR) ? core->m_system.GetMMU().GetIBATTable().data() :
++                                                         nullptr;
++  for (u32 i = 0; i < lines; ++i)
++  {
++    const u32 address = ea + i * 32u;
++    const u32 line = address & ~31u;
++    bool code = false;
++    if (dol_lines)
++    {
++      const int idx = core->GetAddressLookupIndex(line);
++      code = idx >= 0 && static_cast<size_t>(idx >> 9) < dol_words &&
++             ((dol_lines[idx >> 9] >> ((idx >> 3) & 63)) & 1u) != 0;
++    }
++    if (!code && jit_blocks)
++    {
++      u32 physical = line;
++      if (ibat)
++      {
++        const u32 bat = ibat[line >> PowerPC::BAT_INDEX_SHIFT];
++        code = (bat & PowerPC::BAT_MAPPED_BIT) == 0;
++        physical = (bat & PowerPC::BAT_RESULT_MASK) | (line & (PowerPC::BAT_PAGE_SIZE - 1));
++      }
++      code = code || ((jit_blocks[physical >> 10] >> ((physical >> 5) & 31u)) & 1u) != 0;
++    }
++    if (code)
++    {
++      core->PropagateGuestMSR();
++      core->m_system.GetJitInterface().InvalidateICacheLine(address);
++    }
++  }
++}
++
+ bool StaticRecompCore::LineMayHoldCode(u32 ea)
+ {
+   // Runs once per flushed line, so it must stay cheap: no chunk resolution
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+index b60be4c..5b61624 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -66,6 +66,10 @@ void StaticRecompCore::Run()
+   const bool lockstep_enabled = m_lockstep_verifier->IsEnabled();
+   // Lockstep journals every RAM store, so it keeps stores off the fast tables.
+   ppc_build_fast_memory(&m_guest, !lockstep_enabled);
++  // Gather-pipe stores short of a burst append straight to GPFifo's buffer;
++  // lockstep journals every one of them through HookExternalWrite instead.
++  m_guest.gather_pipe_ptr = lockstep_enabled ? nullptr : &ppc.gather_pipe_ptr;
++  m_guest.gather_pipe_base = ppc.gather_pipe_base_ptr;
+   const auto fast_dispatchable_at = [this](u32 address) {
+     if (m_has_rel_modules || !m_forced_fallback_ranges.empty())
+       return FastDispatchableAt(address);
+@@ -131,6 +135,7 @@ void StaticRecompCore::Run()
+       {
+         SyncIn();
+         ++m_bursts;
++        bool entry_miss = false;
+         do
+         {
+           if (dispatch_trace && (m_native_dispatches & 0xFFFFFu) == 0)
+@@ -154,7 +159,20 @@ void StaticRecompCore::Run()
+           if (m_has_rel_modules)
+             ResolveNativeAddress(runtime_dispatch_address, &linked_dispatch_address, nullptr);
+           m_guest.pc = linked_dispatch_address;
++          const int downcount_before = ppc.downcount;
+           m_module->dispatch(&m_guest, linked_dispatch_address);
++          // Nothing ran: the entry switch keeps cases only where code can be
++          // entered, and this pc (an exception return, a computed pointer)
++          // has none. The interpreter steps it below. An instruction fallback
++          // charges ppc.downcount and clears the module's charge, so a
++          // dispatch that came back round to its pc through one did run.
++          if (m_guest.pc == linked_dispatch_address && m_guest.downcount == 0 &&
++              ppc.downcount == downcount_before && !m_guest.exception)
++          {
++            m_guest.pc = runtime_dispatch_address;
++            entry_miss = true;
++            break;
++          }
+           if (m_has_rel_modules)
+             m_guest.pc = TranslateRelAddress(m_guest.pc);
+           ++m_native_dispatches;
+@@ -206,7 +224,12 @@ void StaticRecompCore::Run()
+                  !(m_guest.host_call && IsHostCallAddress(m_guest.pc)) && ppc.downcount > 0 &&
+                  *state_ptr == CPU::State::Running);
+         SyncOut();
+-        if ((ppc.Exceptions & SYNC_EXCEPTION_MASK) != 0)
++        if (entry_miss)
++        {
++          ++m_entry_misses[ppc.pc];
++          ppc.downcount -= interpreter.SingleStepInner();
++        }
++        else if ((ppc.Exceptions & SYNC_EXCEPTION_MASK) != 0)
+           power_pc.CheckExceptions();
+         else if ((ppc.Exceptions & EXCEPTION_EXTERNAL_INT) != 0 && ppc.msr.EE &&
+                  after_mtmsr(ppc.pc))
