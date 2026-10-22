@@ -1,0 +1,293 @@
+diff --git a/src/app/pipeline.c b/src/app/pipeline.c
+index ec8c6e0..311c956 100644
+--- a/src/app/pipeline.c
++++ b/src/app/pipeline.c
+@@ -1485,6 +1485,70 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
+     return 1;
+ }
+ 
++static int compare_entry_target(const void* left, const void* right) {
++    const u32 a = *(const u32*)left;
++    const u32 b = *(const u32*)right;
++    return a < b ? -1 : a > b;
++}
++
++static void add_entry_target(u32* targets, u32* count,
++                             const LoadedCodeSection* sections,
++                             u32 section_count, u32 address) {
++    for (u32 i = 0; i < section_count; i++) {
++        if (address - sections[i].address < sections[i].size && (address & 3u) == 0) {
++            targets[(*count)++] = address;
++            return;
++        }
++    }
++}
++
++// Every address code can enter a function at from outside it, for the sparse
++// entry switches: the program entry, the symbols, every direct branch target,
++// and every data-section word that points at an instruction (vtables, jump
++// tables, callbacks). Code pointers built in registers that none of these
++// cover are found at run time by the chassis stepping the instruction.
++static u32* collect_entry_targets(const DOLFile* dol,
++                                  const LoadedCodeSection* sections,
++                                  u32 section_count,
++                                  const DolRecompSymbolMap* symbols,
++                                  u32* result_count) {
++    size_t capacity = 1u + (symbols ? symbols->count : 0u);
++    for (u32 i = 0; i < section_count; i++)
++        capacity += sections[i].size / 4u;
++    for (int i = 0; i < DOL_NUM_DATA; i++)
++        capacity += dol->header.data_sizes[i] / 4u;
++    u32* targets = (u32*)malloc(capacity * sizeof(*targets));
++    if (!targets)
++        return NULL;
++    u32 count = 0;
++    add_entry_target(targets, &count, sections, section_count, dol->header.entry_point);
++    for (u32 i = 0; symbols && i < symbols->count; i++)
++        add_entry_target(targets, &count, sections, section_count, symbols->symbols[i].address);
++    for (u32 s = 0; s < section_count; s++) {
++        const LoadedCodeSection* section = &sections[s];
++        for (u32 offset = 0; section->data && offset + 4u <= section->size; offset += 4u) {
++            // Text words are not scanned as pointers: every lwz r0-r3 reads as one.
++            const PPCInst inst =
++                ppc_decode(read_be32(section->data + offset), section->address + offset);
++            if (inst.op == PPC_OP_B || inst.op == PPC_OP_BC)
++                add_entry_target(targets, &count, sections, section_count, inst.branch_target);
++        }
++    }
++    for (int i = 0; i < DOL_NUM_DATA; i++) {
++        const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, i) : NULL;
++        for (u32 offset = 0; data && offset + 4u <= dol->header.data_sizes[i]; offset += 4u)
++            add_entry_target(targets, &count, sections, section_count, read_be32(data + offset));
++    }
++    qsort(targets, count, sizeof(*targets), compare_entry_target);
++    u32 unique = 0;
++    for (u32 i = 0; i < count; i++) {
++        if (!unique || targets[i] != targets[unique - 1u])
++            targets[unique++] = targets[i];
++    }
++    *result_count = unique;
++    return targets;
++}
++
+ int emit_dol_split(const DOLFile* dol, const char* output_path,
+                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
+                           const DolRecompSymbolMap* symbols,
+@@ -1526,9 +1590,23 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
+         printf("natives: %u guest functions with host implementations\n", natives.count);
+         emit_set_natives(natives.entries, natives.count);
+     }
++    // DOLRECOMP_C_SPARSE_ENTRIES=0 keeps a case for every instruction.
++    const char* sparse = getenv("DOLRECOMP_C_SPARSE_ENTRIES");
++    u32 entry_target_count = 0;
++    u32* entry_targets = NULL;
++    if (options->backend == DOLRECOMP_BACKEND_C && !(sparse && strcmp(sparse, "0") == 0)) {
++        entry_targets = collect_entry_targets(dol, sections, section_count, symbols,
++                                              &entry_target_count);
++        if (entry_targets) {
++            printf("entry targets: %u\n", entry_target_count);
++            emit_set_entry_targets(entry_targets, entry_target_count);
++        }
++    }
+     int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
+                                       dol->header.entry_point, jobs,
+                                       local_chunks_dir, symbols, options);
++    emit_set_entry_targets(NULL, 0);
++    free(entry_targets);
+     emit_set_natives(NULL, 0);
+     natives_free(&natives);
+     return ok;
+diff --git a/src/backend/codegen.c b/src/backend/codegen.c
+index 39ed6a2..511b77b 100644
+--- a/src/backend/codegen.c
++++ b/src/backend/codegen.c
+@@ -26,7 +26,7 @@ typedef struct {
+ } WorkerQueue;
+ 
+ int emit_chunk_file(const ChunkJob* job) {
+-    FILE* chunk = fopen(job->path, "w");
++    FILE* chunk = fopen(job->path, "w+");
+     if (!chunk) {
+         fprintf(stderr, "error: can't open output '%s'\n", job->path);
+         return 0;
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 8ae5395..186ed8b 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -4,6 +4,9 @@
+ #include "emitter.h"
+ #include "backend/c_cfg.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ static u32 cr_field_shift(u8 crf) {
+     return 4u * (7u - (u32)crf);
+ }
+@@ -333,6 +336,29 @@ void emit_set_natives(const DolRecompNative* natives, u32 count) {
+     g_native_count = count ? count : 0;
+ }
+ 
++// Addresses code can enter from outside its own function, sorted: direct
++// branch targets, symbols and code pointers in the image. NULL keeps a case in
++// the entry switch for every instruction.
++static const u32* g_entry_targets = NULL;
++static u32 g_entry_target_count = 0;
++
++void emit_set_entry_targets(const u32* targets, u32 count) {
++    g_entry_targets = count ? targets : NULL;
++    g_entry_target_count = count;
++}
++
++static bool is_entry_target(u32 addr) {
++    u32 lo = 0, hi = g_entry_target_count;
++    while (lo < hi) {
++        u32 mid = lo + (hi - lo) / 2u;
++        if (g_entry_targets[mid] < addr)
++            lo = mid + 1u;
++        else
++            hi = mid;
++    }
++    return lo < g_entry_target_count && g_entry_targets[lo] == addr;
++}
++
+ static const DolRecompNative* native_for(u32 addr) {
+     u32 lo = 0, hi = g_native_count;
+     while (lo < hi) {
+@@ -2120,6 +2146,82 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
+     fprintf(out, "}\n\n");
+ }
+ 
++// `entries` NULL gives every instruction a case.
++static void emit_entry_switch(FILE* out, const PPCInst* insts, u32 count,
++                              u32 func_addr, const u8* entries) {
++    fprintf(out, "entry_dispatch_%08X: __attribute__((unused));\n", func_addr);
++    fprintf(out, "    switch (ctx->pc) {\n");
++    for (u32 i = 0; i < count; i++) {
++        if (!entries || entries[i])
++            fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
++                    insts[i].address, insts[i].address);
++    }
++    fprintf(out, "    default: return;\n");
++    fprintf(out, "    }\n");
++}
++
++// The instructions a sparse entry switch keeps a case for: the first, block
++// leaders, natives, entries from outside the function, all of a counted loop
++// (its helper can stop anywhere in it), and every instruction whose body
++// leaves the function along with the one after it, as such an exit resumes at
++// one of the two. Read back from the bodies already written to `out`; NULL,
++// meaning every instruction, if that fails.
++static u8* sparse_entries(FILE* out, long bodies_start, const PPCInst* insts,
++                          u32 count, const CFunctionCFG* cfg) {
++    const long bodies_end = ftell(out);
++    u8* entries = (u8*)calloc(count ? count : 1u, 1u);
++    char* text = NULL;
++    if (entries && bodies_end > bodies_start && fflush(out) == 0 &&
++        fseek(out, bodies_start, SEEK_SET) == 0) {
++        const size_t capacity = (size_t)(bodies_end - bodies_start);
++        text = (char*)malloc(capacity + 1u);
++        if (text)
++            text[fread(text, 1u, capacity, out)] = '\0';
++    }
++    const bool read_ok = text && !ferror(out);
++    clearerr(out);
++    if (fseek(out, 0, SEEK_END) != 0 || !read_ok) {
++        free(text);
++        free(entries);
++        return NULL;
++    }
++
++    u32 next = 0;
++    s64 current = -1;
++    char expected[32];
++    if (count)
++        snprintf(expected, sizeof(expected), "label_%08X:", insts[0].address);
++    for (char* line = text; *line;) {
++        char* end = strchr(line, '\n');
++        if (end)
++            *end = '\0';
++        if (next < count && strncmp(line, expected, 15) == 0) {
++            current = next++;
++            if (next < count)
++                snprintf(expected, sizeof(expected), "label_%08X:", insts[next].address);
++        } else if (current >= 0 && strstr(line, "return;")) {
++            entries[current] = 1;
++            if ((u32)current + 1u < count)
++                entries[current + 1] = 1;
++        }
++        if (!end)
++            break;
++        line = end + 1;
++    }
++    free(text);
++
++    for (u32 i = 0; i < count; ++i) {
++        const u32 address = insts[i].address;
++        if (i == 0 || cfg->leaders[i] || native_for(address) || is_entry_target(address))
++            entries[i] = 1;
++        if (cfg->loop_ends[i] != UINT32_MAX) {
++            for (u32 j = i; j <= cfg->loop_ends[i] + 1u && j < count; ++j)
++                entries[j] = 1;
++        }
++    }
++    return entries;
++}
++
+ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     u32 func_end = func_addr + count * 4u;
+     CFunctionCFG cfg;
+@@ -2141,14 +2243,14 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     }
+ 
+     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+-    fprintf(out, "entry_dispatch_%08X: __attribute__((unused));\n", func_addr);
+-    fprintf(out, "    switch (ctx->pc) {\n");
+-    for (u32 i = 0; i < count; i++) {
+-        fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+-                insts[i].address, insts[i].address);
++    // A sparse entry switch goes after the bodies, once they show which
++    // instructions an exit can resume at.
++    const long bodies_start = g_entry_targets ? ftell(out) : -1L;
++    if (bodies_start >= 0) {
++        fprintf(out, "    goto entry_dispatch_%08X;\n", func_addr);
++    } else {
++        emit_entry_switch(out, insts, count, func_addr, NULL);
+     }
+-    fprintf(out, "    default: return;\n");
+-    fprintf(out, "    }\n");
+ 
+     for (u32 i = 0; i < count; i++) {
+         fprintf(out, "label_%08X:\n", insts[i].address);
+@@ -2218,6 +2320,12 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+         fprintf(out, "    default: return;\n");
+         fprintf(out, "    }\n");
+     }
++    if (bodies_start >= 0) {
++        u8* entries = sparse_entries(out, bodies_start, insts, count, &cfg);
++        fprintf(out, "    return;\n");
++        emit_entry_switch(out, insts, count, func_addr, entries);
++        free(entries);
++    }
+     fprintf(out, "}\n\n");
+     c_function_cfg_destroy(&cfg);
+     return true;
+diff --git a/src/backend/emitter.h b/src/backend/emitter.h
+index 1c20c28..f2ed0cb 100644
+--- a/src/backend/emitter.h
++++ b/src/backend/emitter.h
+@@ -37,6 +37,14 @@ typedef struct {
+ } DolRecompNative;
+ void emit_set_natives(const DolRecompNative* natives, u32 count);
+ 
++// Every address code outside a function may enter it at, sorted (same lifetime
++// rules as the chunk table). With it set, a function's entry switch keeps only
++// those, its block leaders and the resume points after its own exits, so the
++// compiler can optimize across the instructions in between; a runtime entering
++// anywhere else finds no case and must step that instruction itself.
++// Requires `out` to be readable back (opened "w+").
++void emit_set_entry_targets(const u32* targets, u32 count);
++
+ // emit a single recompiled function as C code
+ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
+ 
