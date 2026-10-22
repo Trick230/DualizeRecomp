@@ -25,14 +25,14 @@ class Game:
         self.thread = 0
 
     # -- process ---------------------------------------------------------
-    def start(self, module_dll, state=None, log=None, extra_args=()):
+    def start(self, module_dll, state=None, log=None, extra_args=(), game=None):
         self.stop()
         for sub in ("commands", "processed", "failed"):
             (self.dir / sub).mkdir(parents=True, exist_ok=True)
             for f in (self.dir / sub).iterdir():
                 f.unlink()
         args = [str(self.repo / "lib/ModernGekko/build/moderngekko-run.exe"),
-                "--game", str(self.repo / "extracted/nights"), "--module", str(module_dll),
+                "--game", str(game or self.repo / "extracted/nights"), "--module", str(module_dll),
                 "--graphics", "Native", "--automation-dir", str(self.dir), *extra_args]
         if state:
             args += ["--load-state", str(state)]
