@@ -1,0 +1,394 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index 26e9973..81977fb 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -311,6 +311,16 @@ void CoreTimingManager::RemoveEvent(EventType* event_type)
+   }
+ }
+ 
++void CoreTimingManager::MoveEventWhilePaused(EventType* event_type, s64 time)
++{
++  for (Event& event : m_event_queue)
++  {
++    if (event.type == event_type)
++      event.time = time;
++  }
++  std::ranges::make_heap(m_event_queue, std::ranges::greater{});
++}
++
+ void CoreTimingManager::RemoveAllEvents(EventType* event_type)
+ {
+   MoveEvents();
+diff --git a/Source/Core/Core/CoreTiming.h b/Source/Core/Core/CoreTiming.h
+index 29d636e..b154666 100644
+--- a/Source/Core/Core/CoreTiming.h
++++ b/Source/Core/Core/CoreTiming.h
+@@ -122,6 +122,9 @@ public:
+ 
+   // We only permit one event of each type in the queue at a time.
+   void RemoveEvent(EventType* event_type);
++  // Moves a queued event to an absolute time, keeping its userdata. Only for a paused CPU
++  // thread (e.g. before saving a state), where ScheduleEvent would defer to the next Advance.
++  void MoveEventWhilePaused(EventType* event_type, s64 time);
+   void RemoveAllEvents(EventType* event_type);
+ 
+   // Advance must be called at the beginning of dispatcher loops, not the end. Advance() ends
+diff --git a/Source/Core/Core/HW/SystemTimers.cpp b/Source/Core/Core/HW/SystemTimers.cpp
+index 461b65b..e7320c8 100644
+--- a/Source/Core/Core/HW/SystemTimers.cpp
++++ b/Source/Core/Core/HW/SystemTimers.cpp
+@@ -120,9 +120,8 @@ void SystemTimersManager::VICallback(Core::System& system, u64 userdata, s64 cyc
+ {
+   auto& core_timing = system.GetCoreTiming();
+   auto& vi = system.GetVideoInterface();
+-  vi.Update(core_timing.GetTicks() - cycles_late);
+-  core_timing.ScheduleEvent(vi.GetTicksPerHalfLine() - cycles_late,
+-                            system.GetSystemTimers().m_event_type_vi);
++  const s64 cycles = vi.RunScheduledUpdate(core_timing.GetTicks() - cycles_late);
++  core_timing.ScheduleEvent(cycles - cycles_late, system.GetSystemTimers().m_event_type_vi);
+ }
+ 
+ void SystemTimersManager::DecrementerCallback(Core::System& system, u64 userdata, s64 cycles_late)
+diff --git a/Source/Core/Core/HW/SystemTimers.h b/Source/Core/Core/HW/SystemTimers.h
+index b0002c4..e01b05e 100644
+--- a/Source/Core/Core/HW/SystemTimers.h
++++ b/Source/Core/Core/HW/SystemTimers.h
+@@ -89,6 +89,9 @@ public:
+   // - 2.0: the emulator is running at 200% speed (or 100% speed but sleeping half of the time).
+   double GetEstimatedEmulationPerformance() const;
+ 
++  // The VI event, which VideoInterface moves when it changes how many half-lines it batches.
++  CoreTiming::EventType* GetVIEventType() const { return m_event_type_vi; }
++
+ private:
+   static void DSPCallback(Core::System& system, u64 userdata, s64 cycles_late);
+   static void AudioDMACallback(Core::System& system, u64 userdata, s64 cycles_late);
+diff --git a/Source/Core/Core/HW/VideoInterface.cpp b/Source/Core/Core/HW/VideoInterface.cpp
+index c3fdd35..6a97cb6 100644
+--- a/Source/Core/Core/HW/VideoInterface.cpp
++++ b/Source/Core/Core/HW/VideoInterface.cpp
+@@ -90,6 +90,9 @@ void VideoInterfaceManager::DoState(PointerWrap& p)
+   p.Do(m_odd_field_first_hl);
+   p.Do(m_even_field_last_hl);
+   p.Do(m_odd_field_last_hl);
++  // A loaded VI event is due at the next half-line (see PrepareForSave).
++  if (p.IsReadMode())
++    m_quiet_half_lines = 0;
+ }
+ 
+ // Executed after Init, before game boot
+@@ -768,6 +771,117 @@ void VideoInterfaceManager::Update(u64 ticks)
+   UpdateInterrupts();
+ }
+ 
++// Whether Update() at this half-line count does more than advance the beam.
++bool VideoInterfaceManager::HalfLineHasEffect(u32 half_line) const
++{
++  if (half_line == 0 || half_line == GetHalfLinesPerOddField() ||
++      half_line == m_odd_field_first_hl || half_line == m_even_field_first_hl ||
++      half_line == m_odd_field_last_hl || half_line == m_even_field_last_hl ||
++      half_line == m_half_line_of_next_si_poll)
++  {
++    return true;
++  }
++  u32 next = half_line + 1;
++  if (next == GetHalfLinesPerEvenField() + GetHalfLinesPerOddField())
++    next = 0;
++  for (const UVIInterruptRegister& reg : m_interrupt_register)
++  {
++    const u32 target_halfline = (reg.HCT > m_h_timing_0.HLW) ? 1 : 0;
++    if (1 + next / 2 == reg.VCT && (next & 1) == target_halfline)
++      return true;
++  }
++  return false;
++}
++
++u32 VideoInterfaceManager::QuietHalfLinesAhead() const
++{
++  const u32 total = GetHalfLinesPerEvenField() + GetHalfLinesPerOddField();
++  u32 half_line = m_half_line_count;
++  u32 quiet = 0;
++  while (quiet < total && !HalfLineHasEffect(half_line))
++  {
++    ++quiet;
++    half_line = half_line + 1 == total ? 0 : half_line + 1;
++  }
++  return quiet < total ? quiet : 0;
++}
++
++// What Update() does at a half-line without effects.
++void VideoInterfaceManager::ApplyQuietHalfLine(u64 ticks)
++{
++  ++m_half_line_count;
++  if (m_half_line_count == GetHalfLinesPerEvenField() + GetHalfLinesPerOddField())
++    m_half_line_count = 0;
++  if (!(m_half_line_count & 1))
++    m_ticks_last_line_start = ticks;
++}
++
++void VideoInterfaceManager::CatchUpQuietHalfLines(u64 ticks)
++{
++  while (m_quiet_half_lines != 0 && ticks >= m_last_update_ticks + m_batch_ticks_per_half_line)
++  {
++    m_last_update_ticks += m_batch_ticks_per_half_line;
++    --m_quiet_half_lines;
++    ApplyQuietHalfLine(m_last_update_ticks);
++  }
++}
++
++s64 VideoInterfaceManager::RunScheduledUpdate(u64 ticks)
++{
++  while (m_quiet_half_lines != 0)
++  {
++    m_last_update_ticks += m_batch_ticks_per_half_line;
++    --m_quiet_half_lines;
++    ApplyQuietHalfLine(m_last_update_ticks);
++  }
++  Update(ticks);
++  m_last_update_ticks = ticks;
++  m_batch_ticks_per_half_line = GetTicksPerHalfLine();
++  m_quiet_half_lines = m_batch_ticks_per_half_line != 0 ? QuietHalfLinesAhead() : 0;
++  return static_cast<s64>(m_quiet_half_lines + 1) * m_batch_ticks_per_half_line;
++}
++
++void VideoInterfaceManager::BeginTimingChange()
++{
++  CatchUpQuietHalfLines(m_system.GetCoreTiming().GetTicks());
++}
++
++void VideoInterfaceManager::EndTimingChange()
++{
++  // With nothing batched the VI event is already at the next half-line, which re-plans.
++  if (m_quiet_half_lines == 0)
++    return;
++  const u32 ticks_per_half_line = GetTicksPerHalfLine();
++  if (ticks_per_half_line == 0)
++    return;
++  // The next half-line stays where it was due; the new length applies from there on.
++  m_last_update_ticks += m_batch_ticks_per_half_line;
++  m_last_update_ticks -= ticks_per_half_line;
++  m_batch_ticks_per_half_line = ticks_per_half_line;
++  m_quiet_half_lines = QuietHalfLinesAhead();
++  auto& core_timing = m_system.GetCoreTiming();
++  const s64 due = static_cast<s64>(m_last_update_ticks +
++                                   u64{m_quiet_half_lines + 1} * ticks_per_half_line);
++  auto* const event_type = m_system.GetSystemTimers().GetVIEventType();
++  core_timing.RemoveEvent(event_type);
++  core_timing.ScheduleEvent(std::max<s64>(due - static_cast<s64>(core_timing.GetTicks()), 0),
++                            event_type);
++}
++
++void VideoInterfaceManager::PrepareForSave()
++{
++  if (m_quiet_half_lines == 0)
++    return;
++  auto& core_timing = m_system.GetCoreTiming();
++  CatchUpQuietHalfLines(core_timing.GetTicks());
++  if (m_quiet_half_lines == 0)
++    return;
++  m_quiet_half_lines = 0;
++  core_timing.MoveEventWhilePaused(
++      m_system.GetSystemTimers().GetVIEventType(),
++      static_cast<s64>(m_last_update_ticks + m_batch_ticks_per_half_line));
++}
++
+ // Create a fake VI mode for a fifolog
+ void VideoInterfaceManager::FakeVIUpdate(u32 xfb_address, u32 fb_width, u32 fb_stride,
+                                          u32 fb_height)
+diff --git a/Source/Core/Core/HW/VideoInterface.h b/Source/Core/Core/HW/VideoInterface.h
+index 6bf762a..d38fa22 100644
+--- a/Source/Core/Core/HW/VideoInterface.h
++++ b/Source/Core/Core/HW/VideoInterface.h
+@@ -375,6 +375,15 @@ public:
+   // Update and draw framebuffer
+   void Update(u64 ticks);
+ 
++  // The VI event's work: the batched half-lines due before it, then Update(ticks). Returns the
++  // cycles until the next event, which skips half-lines that have no effect (see
++  // m_quiet_half_lines).
++  s64 RunScheduledUpdate(u64 ticks);
++
++  // Before a state is saved (CPU paused): applies the batched half-lines that are due and moves
++  // the VI event back to the next half-line, so the saved state needs no batching fields.
++  void PrepareForSave();
++
+   // UpdateInterrupts: check if we have to generate a new VI Interrupt
+   void UpdateInterrupts();
+ 
+@@ -414,6 +423,15 @@ private:
+   void RefreshConfig();
+   void UpdateRefreshRate();
+ 
++  bool HalfLineHasEffect(u32 half_line) const;
++  u32 QuietHalfLinesAhead() const;
++  void ApplyQuietHalfLine(u64 ticks);
++  void CatchUpQuietHalfLines(u64 ticks);
++  // Around a register write that can change the half-line length or which half-lines have an
++  // effect: catch up before it, re-plan the batch and move the VI event after it.
++  void BeginTimingChange();
++  void EndTimingChange();
++
+   // Registers listed in order:
+   UVIVerticalTimingRegister m_vertical_timing_register;
+   UVIDisplayControlRegister m_display_control_register;
+@@ -448,6 +466,14 @@ private:
+   u32 m_half_line_count = 0;        // number of halflines that have occurred for this full frame
+   u32 m_half_line_of_next_si_poll = 0;  // halfline when next SI poll results should be available
+ 
++  // Half-lines that only advance the beam (no field edge, SI poll or interrupt line) between the
++  // last update and the next VI event. They are applied when the event fires, or earlier when
++  // the beam is read or the timing changes, each at its own time on the half-line grid. Not
++  // saved: PrepareForSave leaves none pending.
++  u32 m_quiet_half_lines = 0;
++  u64 m_last_update_ticks = 0;  // grid time of the last half-line applied
++  u32 m_batch_ticks_per_half_line = 0;
++
+   // below indexes are 0-based
+   u32 m_even_field_first_hl = 0;  // index first halfline of the even field
+   u32 m_odd_field_first_hl = 0;   // index first halfline of the odd field
+diff --git a/Source/Core/Core/HW/VideoInterfaceRegisters.cpp b/Source/Core/Core/HW/VideoInterfaceRegisters.cpp
+index ecda591..e0c66a0 100644
+--- a/Source/Core/Core/HW/VideoInterfaceRegisters.cpp
++++ b/Source/Core/Core/HW/VideoInterfaceRegisters.cpp
+@@ -31,7 +31,7 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+     u16* ptr;
+   };
+ 
+-  std::array<MappedVar, 46> directly_mapped_vars{{
++  std::array<MappedVar, 42> directly_mapped_vars{{
+       {VI_VERTICAL_TIMING, &m_vertical_timing_register.Hex},
+       {VI_HORIZONTAL_TIMING_0_HI, &m_h_timing_0.Hi},
+       {VI_HORIZONTAL_TIMING_0_LO, &m_h_timing_0.Lo},
+@@ -49,10 +49,6 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+       {VI_FB_RIGHT_TOP_LO, &m_xfb_3d_info_top.Lo},
+       {VI_FB_LEFT_BOTTOM_LO, &m_xfb_info_bottom.Lo},
+       {VI_FB_RIGHT_BOTTOM_LO, &m_xfb_3d_info_bottom.Lo},
+-      {VI_PRERETRACE_LO, &m_interrupt_register[0].Lo},
+-      {VI_POSTRETRACE_LO, &m_interrupt_register[1].Lo},
+-      {VI_DISPLAY_INTERRUPT_2_LO, &m_interrupt_register[2].Lo},
+-      {VI_DISPLAY_INTERRUPT_3_LO, &m_interrupt_register[3].Lo},
+       {VI_DISPLAY_LATCH_0_HI, &m_latch_register[0].Hi},
+       {VI_DISPLAY_LATCH_0_LO, &m_latch_register[0].Lo},
+       {VI_DISPLAY_LATCH_1_HI, &m_latch_register[1].Hi},
+@@ -103,8 +99,11 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   {
+     mmio->Register(base | mapped_var.addr, MMIO::DirectRead<u16>(mapped_var.ptr),
+                    MMIO::ComplexWrite<u16>([mapped_var](Core::System& system, u32, u16 val) {
++                     auto& vi = system.GetVideoInterface();
++                     vi.BeginTimingChange();
+                      *mapped_var.ptr = val;
+-                     system.GetVideoInterface().UpdateParameters();
++                     vi.UpdateParameters();
++                     vi.EndTimingChange();
+                    }));
+   }
+ 
+@@ -142,6 +141,7 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(
+       base | VI_VERTICAL_BEAM_POSITION, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
+         auto& vi = system.GetVideoInterface();
++        vi.CatchUpQuietHalfLines(system.GetCoreTiming().GetTicks());
+         return 1 + (vi.m_half_line_count) / 2;
+       }),
+       MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+@@ -152,6 +152,7 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(
+       base | VI_HORIZONTAL_BEAM_POSITION, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
+         auto& vi = system.GetVideoInterface();
++        vi.CatchUpQuietHalfLines(system.GetCoreTiming().GetTicks());
+         u16 value = static_cast<u16>(
+             1 + vi.m_h_timing_0.HLW *
+                     (system.GetCoreTiming().GetTicks() - vi.m_ticks_last_line_start) /
+@@ -170,30 +171,53 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(base | VI_PRERETRACE_HI, MMIO::DirectRead<u16>(&m_interrupt_register[0].Hi),
+                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+                    auto& vi = system.GetVideoInterface();
++                   vi.BeginTimingChange();
+                    vi.m_interrupt_register[0].Hi = val;
+                    vi.UpdateInterrupts();
++                   vi.EndTimingChange();
+                  }));
+   mmio->Register(base | VI_POSTRETRACE_HI, MMIO::DirectRead<u16>(&m_interrupt_register[1].Hi),
+                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+                    auto& vi = system.GetVideoInterface();
++                   vi.BeginTimingChange();
+                    vi.m_interrupt_register[1].Hi = val;
+                    vi.UpdateInterrupts();
++                   vi.EndTimingChange();
+                  }));
+   mmio->Register(base | VI_DISPLAY_INTERRUPT_2_HI,
+                  MMIO::DirectRead<u16>(&m_interrupt_register[2].Hi),
+                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+                    auto& vi = system.GetVideoInterface();
++                   vi.BeginTimingChange();
+                    vi.m_interrupt_register[2].Hi = val;
+                    vi.UpdateInterrupts();
++                   vi.EndTimingChange();
+                  }));
+   mmio->Register(base | VI_DISPLAY_INTERRUPT_3_HI,
+                  MMIO::DirectRead<u16>(&m_interrupt_register[3].Hi),
+                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+                    auto& vi = system.GetVideoInterface();
++                   vi.BeginTimingChange();
+                    vi.m_interrupt_register[3].Hi = val;
+                    vi.UpdateInterrupts();
++                   vi.EndTimingChange();
+                  }));
+ 
++  // The interrupt lines (HCT) decide which half-lines a batch may skip.
++  for (u32 i = 0; i < 4; ++i)
++  {
++    static constexpr std::array<u32, 4> lo_addresses{VI_PRERETRACE_LO, VI_POSTRETRACE_LO,
++                                                     VI_DISPLAY_INTERRUPT_2_LO,
++                                                     VI_DISPLAY_INTERRUPT_3_LO};
++    mmio->Register(base | lo_addresses[i], MMIO::DirectRead<u16>(&m_interrupt_register[i].Lo),
++                   MMIO::ComplexWrite<u16>([i](Core::System& system, u32, u16 val) {
++                     auto& vi = system.GetVideoInterface();
++                     vi.BeginTimingChange();
++                     vi.m_interrupt_register[i].Lo = val;
++                     vi.EndTimingChange();
++                   }));
++  }
++
+   // Unknown anti-aliasing related MMIO register: puts a warning on log and
+   // needs to shift/mask when reading/writing.
+   mmio->Register(base | VI_UNK_AA_REG_HI, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
+@@ -221,6 +245,7 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(base | VI_CONTROL_REGISTER, MMIO::DirectRead<u16>(&m_display_control_register.Hex),
+                  MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+                    auto& vi = system.GetVideoInterface();
++                   vi.BeginTimingChange();
+ 
+                    UVIDisplayControlRegister tmpConfig(val);
+                    vi.m_display_control_register.ENB = tmpConfig.ENB;
+@@ -239,6 +264,7 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+                    }
+ 
+                    vi.UpdateParameters();
++                   vi.EndTimingChange();
+                  }));
+ 
+   // Map 8 bit reads (not writes) to 16 bit reads.
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+index c043456..01ce709 100644
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -40,6 +40,7 @@
+ #include "Core/HW/GPFifo.h"
+ #include "Core/HW/HW.h"
+ #include "Core/HW/Memmap.h"
++#include "Core/HW/VideoInterface.h"
+ #include "Core/HW/Wiimote.h"
+ #include "Core/Movie.h"
+ #include "Core/NetPlay/NetPlayProto.h"
+@@ -92,6 +93,10 @@ static Common::WorkQueueThreadSP<CompressAndDumpStateArgs> s_compress_and_dump_t
+ 
+ static void DoState(Core::System& system, PointerWrap& p)
+ {
++  // CoreTiming is saved before VI, so VI's batch is settled here.
++  if (!p.IsReadMode())
++    system.GetVideoInterface().PrepareForSave();
++
+   bool is_wii = system.IsWii() || system.IsMIOS();
+   const bool is_wii_currently = is_wii;
+   p.Do(is_wii);
