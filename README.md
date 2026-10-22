@@ -256,10 +256,16 @@ replaced piece by piece rather than extended.
 - **`0009` Native scheduler and memory routines.** The thread switch itself
   goes native: `OSSaveContext`, `OSLoadContext` and `SelectThread`'s switching
   path (it declines when nothing switches, on the idle wait, and under a
-  non-default switch callback), plus `OSWakeupThread` when the woken threads
-  don't outrank the caller, `OSTryLockMutex`, and the runtime's byte-wise
-  `memcpy`/`__fill_mem`. The port also points the module link at a ThinLTO
-  cache in `build/modules/<disc id>/thinlto-cache`.
+  non-default switch callback) and `OSSleepThread`, plus `OSWakeupThread`
+  when the woken threads don't outrank the caller, `OSTryLockMutex`,
+  `PSMTXCopy`/`PSMTXConcat` (the guest's paired-single sequence replayed
+  through the same helpers, minus the per-instruction checks), and the
+  runtime's byte-wise `memcpy`/`__fill_mem`. Uncapped gameplay went from ~60
+  to ~65 FPS. The port also points the module link at a ThinLTO cache in
+  `build/modules/<disc id>/thinlto-cache`.
+- **`0010` Classic Controller automation.** `pad`/`pad_frames` take
+  `classic_*` controls (the game's profile uses a Classic Controller), so
+  scripts can play: `Game.pad(frames, classic_ly=1.0)`.
 
 **ModernGekko's Dolphin fork**
 
@@ -309,6 +315,8 @@ replaced piece by piece rather than extended.
   The template now links with `ld.lld`, runs 4 ThinLTO jobs (one per core ran a
   16 GiB machine out of memory) and takes an optional
   `RECOMPCORE_MODULE_LTO_CACHE`.
+- **`0010` Cheaper data-cache flushes.** With the data cache off, a flushed
+  line only syncs the MSR when it holds code and needs an invalidation.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 

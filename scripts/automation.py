@@ -89,6 +89,15 @@ class Game:
     def resume(self):
         self.command("resume")
 
+    def pad(self, frames=0, port=0, **controls):
+        """Holds the named controls (classic_lx=-1.0, classic_a=1, ...) for
+        `frames` frames, or until the next pad command when frames is 0.
+        Controls left out are released."""
+        if frames:
+            self.command("pad_frames", port=port, frames=frames, **controls)
+        else:
+            self.command("pad", port=port, **controls)
+
     def save_state(self, path):
         self.command("save_state", path=Path(path).resolve())
 

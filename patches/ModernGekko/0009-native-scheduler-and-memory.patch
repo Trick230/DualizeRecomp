@@ -57,8 +57,114 @@ index 0000000..2a3376b
 +    ctx->downcount -= 8 + (s32)(size >> 3);
 +    return true;
 +}
+diff --git a/src/module_natives/rvl_mtx.c b/src/module_natives/rvl_mtx.c
+new file mode 100644
+index 0000000..6a0f4bf
+--- /dev/null
++++ b/src/module_natives/rvl_mtx.c
+@@ -0,0 +1,100 @@
++// Host implementations of the Revolution SDK's paired-single matrix routines
++// (see rvl_os.c for the contract every native follows).
++//
++// Each one replays the guest's instruction sequence through the same inline
++// paired-single helpers the recompiled code calls, so results, FPSCR and the
++// registers left behind are identical; what it saves is the per-instruction
++// FPU-available and exception checks and the callee-saved spills. It declines
++// unless the FPU is enabled, GQR0 is the unquantized float format and every
++// matrix lies in fast guest memory, so no helper can fault part way through.
++
++#include "core/cpu.h"
++
++#define MTX_SIZE 48u  // Mtx: 3 rows of 4 f32
++
++// MTXConcat's constant row (0, 0, 0, 1) as a {0, 1} pair, in .sdata2.
++#define MTX_UNIT_PAIR 0x806F61E0u
++
++static inline bool float_pairs_ready(CPUState* ctx) {
++    return (ctx->msr & PPC_MSR_FP) && (ctx->hid2 & PPC_HID2_LSQE) &&
++           (ctx->gqr[0] & 0x00070007u) == 0;
++}
++
++static inline bool fast_matrix(CPUState* ctx, u32 address, bool written) {
++    return written ? ppc_fast_write_ptr(ctx, address, MTX_SIZE) != NULL
++                   : ppc_fast_ptr(ctx->fast_read, address, MTX_SIZE) != NULL;
++}
++
++#define LOAD(f, base, offset) ppc_psq_load_inline(ctx, f, (base) + (offset), false, 0, false, 0)
++#define STORE(f, base, offset) ppc_psq_store_inline(ctx, f, (base) + (offset), false, 0, false, 0)
++
++// void PSMTXCopy(const Mtx src, Mtx dst)
++bool rvl_PSMTXCopy(CPUState* ctx) {
++    const u32 src = ctx->gpr[3], dst = ctx->gpr[4];
++    if (!float_pairs_ready(ctx) || !fast_matrix(ctx, src, false) || !fast_matrix(ctx, dst, true))
++        return false;
++    for (u8 i = 0; i < 6; ++i) {
++        LOAD(i, src, 8u * i);
++        STORE(i, dst, 8u * i);
++    }
++    ctx->downcount -= 13;
++    return true;
++}
++
++// void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab)
++bool rvl_PSMTXConcat(CPUState* ctx) {
++    const u32 a = ctx->gpr[3], b = ctx->gpr[4], ab = ctx->gpr[5];
++    if (!float_pairs_ready(ctx) || !fast_matrix(ctx, a, false) || !fast_matrix(ctx, b, false) ||
++        !fast_matrix(ctx, ab, true) || !ppc_fast_ptr(ctx->fast_read, MTX_UNIT_PAIR, 8))
++        return false;
++
++    // f14, f15 and f31 are spilled and reloaded with lfd, which restores ps0
++    // only: their ps1 keeps the last value computed into it.
++    const f64 f14 = ctx->fpr[14], f15 = ctx->fpr[15], f31 = ctx->fpr[31];
++    ctx->gpr[6] = MTX_UNIT_PAIR;
++    LOAD(0, a, 0);
++    LOAD(6, b, 0);
++    LOAD(7, b, 8);
++    LOAD(8, b, 16);
++    ppc_ps_muls_inline(ctx, 12, 6, 0, false);
++    LOAD(2, a, 16);
++    ppc_ps_muls_inline(ctx, 13, 7, 0, false);
++    LOAD(31, MTX_UNIT_PAIR, 0);
++    ppc_ps_muls_inline(ctx, 14, 6, 2, false);
++    LOAD(9, b, 24);
++    ppc_ps_muls_inline(ctx, 15, 7, 2, false);
++    LOAD(1, a, 8);
++    ppc_ps_madds_inline(ctx, 12, 8, 0, 12, true);
++    LOAD(3, a, 24);
++    ppc_ps_madds_inline(ctx, 14, 8, 2, 14, true);
++    LOAD(10, b, 32);
++    ppc_ps_madds_inline(ctx, 13, 9, 0, 13, true);
++    LOAD(11, b, 40);
++    ppc_ps_madds_inline(ctx, 15, 9, 2, 15, true);
++    LOAD(4, a, 32);
++    LOAD(5, a, 40);
++    ppc_ps_madds_inline(ctx, 12, 10, 1, 12, false);
++    ppc_ps_madds_inline(ctx, 13, 11, 1, 13, false);
++    ppc_ps_madds_inline(ctx, 14, 10, 3, 14, false);
++    ppc_ps_madds_inline(ctx, 15, 11, 3, 15, false);
++    STORE(12, ab, 0);
++    ppc_ps_muls_inline(ctx, 2, 6, 4, false);
++    ppc_ps_madds_inline(ctx, 13, 31, 1, 13, true);
++    ppc_ps_muls_inline(ctx, 0, 7, 4, false);
++    STORE(14, ab, 16);
++    ppc_ps_madds_inline(ctx, 15, 31, 3, 15, true);
++    STORE(13, ab, 8);
++    ppc_ps_madds_inline(ctx, 2, 8, 4, 2, true);
++    ppc_ps_madds_inline(ctx, 0, 9, 4, 0, true);
++    ppc_ps_madds_inline(ctx, 2, 10, 5, 2, false);
++    STORE(15, ab, 24);
++    ppc_ps_madds_inline(ctx, 0, 11, 5, 0, false);
++    STORE(2, ab, 32);
++    ppc_ps_madds_inline(ctx, 0, 31, 5, 0, true);
++    STORE(0, ab, 40);
++    ctx->fpr[14] = f14;
++    ctx->fpr[15] = f15;
++    ctx->fpr[31] = f31;
++    ctx->downcount -= 51;
++    return true;
++}
 diff --git a/src/module_natives/rvl_os.c b/src/module_natives/rvl_os.c
-index 8df56fc..eedd744 100644
+index 8df56fc..ef34f98 100644
 --- a/src/module_natives/rvl_os.c
 +++ b/src/module_natives/rvl_os.c
 @@ -111,32 +111,30 @@ bool rvl_OSGetCurrentThread(CPUState* ctx) {
@@ -127,7 +233,7 @@ index 8df56fc..eedd744 100644
      return true;
  }
  
-@@ -200,3 +216,351 @@ bool rvl_OSUnlockMutex(CPUState* ctx) {
+@@ -200,3 +216,464 @@ bool rvl_OSUnlockMutex(CPUState* ctx) {
      ctx->downcount -= 60;
      return true;
  }
@@ -262,98 +368,134 @@ index 8df56fc..eedd744 100644
 +#define SELECT_THREAD_SAVE_RETURN 0x804563E0u       // after its OSSaveContext call
 +#define SELECT_THREAD_FRAME 16u
 +
-+// static OSThread* SelectThread(BOOL yield)
-+//
-+// A jump native for the switching path: the current thread gives way to the
-+// head of the highest-priority run queue, which resumes wherever it was saved.
-+// Calls that switch nothing, the idle wait on an empty run queue and a
-+// non-default switch callback stay with the guest.
-+bool rvl_SelectThread(CPUState* ctx) {
++#define SLEEP_THREAD_SELECT_RETURN 0x804570BCu      // after OSSleepThread's SelectThread call
++#define SLEEP_THREAD_FRAME 16u
++#define THREAD_STATE_WAITING 4u
++#define THREAD_SUSPEND 716u
++#define THREAD_QUEUE_WALK_MAX 64u  // bound on a thread queue walk
++
++// Everything a switching SelectThread touches, checked up front so the
++// switch itself cannot fail halfway.
++typedef struct SelectPlan {
++    u8* bits_slot;
++    u8* hint_slot;
++    u8* lomem;
++    u8* queues;
++    u8* current;
++    u32 current_address;
++    u32 bits;       // run-queue bits after any requeue
++    u32 priority;   // the current thread's
++    bool requeue;   // the current thread goes back on its run queue
++    u8* old_tail;   // RunQueue[priority]'s tail before the requeue
++    u32 index;      // the run queue the next thread comes from
++    u8* next;
++    u32 next_address;
++    u8* after;      // the thread behind `next` in its queue
++    u32 after_address;
++} SelectPlan;
++
++// Plans SelectThread(yield), for a current thread in `state` or, when that is
++// negative, in the state it is in now; false when that call would not switch
++// or needs the guest.
++static bool plan_select(CPUState* ctx, SelectPlan* plan, u32 yield, s32 state) {
 +    if (ctx->msr & PPC_MSR_PR)
 +        return false;
 +    const u32 sda = ctx->gpr[13];
-+    u8* bits_slot = object(ctx, sda + (u32)RUN_QUEUE_BITS_SDA_OFFSET, 4);
-+    u8* hint_slot = object(ctx, sda + (u32)RUN_QUEUE_HINT_SDA_OFFSET, 4);
++    plan->bits_slot = object(ctx, sda + (u32)RUN_QUEUE_BITS_SDA_OFFSET, 4);
++    plan->hint_slot = object(ctx, sda + (u32)RUN_QUEUE_HINT_SDA_OFFSET, 4);
 +    const u8* reschedule_slot =
 +        ppc_fast_ptr(ctx->fast_read, sda + (u32)RESCHEDULE_SDA_OFFSET, 4);
 +    const u8* callback_slot =
 +        ppc_fast_ptr(ctx->fast_read, sda + (u32)SWITCH_THREAD_CALLBACK_SDA_OFFSET, 4);
-+    u8* lomem = object(ctx, OS_CURRENT_CONTEXT_PHYSICAL, OS_LOMEM_SIZE);
-+    u8* queues = object(ctx, RUN_QUEUE, RUN_QUEUE_SIZE);
-+    if (!bits_slot || !hint_slot || !reschedule_slot || !callback_slot || !lomem ||
-+        !queues || (s32)read_be32(reschedule_slot) > 0 ||
++    plan->lomem = object(ctx, OS_CURRENT_CONTEXT_PHYSICAL, OS_LOMEM_SIZE);
++    plan->queues = object(ctx, RUN_QUEUE, RUN_QUEUE_SIZE);
++    if (!plan->bits_slot || !plan->hint_slot || !reschedule_slot || !callback_slot ||
++        !plan->lomem || !plan->queues || (s32)read_be32(reschedule_slot) > 0 ||
 +        read_be32(callback_slot) != DEFAULT_SWITCH_THREAD_CALLBACK)
 +        return false;
 +
-+    const u32 current_address = load(lomem, OS_CURRENT_THREAD_OFFSET);
-+    u8* current = object(ctx, current_address, THREAD_SIZE);
-+    if (!current || load(lomem, OS_CURRENT_CONTEXT_OFFSET) != current_address)
++    plan->current_address = load(plan->lomem, OS_CURRENT_THREAD_OFFSET);
++    plan->current = object(ctx, plan->current_address, THREAD_SIZE);
++    if (!plan->current || load(plan->lomem, OS_CURRENT_CONTEXT_OFFSET) != plan->current_address)
 +        return false;
 +
 +    // A running thread goes back on its run queue when yielding or outranked.
-+    const u32 yield = ctx->gpr[3];
-+    u32 bits = load(bits_slot, 0);
-+    const u32 priority = load(current, THREAD_PRIORITY);
-+    u8* old_tail = NULL;
-+    const bool requeue = load16(current, THREAD_STATE) == THREAD_STATE_RUNNING;
-+    if (requeue) {
++    u8* const current = plan->current;
++    u32 bits = load(plan->bits_slot, 0);
++    plan->priority = load(current, THREAD_PRIORITY);
++    if (state < 0)
++        state = load16(current, THREAD_STATE);
++    plan->requeue = state == THREAD_STATE_RUNNING;
++    plan->old_tail = NULL;
++    if (plan->requeue) {
 +        const s32 highest = bits ? __builtin_clz(bits) : 32;
-+        if (priority > 31u || (!yield && (s32)priority <= highest))
++        if (plan->priority > 31u || (!yield && (s32)plan->priority <= highest))
 +            return false;  // nothing outranks it: no switch
-+        const u32 tail_address = load(queues, 8u * priority + 4u);
-+        if (tail_address && !(old_tail = object(ctx, tail_address, THREAD_SIZE)))
++        const u32 tail_address = load(plan->queues, 8u * plan->priority + 4u);
++        if (tail_address && !(plan->old_tail = object(ctx, tail_address, THREAD_SIZE)))
 +            return false;
-+        bits |= 1u << (31u - priority);
++        bits |= 1u << (31u - plan->priority);
 +    }
 +    if (bits == 0)
 +        return false;  // the idle wait
++    plan->bits = bits;
 +
-+    // The thread that runs next, checked before anything is written. Its
-+    // queue is empty now only when the requeue is what fills it.
-+    const u32 index = (u32)__builtin_clz(bits);
-+    u32 next_address = load(queues, 8u * index);
-+    if (!next_address) {
-+        if (!requeue || index != priority)
++    // The thread that runs next. Its queue is empty now only when the requeue
++    // is what fills it.
++    plan->index = (u32)__builtin_clz(bits);
++    plan->next_address = load(plan->queues, 8u * plan->index);
++    if (!plan->next_address) {
++        if (!plan->requeue || plan->index != plan->priority)
 +            return false;
-+        next_address = current_address;
++        plan->next_address = plan->current_address;
 +    }
-+    u8* next = next_address == current_address
-+                   ? current
-+                   : object(ctx, next_address, THREAD_SIZE);
-+    if (!next)
++    plan->next = plan->next_address == plan->current_address
++                     ? current
++                     : object(ctx, plan->next_address, THREAD_SIZE);
++    if (!plan->next)
 +        return false;
-+    u32 after_address = next == current ? 0 : load(next, THREAD_LINK_NEXT);
-+    if (requeue && !after_address && next != current && index == priority)
-+        after_address = current_address;
-+    u8* after = after_address == current_address
-+                    ? current
-+                    : after_address ? object(ctx, after_address, THREAD_SIZE) : NULL;
-+    u8* frame = object(ctx, ctx->gpr[1] - SELECT_THREAD_FRAME, SELECT_THREAD_FRAME + 8u);
-+    if ((after_address && !after) || !frame)
-+        return false;
++    plan->after_address = plan->next == current ? 0 : load(plan->next, THREAD_LINK_NEXT);
++    if (plan->requeue && !plan->after_address && plan->next != current &&
++        plan->index == plan->priority)
++        plan->after_address = plan->current_address;
++    plan->after = plan->after_address == plan->current_address ? current
++                  : plan->after_address ? object(ctx, plan->after_address, THREAD_SIZE)
++                                        : NULL;
++    return !plan->after_address || plan->after;
++}
 +
-+    // Prologue: stwu r1,-16(r1), then save lr, r31 and r30; r30 = yield.
++// Pushes a guest frame of `size` bytes saving lr, r31 and r30 as the SDK's
++// prologues do (stwu r1,-size(r1); stw r0,size+4(r1); stw r31,size-4(r1);
++// stw r30,size-8(r1)).
++static void push_frame(u8* frame, CPUState* ctx, u32 size) {
 +    store(frame, 0, ctx->gpr[1]);
-+    store(frame, SELECT_THREAD_FRAME + 4u, ctx->lr);
-+    store(frame, 12, ctx->gpr[31]);
-+    store(frame, 8, ctx->gpr[30]);
-+    ctx->gpr[1] -= SELECT_THREAD_FRAME;
-+    ctx->gpr[30] = yield;
++    store(frame, size + 4u, ctx->lr);
++    store(frame, size - 4u, ctx->gpr[31]);
++    store(frame, size - 8u, ctx->gpr[30]);
++    ctx->gpr[1] -= size;
++}
 +
-+    if (requeue) {
++// Runs a planned SelectThread from its entry: the current thread is saved to
++// resume inside it, and the next one is loaded.
++static void commit_select(CPUState* ctx, const SelectPlan* plan, u8* frame, u32 yield) {
++    push_frame(frame, ctx, SELECT_THREAD_FRAME);
++    ctx->gpr[30] = yield;
++    u8* const current = plan->current;
++
++    if (plan->requeue) {
 +        // EnqueueTail(&RunQueue[priority], current, link)
-+        u8* queue = queues + 8u * priority;
++        u8* queue = plan->queues + 8u * plan->priority;
 +        store16(current, THREAD_STATE, THREAD_STATE_READY);
-+        store(current, THREAD_QUEUE, RUN_QUEUE + 8u * priority);
-+        if (old_tail)
-+            store(old_tail, THREAD_LINK_NEXT, current_address);
++        store(current, THREAD_QUEUE, RUN_QUEUE + 8u * plan->priority);
++        if (plan->old_tail)
++            store(plan->old_tail, THREAD_LINK_NEXT, plan->current_address);
 +        else
-+            store(queue, 0, current_address);
++            store(queue, 0, plan->current_address);
 +        store(current, THREAD_LINK_PREV, load(queue, 4));
 +        store(current, THREAD_LINK_NEXT, 0);
-+        store(queue, 4, current_address);
-+        store(bits_slot, 0, bits);
-+        store(hint_slot, 0, 1);
++        store(queue, 4, plan->current_address);
++        store(plan->bits_slot, 0, plan->bits);
++        store(plan->hint_slot, 0, 1);
 +    }
 +
 +    if (!(load16(current, CONTEXT_STATE) & CONTEXT_STATE_EXC)) {
@@ -361,39 +503,116 @@ index 8df56fc..eedd744 100644
 +        // where cr0 holds the EQ of the rlwinm. that tested the state.
 +        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (0x2u | (ctx->xer >> 31)) << 28;
 +        ctx->lr = SELECT_THREAD_SAVE_RETURN;
-+        ctx->gpr[3] = current_address;
++        ctx->gpr[3] = plan->current_address;
 +        rvl_OSSaveContext(ctx);
 +    }
 +
 +    // Dequeue the head of RunQueue[index].
-+    u8* queue = queues + 8u * index;
-+    store(hint_slot, 0, 0);
-+    if (after)
-+        store(after, THREAD_LINK_PREV, 0);
++    u8* queue = plan->queues + 8u * plan->index;
++    store(plan->hint_slot, 0, 0);
++    if (plan->after)
++        store(plan->after, THREAD_LINK_PREV, 0);
 +    else
 +        store(queue, 4, 0);
-+    store(queue, 0, after_address);
-+    if (!after)
-+        store(bits_slot, 0, bits & ~(1u << (31u - index)));
-+    store(next, THREAD_QUEUE, 0);
-+    store16(next, THREAD_STATE, THREAD_STATE_RUNNING);
++    store(queue, 0, plan->after_address);
++    if (!plan->after)
++        store(plan->bits_slot, 0, plan->bits & ~(1u << (31u - plan->index)));
++    store(plan->next, THREAD_QUEUE, 0);
++    store16(plan->next, THREAD_STATE, THREAD_STATE_RUNNING);
 +
 +    // OSSetCurrentContext(next): its SRR1 keeps FP only if it owns the FPU.
-+    store(lomem, OS_CURRENT_THREAD_OFFSET, next_address);
-+    store(lomem, OS_CURRENT_CONTEXT_OFFSET, next_address);
-+    store(lomem, 0, next_address & 0x3FFFFFFFu);
-+    const u32 srr1 = load(next, CONTEXT_SRR1);
-+    store(next, CONTEXT_SRR1,
-+          load(lomem, OS_FPU_CONTEXT_OFFSET) == next_address ? srr1 | PPC_MSR_FP
-+                                                              : srr1 & ~PPC_MSR_FP);
++    store(plan->lomem, OS_CURRENT_THREAD_OFFSET, plan->next_address);
++    store(plan->lomem, OS_CURRENT_CONTEXT_OFFSET, plan->next_address);
++    store(plan->lomem, 0, plan->next_address & 0x3FFFFFFFu);
++    const u32 srr1 = load(plan->next, CONTEXT_SRR1);
++    store(plan->next, CONTEXT_SRR1,
++          load(plan->lomem, OS_FPU_CONTEXT_OFFSET) == plan->next_address
++              ? srr1 | PPC_MSR_FP
++              : srr1 & ~PPC_MSR_FP);
 +
-+    resume_context(ctx, next);
++    resume_context(ctx, plan->next);
 +    ctx->downcount -= 150;
++}
++
++// static OSThread* SelectThread(BOOL yield)
++//
++// A jump native for the switching path: the current thread gives way to the
++// head of the highest-priority run queue, which resumes wherever it was saved.
++// Calls that switch nothing, the idle wait on an empty run queue and a
++// non-default switch callback stay with the guest.
++bool rvl_SelectThread(CPUState* ctx) {
++    SelectPlan plan;
++    const u32 yield = ctx->gpr[3];
++    if (!plan_select(ctx, &plan, yield, -1))
++        return false;
++    u8* frame = object(ctx, ctx->gpr[1] - SELECT_THREAD_FRAME, SELECT_THREAD_FRAME + 8u);
++    if (!frame)
++        return false;
++    commit_select(ctx, &plan, frame, yield);
 +    return true;
 +}
 +
-+#define THREAD_SUSPEND 716u
-+#define WAKEUP_MAX_THREADS 64u
++// void OSSleepThread(OSThreadQueue* queue)
++//
++// A jump native: the current thread waits on `queue`, in priority order, and
++// the trailing SelectThread switches away from it. When nothing else can run
++// (the idle wait) or rescheduling is held off, the guest does it all.
++bool rvl_OSSleepThread(CPUState* ctx) {
++    const u32 queue_address = ctx->gpr[3];
++    u8* wait_queue = object(ctx, queue_address, 8);
++    SelectPlan plan;
++    if (!wait_queue || !plan_select(ctx, &plan, 0, THREAD_STATE_WAITING))
++        return false;
++    u8* const current = plan.current;
++    const u32 current_address = plan.current_address;
++    const s32 priority = (s32)plan.priority;
++
++    // The first waiter of lower priority, which the thread goes in front of.
++    u32 before_address = load(wait_queue, 0);
++    u8* before = NULL;
++    for (u32 count = 0; before_address; ++count) {
++        if (count == THREAD_QUEUE_WALK_MAX || before_address == current_address ||
++            !(before = object(ctx, before_address, THREAD_SIZE)))
++            return false;
++        if ((s32)load(before, THREAD_PRIORITY) > priority)
++            break;
++        before_address = load(before, THREAD_LINK_NEXT);
++        before = NULL;
++    }
++    const u32 prev_address = before ? load(before, THREAD_LINK_PREV) : load(wait_queue, 4);
++    u8* prev = prev_address ? object(ctx, prev_address, THREAD_SIZE) : NULL;
++    u8* frames = object(ctx, ctx->gpr[1] - SLEEP_THREAD_FRAME - SELECT_THREAD_FRAME,
++                        SLEEP_THREAD_FRAME + SELECT_THREAD_FRAME + 8u);
++    if ((prev_address && !prev) || !frames)
++        return false;
++
++    // Prologue, OSDisableInterrupts (r31 keeps the old EE), then the thread
++    // waits: state, queue and its place in it.
++    push_frame(frames + SELECT_THREAD_FRAME, ctx, SLEEP_THREAD_FRAME);
++    ctx->gpr[30] = queue_address;
++    ctx->gpr[31] = msr_ee(ctx->msr);
++    ctx->msr &= ~PPC_MSR_EE;
++    store16(current, THREAD_STATE, THREAD_STATE_WAITING);
++    store(current, THREAD_QUEUE, queue_address);
++    store(current, THREAD_LINK_NEXT, before_address);
++    store(current, THREAD_LINK_PREV, prev_address);
++    if (before)
++        store(before, THREAD_LINK_PREV, current_address);
++    else
++        store(wait_queue, 4, current_address);
++    if (prev)
++        store(prev, THREAD_LINK_NEXT, current_address);
++    else
++        store(wait_queue, 0, current_address);
++    store(plan.hint_slot, 0, 1);
++
++    // SelectThread(FALSE), returning into OSSleepThread's epilogue.
++    ctx->lr = SLEEP_THREAD_SELECT_RETURN;
++    commit_select(ctx, &plan, frames, 0);
++    ctx->downcount -= 40;
++    return true;
++}
++
 +
 +// void OSWakeupThread(OSThreadQueue* queue)
 +//
@@ -415,12 +634,12 @@ index 8df56fc..eedd744 100644
 +        return false;
 +
 +    // Check the waiters and what readying them does to the run queue.
-+    u8* waiters[WAKEUP_MAX_THREADS];
++    u8* waiters[THREAD_QUEUE_WALK_MAX];
 +    u32 count = 0;
 +    u32 bits = load(bits_slot, 0);
 +    bool readied = false;
 +    for (u32 address = load(wait_queue, 0); address; ++count) {
-+        u8* thread = count < WAKEUP_MAX_THREADS ? object(ctx, address, THREAD_SIZE) : NULL;
++        u8* thread = count < THREAD_QUEUE_WALK_MAX ? object(ctx, address, THREAD_SIZE) : NULL;
 +        if (!thread)
 +            return false;
 +        if ((s32)load(thread, THREAD_SUSPEND) <= 0) {
