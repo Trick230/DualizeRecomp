@@ -1,0 +1,13 @@
+diff --git a/Externals/SDL/CMakeLists.txt b/Externals/SDL/CMakeLists.txt
+index 1eb21b4..95b4a71 100644
+--- a/Externals/SDL/CMakeLists.txt
++++ b/Externals/SDL/CMakeLists.txt
+@@ -10,7 +10,7 @@ set(SDL_DISABLE_INSTALL_DOCS ON)
+ set(SDL_INSTALL_TESTS OFF)
+ set(SDL_UNIX_CONSOLE_BUILD ON)
+ 
+-set(SDL_AUDIO OFF)
++set(SDL_AUDIO ON)  # ModernGekko plays the native audio output through SDL
+ set(SDL_GPU OFF)
+ set(SDL_CAMERA OFF)
+ set(SDL_TRAY OFF)
