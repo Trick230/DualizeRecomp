@@ -187,8 +187,10 @@ Environment switches:
 | Variable | Effect |
 |---|---|
 | `MODERNGEKKO_PAD_TARGET=gc` | Gamepads drive emulated GameCube pads instead |
+| `MODERNGEKKO_PAD_TARGET=none` | Gamepads drive nothing; only automation does, so a test run doesn't depend on stick noise |
 | `MODERNGEKKO_NATIVE_INPUT=0` | Use Dolphin's InputCommon and `config/Config/WiimoteNew.ini`, which `make run` installs when the user directory has none |
 | `MODERNGEKKO_NATIVE_DSP=0` | Use Dolphin's DSP HLE instead of the native one |
+| `MODERNGEKKO_NATIVE_IOS=0` | Use Dolphin's `/dev/di`, `/dev/stm` and `/dev/net/kd` instead of the native ones |
 | `MODERNGEKKO_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
 | `MODERNGEKKO_REAL_DISC_TIMING=1` | Emulate disc seeks and rotation instead of reading at buffer speed |
 | `MODERNGEKKO_AUDIO_STATS=1` | Log the audio queue once per second |
@@ -202,7 +204,7 @@ replaced piece by piece rather than extended.
 |---|---|---|
 | 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
-| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress. Done: SDK natives, direct calls, sparse entry switches, VI batching, native DSP/AX, SDL3 audio, SDL3 input (32 → ~100 FPS uncapped). Left: interrupts/alarms/timing, IOS, the Dolphin chassis itself; then the stage RSO modules |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress. Done: SDK natives, direct calls, sparse entry switches, VI batching, native DSP/AX, SDL3 audio, SDL3 input, native IOS disc/STM/KD devices (32 → ~100 FPS uncapped). Left: interrupts/alarms/timing, the rest of IOS (FS, ES, Bluetooth), the Dolphin chassis itself; then the stage RSO modules |
 | 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
 
 ## Patches
@@ -305,6 +307,15 @@ replaced piece by piece rather than extended.
   `std::filesystem` stats per file. That pass ran twice per launch on 12k
   files. The cached hash value is unchanged. Time to the first frame went
   from ~11 s to ~4.5 s. `NATIVE_GX_STATS` also reports frame intervals.
+- **`0021` Native IOS devices.** `src/ios` holds IOS's `/dev/di` driver and
+  drive, `/dev/stm` and `/dev/net/kd` as host code that doesn't depend on
+  Dolphin. The host supplies guest memory, timed events and the IPC reply
+  path. The disc driver queues commands like IOS does and completes reads
+  block by block at the drive buffer's rate. It matches Dolphin's timing,
+  results and savestate layout, so old states load and new ones load in
+  Dolphin. Cold boot audio is bit-identical to Dolphin's devices for the
+  whole 62 s that boot is deterministic, steady-state audio too, and
+  gameplay is ~1% faster.
 
 **ModernGekko's Dolphin fork**
 
@@ -388,6 +399,12 @@ replaced piece by piece rather than extended.
   equivalent.
 - **`0022` Speaker sink, SDL backend switch.** SpeakerLogic forwards decoded
   samples, and ControllerInterface's SDL backend can be left out.
+- **`0023` Native IOS device routing.** `IOS::HLE::SetNativeDevices` lets the
+  host add devices under the names of Dolphin's. The game's opens, fd
+  restores and per-device savestates go to the native ones. Dolphin's stay in
+  the map for the code that casts them. DVDInterface completions and console
+  buttons reach the native `/dev/di` and `/dev/stm`, and a CoreTiming event
+  carries the native devices' timers.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 
