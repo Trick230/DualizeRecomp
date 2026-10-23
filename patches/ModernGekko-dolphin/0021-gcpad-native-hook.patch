@@ -1,0 +1,109 @@
+diff --git a/Source/Core/Core/HW/GCPad.cpp b/Source/Core/Core/HW/GCPad.cpp
+index 188882c..402960c 100644
+--- a/Source/Core/Core/HW/GCPad.cpp
++++ b/Source/Core/Core/HW/GCPad.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "Core/HW/GCPad.h"
+ 
++#include <atomic>
++
+ #include "Common/Common.h"
+ #include "Core/HW/GCPadEmu.h"
+ #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
+@@ -12,6 +14,17 @@
+ namespace Pad
+ {
+ static InputConfig s_config("GCPadNew", _trans("Pad"), "GCPad", "Pad");
++static std::atomic<const NativeHooks*> s_native{nullptr};
++
++void SetNative(const NativeHooks* hooks)
++{
++  s_native.store(hooks, std::memory_order_release);
++}
++
++const NativeHooks* GetNative()
++{
++  return s_native.load(std::memory_order_acquire);
++}
+ InputConfig* GetConfig()
+ {
+   return &s_config;
+@@ -55,6 +68,12 @@ bool IsInitialized()
+ 
+ GCPadStatus GetStatus(int pad_num)
+ {
++  if (const NativeHooks* const native = GetNative())
++  {
++    GCPadStatus status;
++    if (native->read(native->user, pad_num, &status))
++      return status;
++  }
+   return static_cast<GCPad*>(s_config.GetController(pad_num))->GetInput();
+ }
+ 
+@@ -65,11 +84,15 @@ ControllerEmu::ControlGroup* GetGroup(int pad_num, PadGroup group)
+ 
+ void Rumble(const int pad_num, const ControlState strength)
+ {
++  if (const NativeHooks* const native = GetNative())
++    return native->rumble(native->user, pad_num, strength);
+   static_cast<GCPad*>(s_config.GetController(pad_num))->SetOutput(strength);
+ }
+ 
+ void ResetRumble(const int pad_num)
+ {
++  if (const NativeHooks* const native = GetNative())
++    return native->rumble(native->user, pad_num, 0.0);
+   static_cast<GCPad*>(s_config.GetController(pad_num))->SetOutput(0.0);
+ }
+ 
+diff --git a/Source/Core/Core/HW/GCPad.h b/Source/Core/Core/HW/GCPad.h
+index 0ed5ff5..61d602e 100644
+--- a/Source/Core/Core/HW/GCPad.h
++++ b/Source/Core/Core/HW/GCPad.h
+@@ -31,4 +31,17 @@ void Rumble(int pad_num, ControlState strength);
+ void ResetRumble(int pad_num);
+ 
+ bool GetMicButton(int pad_num);
++
++// A host-side source that replaces InputCommon for the emulated pads.
++struct NativeHooks
++{
++  void* user;
++  // False leaves this pad on InputCommon.
++  bool (*read)(void* user, int pad_num, GCPadStatus* status);
++  void (*rumble)(void* user, int pad_num, ControlState strength);
++};
++
++// nullptr restores InputCommon.
++void SetNative(const NativeHooks* hooks);
++const NativeHooks* GetNative();
+ }  // namespace Pad
+diff --git a/Source/Core/Core/HW/SI/SI.cpp b/Source/Core/Core/HW/SI/SI.cpp
+index 397d36b..2820f31 100644
+--- a/Source/Core/Core/HW/SI/SI.cpp
++++ b/Source/Core/Core/HW/SI/SI.cpp
+@@ -21,6 +21,7 @@
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Config/ConfigManager.h"
+ #include "Core/CoreTiming.h"
++#include "Core/HW/GCPad.h"
+ #include "Core/HW/MMIO.h"
+ #include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/SI/SI_DeviceGBA.h"
+@@ -554,8 +555,12 @@ void SerialInterfaceManager::UpdateDevices()
+ 
+   // Update inputs at the rate of SI
+   // Typically 120hz but is variable
+-  g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
+-  g_controller_interface.UpdateInput();
++  // A native pad source reads its own devices.
++  if (!Pad::GetNative())
++  {
++    g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
++    g_controller_interface.UpdateInput();
++  }
+ 
+   // Update channels and set the status bit if there's new data
+   for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
