@@ -68,7 +68,7 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help all check tools dolrecomp moderngekko submodules patches config wit extract \
-        recompile run llvm llvm-run symbols clean clean-extracted clean-tools
+        recompile run native llvm llvm-run symbols clean clean-extracted clean-tools
 
 help:
 	@echo "DualizeRecomp - NiGHTS: Journey of Dreams static recompilation"
@@ -82,6 +82,7 @@ help:
 	@echo "  make extract ISO=path/to.iso     Extract a GameCube/Wii ISO"
 	@echo "  make recompile ISO=path/to.iso   Recompile + compile a runnable module"
 	@echo "  make run ISO=path/to.iso         Recompile (if needed) and launch the game"
+	@echo "  make native GAME=<slug>          Same, on the native machine (no Dolphin)"
 	@echo "  make llvm ISO=path/to.iso        Build an optimized LLVM object module"
 	@echo "  make llvm-run ISO=path/to.iso    Build LLVM objects and launch the game"
 	@echo "  make symbols GAME=<slug>         Identify SDK functions, write build/symbols/<slug>.map"
@@ -166,7 +167,7 @@ moderngekko: patches
 	cmake -S $(MODERNGEKKO_DIR) -B $(MODERNGEKKO_BUILD) -G Ninja -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
 		-DBUILD_TESTING=$(BUILD_TESTING) \
 		-DDOLRECOMP_ENABLE_LLVM=$(DOLRECOMP_ENABLE_LLVM) $(LLVM_CMAKE_ARG)
-	cmake --build $(MODERNGEKKO_BUILD) --target moderngekko-port -j$(JOBS)
+	cmake --build $(MODERNGEKKO_BUILD) --target moderngekko-port moderngekko-native -j$(JOBS)
 
 tools: dolrecomp moderngekko
 
@@ -221,6 +222,10 @@ recompile: moderngekko $(EXTRACTED_DIR)/sys/main.dol
 
 run: moderngekko config $(EXTRACTED_DIR)/sys/main.dol
 	$(MODERNGEKKO_PORT_BIN) run $(EXTRACTED_DIR) $(PORT_ARGS) -- $(RUN_ARGS)
+
+# The same module on the native machine (no Dolphin): moderngekko-native.
+native: moderngekko $(EXTRACTED_DIR)/sys/main.dol
+	$(MODERNGEKKO_PORT_BIN) run-native $(EXTRACTED_DIR) $(PORT_ARGS) -- $(RUN_ARGS)
 
 # SDK function names found by matching Dolphin's signature database. The map
 # is derived from the user's own DOL, so it is generated, never committed.
