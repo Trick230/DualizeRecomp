@@ -25,21 +25,19 @@ gameplay.
 | | |
 |---|---|
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
-| Gameplay | Full speed: 30 FPS, the game's native rate |
-| Renderers | Dolphin's Vulkan/OpenGL backends (default), or the experimental [native renderer](#native-renderer) |
-| Startup | ~6 s to the first frame (the asset hash is cached after the first boot) |
-| Input | Xbox-layout XInput pad mapped to an emulated Classic Controller (see [Controls](#controls)) |
+| Gameplay | Full speed: 30 FPS, the game's native rate, with even frame pacing (33.4 ms, σ ≤ 1.5 ms) |
+| Renderers | Dolphin's Vulkan/OpenGL backends (default), or the [native renderer](#native-renderer) |
+| Audio | Native DSP/AX emulation, played through SDL3 |
+| Input | SDL3 gamepads (any Xbox, PlayStation or Switch layout), mapped to an emulated Classic Controller (see [Controls](#controls)) |
+| Startup | ~4.5 s to the first frame from a savestate (the asset hash is cached after the first boot) |
 | Tested on | Windows 11 x86_64, MSYS2 UCRT64 (Clang for the game module, `-O3`), i5-9600KF + RTX 4060 |
 | Untested | Linux and macOS (both tools support them), PAL `R7EP8P` and JP `R7EJ8P` |
 
 Known limitations:
 
 - The intro FMV runs at ~19 FPS. It is CPU-bound in the game's video decoder.
-- Without a frame cap, gameplay reaches ~62 FPS (it was ~32 before phase 3).
-  The bottleneck is still the emulated CPU thread: the game's own OS layer
-  (thread switching, message queues) and Dolphin's timing and hardware
-  emulation. The GPU and the native renderer's thread are mostly idle. The
-  rest of phase 3 goes after this.
+- Without a frame cap, gameplay reaches ~100 FPS (it was ~32 before phase 3),
+  so there is about 3× headroom at the game's 30 FPS.
 
 ## Quick start
 
@@ -160,7 +158,8 @@ rates.
 - **Stats:** `NATIVE_GX_STATS=1` prints a line once per second with:
   - frame, draw and FIFO counters;
   - per-frame buffer peaks;
-  - the render thread's decode / begin-frame / end-frame / idle time split.
+  - the render thread's decode / begin-frame / end-frame / idle time split;
+  - the mean, standard deviation and maximum interval between frames.
 
 > [!WARNING]
 > Overlays that hook the swap chain, such as RivaTuner Statistics Server or
@@ -169,12 +168,12 @@ rates.
 
 ## Controls
 
-NiGHTS supports the Classic Controller. `make run` installs
-`config/Config/WiimoteNew.ini`, which sets up Wii Remote 1 with a Classic
-Controller attached, driven by the first XInput pad (any Xbox controller, or
-an 8BitDo pad in X-input mode). Buttons follow the physical Xbox layout:
+NiGHTS supports the Classic Controller. Each connected gamepad drives one Wii
+Remote with a Classic Controller attached. Pads are read through SDL3 on a
+1 kHz thread, with hotplug and rumble. Buttons map by position, so
+PlayStation and Switch pads work the same way. The table uses the Xbox names:
 
-| Xbox | Classic Controller |
+| Xbox (position) | Classic Controller |
 |---|---|
 | A / B / X / Y | b / a / y / x |
 | Left / right stick | Left / right stick |
@@ -183,9 +182,16 @@ an 8BitDo pad in X-input mode). Buttons follow the physical Xbox layout:
 | D-pad | D-pad |
 | Back / Start / Guide | − / + / Home |
 
-The profile is only installed when ModernGekko's user directory has no
-`Config/WiimoteNew.ini` yet, so your own remaps are kept. It is a regular
-Dolphin-format file, so one exported from Dolphin also works.
+Environment switches:
+
+| Variable | Effect |
+|---|---|
+| `MODERNGEKKO_PAD_TARGET=gc` | Gamepads drive emulated GameCube pads instead |
+| `MODERNGEKKO_NATIVE_INPUT=0` | Use Dolphin's InputCommon and `config/Config/WiimoteNew.ini`, which `make run` installs when the user directory has none |
+| `MODERNGEKKO_NATIVE_DSP=0` | Use Dolphin's DSP HLE instead of the native one |
+| `MODERNGEKKO_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
+| `MODERNGEKKO_REAL_DISC_TIMING=1` | Emulate disc seeks and rotation instead of reading at buffer speed |
+| `MODERNGEKKO_AUDIO_STATS=1` | Log the audio queue once per second |
 
 ## Roadmap
 
@@ -196,7 +202,7 @@ replaced piece by piece rather than extended.
 |---|---|---|
 | 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
-| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress: CPU-side groundwork and first native SDK functions (32 → 62 FPS uncapped) |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress. Done: SDK natives, direct calls, sparse entry switches, VI batching, native DSP/AX, SDL3 audio, SDL3 input (32 → ~100 FPS uncapped). Left: interrupts/alarms/timing, IOS, the Dolphin chassis itself; then the stage RSO modules |
 | 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
 
 ## Patches
@@ -269,6 +275,36 @@ replaced piece by piece rather than extended.
 - **`0011` Display stays awake.** The runtime inhibits the screen saver while
   the game runs (honouring Dolphin's `DisableScreenSaver`); with the display
   asleep, presentation blocks and the game drops to a few frames per second.
+- **`0012` PSMTX/PSVEC natives.** Fourteen more paired-single matrix and
+  vector functions (MultVec, Trans, Scale, Normalize, Cross/DotProduct, ...).
+- **`0013` CPU ABI 6, cache and MWCC runtime natives.** The `DC*Range` cache
+  functions run as one host call per range; MWCC's `_savegpr`/`_restgpr`/
+  `_savefpr`/`_restfpr` helpers, which almost every prologue and epilogue
+  calls, run natively. With patch 0015 below: 82.7 → 95.7 FPS uncapped.
+- **`0014` Native DSP.** The DSP interface, mail handler, ROM/INIT/AXWii
+  ucodes and sample accelerator run in ModernGekko's own `DspCore`
+  (`src/audio`). Steady-state audio is bit-identical to Dolphin's HLE, with
+  the same savestate layout.
+- **`0015` SDL3 audio output.** The DSP's DMA stream plays through an SDL3
+  stream. A ±0.5% rate correction holds the queue near 40 ms, so clock drift
+  never underruns or builds latency.
+- **`0016` SDL3 gamepads.** `src/input/gamepads.cpp` polls pads on a 1 kHz
+  thread into seqlock snapshots. `native_input_host.cpp` maps them and merges
+  automation input on top.
+- **`0017` Native GameCube pads.** The same gamepads drive SI pads when
+  `MODERNGEKKO_PAD_TARGET=gc`.
+- **`0018` Buffer-speed disc reads, unplugged idle GC pads.** A cold boot
+  waited 7 emulated seconds on modelled seeks; now it waits 0.5 s. Disc time
+  during loads is ~3% of the load: loading is CPU-bound in the game.
+- **`0019` Wii Remote speaker, SDL ownership.** Speaker samples play on their
+  own SDL stream on the same device. With native input, Dolphin's SDL
+  backend is never created. It called `SDL_Quit` concurrently, which hung
+  about 1 in 6 savestate loads.
+- **`0020` Fast asset listing, frame interval stats.** The startup asset hash
+  check lists `files/` with one `FindFirstFileExW` pass instead of two
+  `std::filesystem` stats per file. That pass ran twice per launch on 12k
+  files. The cached hash value is unchanged. Time to the first frame went
+  from ~11 s to ~4.5 s. `NATIVE_GX_STATS` also reports frame intervals.
 
 **ModernGekko's Dolphin fork**
 
@@ -320,6 +356,38 @@ replaced piece by piece rather than extended.
   `RECOMPCORE_MODULE_LTO_CACHE`.
 - **`0010` Cheaper data-cache flushes.** With the data cache off, a flushed
   line only syncs the MSR when it holds code and needs an invalidation.
+- **`0011` Idle until an interrupt, compact chunk lookup.** At the game's idle
+  pc, `Run()` skips from CoreTiming event to CoreTiming event until an
+  interrupt is actually taken. Before, it re-ran the idle thread's
+  wake/poll/sleep round after each event, which was ~45% of all dispatches.
+  The chunk lookup is one `s16` per 128-byte line. 68 → 81.6 FPS uncapped.
+- **`0012` Direct indirect and tail calls.** One "may enter directly" byte per
+  MEM1 line lets `bctrl`, jump tables and cross-chunk tail branches enter the
+  target without going through `Run()`. Dispatches drop 62%.
+- **`0013` Inline single widening.** The normal-number path of
+  `convert_to_double` is inlined.
+- **`0014` Locked cache without the MMU, builtin byte swaps.** MinGW's
+  `_byteswap_*` were real calls. 83.5 → 88 FPS.
+- **`0015` CPU ABI 6.** Locked-cache and gather-pipe accesses skip MMU
+  translation. Short gather-pipe stores append straight to GPFifo, and a
+  `cache_range` hook backs the `DC*Range` natives. The chassis steps a pc
+  that has no entry case in the interpreter and reports these misses at
+  shutdown.
+- **`0016` VI batches quiet half-lines.** The VI event fires only at
+  half-lines that do something. Beam reads and register writes catch up
+  first, and states save in the old format.
+- **`0017` Game-ID generation.** `Run()` re-checks the module match only when
+  SConfig's game ID changes, instead of copying the string every slice.
+- **`0018` Native DSP hooks.** `DSPManager::SetNative` forwards MMIO, events,
+  slices and savestates to ModernGekko's `DspCore`.
+- **`0019` SDL audio.** Turns SDL's audio subsystem on in the vendored SDL3.
+- **`0020` Wii Remote native input.** `WiimoteEmu::SetNativeInput` replaces
+  InputCommon for buttons, sticks and triggers. BTEmu stops polling
+  ControllerInterface.
+- **`0021` GameCube pad native input.** `Pad::SetNative`, the SI-side
+  equivalent.
+- **`0022` Speaker sink, SDL backend switch.** SpeakerLogic forwards decoded
+  samples, and ControllerInterface's SDL backend can be left out.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 
@@ -342,6 +410,14 @@ replaced piece by piece rather than extended.
   its return address (a context load ending in `rfi`): it sets `ctx->pc` and
   its callers return to the dispatcher. Native call sites also hand the
   chassis's idle-loop pc back to it, as direct calls do.
+- **`0005` Direct indirect and tail calls.** The emitter side of the Dolphin
+  fork's `0012`.
+- **`0006` Sparse entry switches.** A chunk's entry switch keeps cases only
+  where code can be entered from outside: block leaders, natives, branch
+  targets, symbols, code pointers in data and resume points. This lets the
+  compiler optimize across the instructions in between. 96 → 101 FPS, and
+  module builds go from 42 to 27 min. `DOLRECOMP_C_SPARSE_ENTRIES=0` restores
+  the dense switch.
 
 **Per-game settings (`config/GameSettings/R7EE8P.ini`)**
 
