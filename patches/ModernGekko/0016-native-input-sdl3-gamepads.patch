@@ -1,0 +1,650 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 437ca88..b7de3b0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -246,6 +246,8 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         src/audio/native_dsp.cpp
+         src/audio/native_dsp_host.cpp
+         src/audio/audio_out.cpp
++        src/input/gamepads.cpp
++        src/input/native_input_host.cpp
+         tools/automation_protocol.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
+diff --git a/src/input/gamepads.cpp b/src/input/gamepads.cpp
+new file mode 100644
+index 0000000..8ccac69
+--- /dev/null
++++ b/src/input/gamepads.cpp
+@@ -0,0 +1,235 @@
++#include "gamepads.hpp"
++
++#include <SDL3/SDL.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++
++namespace moderngekko::input
++{
++namespace
++{
++// Radial dead zone and the point treated as full deflection, as fractions of
++// the raw range; the span in between is rescaled to [0, 1].
++constexpr float STICK_DEAD_ZONE = 0.10f;
++constexpr float STICK_SATURATION = 0.95f;
++constexpr float TRIGGER_DEAD_ZONE = 0.04f;
++// Device enumeration (hotplug) runs every this many polls.
++constexpr int ENUMERATE_EVERY = 250;
++
++float Axis(SDL_Gamepad* pad, SDL_GamepadAxis axis)
++{
++  return std::max(SDL_GetGamepadAxis(pad, axis) / 32767.0f, -1.0f);
++}
++
++void Stick(float x, float y, float* out_x, float* out_y)
++{
++  const float magnitude = std::sqrt(x * x + y * y);
++  if (magnitude <= STICK_DEAD_ZONE)
++  {
++    *out_x = *out_y = 0;
++    return;
++  }
++  const float scaled =
++      std::min((magnitude - STICK_DEAD_ZONE) / (STICK_SATURATION - STICK_DEAD_ZONE), 1.0f);
++  *out_x = std::clamp(x / magnitude * scaled, -1.0f, 1.0f);
++  *out_y = std::clamp(y / magnitude * scaled, -1.0f, 1.0f);
++}
++
++float Trigger(float value)
++{
++  return value <= TRIGGER_DEAD_ZONE ? 0.0f :
++                                      std::min((value - TRIGGER_DEAD_ZONE) / (1 - TRIGGER_DEAD_ZONE),
++                                               1.0f);
++}
++
++PadState ReadPad(SDL_Gamepad* pad)
++{
++  struct Mapping
++  {
++    SDL_GamepadButton button;
++    uint32_t bit;
++  };
++  static constexpr Mapping mappings[] = {
++      {SDL_GAMEPAD_BUTTON_SOUTH, PAD_SOUTH},
++      {SDL_GAMEPAD_BUTTON_EAST, PAD_EAST},
++      {SDL_GAMEPAD_BUTTON_WEST, PAD_WEST},
++      {SDL_GAMEPAD_BUTTON_NORTH, PAD_NORTH},
++      {SDL_GAMEPAD_BUTTON_BACK, PAD_BACK},
++      {SDL_GAMEPAD_BUTTON_GUIDE, PAD_GUIDE},
++      {SDL_GAMEPAD_BUTTON_START, PAD_START},
++      {SDL_GAMEPAD_BUTTON_LEFT_STICK, PAD_LEFT_STICK},
++      {SDL_GAMEPAD_BUTTON_RIGHT_STICK, PAD_RIGHT_STICK},
++      {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, PAD_LEFT_SHOULDER},
++      {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_RIGHT_SHOULDER},
++      {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_DPAD_UP},
++      {SDL_GAMEPAD_BUTTON_DPAD_DOWN, PAD_DPAD_DOWN},
++      {SDL_GAMEPAD_BUTTON_DPAD_LEFT, PAD_DPAD_LEFT},
++      {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_DPAD_RIGHT},
++  };
++  PadState state;
++  for (const Mapping& m : mappings)
++  {
++    if (SDL_GetGamepadButton(pad, m.button))
++      state.buttons |= m.bit;
++  }
++  // SDL's Y axes grow downwards.
++  Stick(Axis(pad, SDL_GAMEPAD_AXIS_LEFTX), -Axis(pad, SDL_GAMEPAD_AXIS_LEFTY), &state.left_x,
++        &state.left_y);
++  Stick(Axis(pad, SDL_GAMEPAD_AXIS_RIGHTX), -Axis(pad, SDL_GAMEPAD_AXIS_RIGHTY), &state.right_x,
++        &state.right_y);
++  state.left_trigger = Trigger(Axis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
++  state.right_trigger = Trigger(Axis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
++  return state;
++}
++}  // namespace
++
++Gamepads::~Gamepads()
++{
++  Stop();
++}
++
++bool Gamepads::Start()
++{
++  if (m_running)
++    return true;
++  m_running = true;
++  m_thread = std::thread([this] { Run(); });
++  return true;
++}
++
++void Gamepads::Stop()
++{
++  if (!m_running)
++    return;
++  m_running = false;
++  if (m_thread.joinable())
++    m_thread.join();
++}
++
++bool Gamepads::Read(int port, PadState* state) const
++{
++  const Slot& slot = m_slots[port];
++  if (!slot.connected.load(std::memory_order_acquire))
++  {
++    *state = {};
++    return false;
++  }
++  uint32_t before;
++  do
++  {
++    before = slot.sequence.load(std::memory_order_acquire);
++    std::memcpy(state, &slot.state, sizeof(PadState));
++    std::atomic_thread_fence(std::memory_order_acquire);
++  } while ((before & 1) || before != slot.sequence.load(std::memory_order_relaxed));
++  return true;
++}
++
++void Gamepads::SetRumble(int port, float strength)
++{
++  m_slots[port].rumble.store(static_cast<uint32_t>(std::clamp(strength, 0.0f, 1.0f) * 65535),
++                             std::memory_order_relaxed);
++}
++
++void Gamepads::Run()
++{
++  SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++  if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
++  {
++    std::fprintf(stderr, "input: SDL gamepads unavailable: %s\n", SDL_GetError());
++    return;
++  }
++  std::array<SDL_Gamepad*, MAX_PORTS> pads{};
++  std::array<uint32_t, MAX_PORTS> applied_rumble{};
++  int until_enumerate = 0;
++
++  while (m_running.load(std::memory_order_relaxed))
++  {
++    SDL_UpdateGamepads();
++
++    if (until_enumerate-- <= 0)
++    {
++      until_enumerate = ENUMERATE_EVERY;
++      // Drop pads that went away, then give new ones the free ports.
++      for (int port = 0; port < MAX_PORTS; ++port)
++      {
++        if (pads[port] && !SDL_GamepadConnected(pads[port]))
++        {
++          SDL_CloseGamepad(pads[port]);
++          pads[port] = nullptr;
++          m_slots[port].connected.store(false, std::memory_order_release);
++        }
++      }
++      int count = 0;
++      if (SDL_JoystickID* ids = SDL_GetGamepads(&count))
++      {
++        for (int i = 0; i < count; ++i)
++        {
++          if (std::any_of(pads.begin(), pads.end(), [&](SDL_Gamepad* pad) {
++                return pad && SDL_GetGamepadID(pad) == ids[i];
++              }))
++            continue;
++          const auto free = std::find(pads.begin(), pads.end(), nullptr);
++          if (free == pads.end())
++            break;
++          if (SDL_Gamepad* pad = SDL_OpenGamepad(ids[i]))
++          {
++            *free = pad;
++            applied_rumble[free - pads.begin()] = 0;
++            std::fprintf(stderr, "input: port %d: %s\n", int(free - pads.begin()) + 1,
++                         SDL_GetGamepadName(pad));
++          }
++        }
++        SDL_free(ids);
++      }
++    }
++
++    for (int port = 0; port < MAX_PORTS; ++port)
++    {
++      SDL_Gamepad* pad = pads[port];
++      if (!pad)
++        continue;
++      Slot& slot = m_slots[port];
++      const PadState state = ReadPad(pad);
++      const uint32_t sequence = slot.sequence.load(std::memory_order_relaxed);
++      slot.sequence.store(sequence + 1, std::memory_order_relaxed);
++      std::atomic_thread_fence(std::memory_order_release);
++      std::memcpy(&slot.state, &state, sizeof(PadState));
++      slot.sequence.store(sequence + 2, std::memory_order_release);
++      slot.connected.store(true, std::memory_order_release);
++
++      const uint32_t rumble = slot.rumble.load(std::memory_order_relaxed);
++      if (rumble != applied_rumble[port])
++      {
++        // Re-armed below while it stays on; a long duration would outlive a crash.
++        SDL_RumbleGamepad(pad, uint16_t(rumble), uint16_t(rumble), rumble ? 250 : 0);
++        applied_rumble[port] = rumble;
++      }
++    }
++    // Keep a running motor alive past SDL's duration.
++    if (until_enumerate % 100 == 0)
++    {
++      for (int port = 0; port < MAX_PORTS; ++port)
++      {
++        if (pads[port] && applied_rumble[port])
++          SDL_RumbleGamepad(pads[port], uint16_t(applied_rumble[port]),
++                            uint16_t(applied_rumble[port]), 250);
++      }
++    }
++    SDL_DelayPrecise(1'000'000);  // 1 ms
++  }
++
++  for (int port = 0; port < MAX_PORTS; ++port)
++  {
++    if (pads[port])
++    {
++      SDL_RumbleGamepad(pads[port], 0, 0, 0);
++      SDL_CloseGamepad(pads[port]);
++    }
++    m_slots[port].connected.store(false, std::memory_order_release);
++  }
++  SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
++}
++}  // namespace moderngekko::input
+diff --git a/src/input/gamepads.hpp b/src/input/gamepads.hpp
+new file mode 100644
+index 0000000..85eba04
+--- /dev/null
++++ b/src/input/gamepads.hpp
+@@ -0,0 +1,77 @@
++#pragma once
++
++// Gamepads: SDL3 gamepads read on their own thread (1 kHz) into per-port
++// snapshots, so the emulation thread only copies the latest state and never
++// makes a driver call. Ports follow connection order; a newly connected pad
++// takes the first free port. Buttons are positional (South is the bottom face
++// button on every layout).
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <thread>
++
++namespace moderngekko::input
++{
++enum PadButton : uint32_t
++{
++  PAD_SOUTH = 1u << 0,
++  PAD_EAST = 1u << 1,
++  PAD_WEST = 1u << 2,
++  PAD_NORTH = 1u << 3,
++  PAD_BACK = 1u << 4,
++  PAD_GUIDE = 1u << 5,
++  PAD_START = 1u << 6,
++  PAD_LEFT_STICK = 1u << 7,
++  PAD_RIGHT_STICK = 1u << 8,
++  PAD_LEFT_SHOULDER = 1u << 9,
++  PAD_RIGHT_SHOULDER = 1u << 10,
++  PAD_DPAD_UP = 1u << 11,
++  PAD_DPAD_DOWN = 1u << 12,
++  PAD_DPAD_LEFT = 1u << 13,
++  PAD_DPAD_RIGHT = 1u << 14,
++};
++
++struct PadState
++{
++  uint32_t buttons = 0;  // PadButton bits
++  // Sticks in [-1, 1] after the dead zone, up and right positive.
++  float left_x = 0, left_y = 0, right_x = 0, right_y = 0;
++  // Triggers in [0, 1].
++  float left_trigger = 0, right_trigger = 0;
++};
++
++class Gamepads
++{
++public:
++  static constexpr int MAX_PORTS = 4;
++
++  Gamepads() = default;
++  ~Gamepads();
++  Gamepads(const Gamepads&) = delete;
++  Gamepads& operator=(const Gamepads&) = delete;
++
++  bool Start();
++  void Stop();
++  // False when no pad is on the port (state is then neutral).
++  bool Read(int port, PadState* state) const;
++  // Strong/weak motor strength in [0, 1]; applied by the pad thread.
++  void SetRumble(int port, float strength);
++
++private:
++  struct Slot
++  {
++    // Seqlock: odd while the pad thread writes.
++    std::atomic<uint32_t> sequence{0};
++    std::atomic<bool> connected{false};
++    PadState state;
++    std::atomic<uint32_t> rumble{0};  // 0..65535
++  };
++
++  void Run();
++
++  std::array<Slot, MAX_PORTS> m_slots;
++  std::atomic<bool> m_running{false};
++  std::thread m_thread;
++};
++}  // namespace moderngekko::input
+diff --git a/src/input/native_input_host.cpp b/src/input/native_input_host.cpp
+new file mode 100644
+index 0000000..23f4abc
+--- /dev/null
++++ b/src/input/native_input_host.cpp
+@@ -0,0 +1,231 @@
++#include "native_input_host.hpp"
++
++#include "Core/HW/WiimoteEmu/Extension/Classic.h"
++#include "Core/HW/WiimoteEmu/NativeInput.h"
++#include "Core/HW/WiimoteEmu/WiimoteEmu.h"
++#include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
++
++#include "gamepads.hpp"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cmath>
++#include <mutex>
++
++namespace moderngekko::native_input
++{
++namespace
++{
++using WiimoteEmu::Classic;
++using WiimoteEmu::NativeInput;
++using WiimoteEmu::Wiimote;
++using ciface::Touch::ControlID;
++
++// Above this an analog trigger also reports its digital click.
++constexpr float TRIGGER_CLICK = 0.9f;
++
++struct ButtonMapping
++{
++  uint32_t pad;
++  uint16_t wii;
++};
++
++constexpr ButtonMapping classic_buttons[] = {
++    {input::PAD_EAST, Classic::BUTTON_A},
++    {input::PAD_SOUTH, Classic::BUTTON_B},
++    {input::PAD_NORTH, Classic::BUTTON_X},
++    {input::PAD_WEST, Classic::BUTTON_Y},
++    {input::PAD_LEFT_SHOULDER, Classic::BUTTON_ZL},
++    {input::PAD_RIGHT_SHOULDER, Classic::BUTTON_ZR},
++    {input::PAD_START, Classic::BUTTON_PLUS},
++    {input::PAD_BACK, Classic::BUTTON_MINUS},
++    {input::PAD_GUIDE, Classic::BUTTON_HOME},
++    {input::PAD_DPAD_UP, Classic::PAD_UP},
++    {input::PAD_DPAD_DOWN, Classic::PAD_DOWN},
++    {input::PAD_DPAD_LEFT, Classic::PAD_LEFT},
++    {input::PAD_DPAD_RIGHT, Classic::PAD_RIGHT},
++};
++
++constexpr ButtonMapping wiimote_buttons[] = {
++    {input::PAD_SOUTH, Wiimote::BUTTON_A},
++    {input::PAD_EAST, Wiimote::BUTTON_B},
++    {input::PAD_WEST, Wiimote::BUTTON_ONE},
++    {input::PAD_NORTH, Wiimote::BUTTON_TWO},
++    {input::PAD_START, Wiimote::BUTTON_PLUS},
++    {input::PAD_BACK, Wiimote::BUTTON_MINUS},
++    {input::PAD_GUIDE, Wiimote::BUTTON_HOME},
++    {input::PAD_DPAD_UP, Wiimote::PAD_UP},
++    {input::PAD_DPAD_DOWN, Wiimote::PAD_DOWN},
++    {input::PAD_DPAD_LEFT, Wiimote::PAD_LEFT},
++    {input::PAD_DPAD_RIGHT, Wiimote::PAD_RIGHT},
++};
++
++struct ControlMapping
++{
++  ControlID control;
++  uint16_t bit;
++};
++
++constexpr ControlMapping automation_wiimote[] = {
++    {ControlID::WIIMOTE_A_BUTTON, Wiimote::BUTTON_A},
++    {ControlID::WIIMOTE_B_BUTTON, Wiimote::BUTTON_B},
++    {ControlID::WIIMOTE_ONE_BUTTON, Wiimote::BUTTON_ONE},
++    {ControlID::WIIMOTE_TWO_BUTTON, Wiimote::BUTTON_TWO},
++    {ControlID::WIIMOTE_PLUS_BUTTON, Wiimote::BUTTON_PLUS},
++    {ControlID::WIIMOTE_MINUS_BUTTON, Wiimote::BUTTON_MINUS},
++    {ControlID::WIIMOTE_HOME_BUTTON, Wiimote::BUTTON_HOME},
++    {ControlID::WIIMOTE_DPAD_UP, Wiimote::PAD_UP},
++    {ControlID::WIIMOTE_DPAD_DOWN, Wiimote::PAD_DOWN},
++    {ControlID::WIIMOTE_DPAD_LEFT, Wiimote::PAD_LEFT},
++    {ControlID::WIIMOTE_DPAD_RIGHT, Wiimote::PAD_RIGHT},
++};
++
++constexpr ControlMapping automation_classic[] = {
++    {ControlID::CLASSIC_A_BUTTON, Classic::BUTTON_A},
++    {ControlID::CLASSIC_B_BUTTON, Classic::BUTTON_B},
++    {ControlID::CLASSIC_X_BUTTON, Classic::BUTTON_X},
++    {ControlID::CLASSIC_Y_BUTTON, Classic::BUTTON_Y},
++    {ControlID::CLASSIC_ZL_BUTTON, Classic::BUTTON_ZL},
++    {ControlID::CLASSIC_ZR_BUTTON, Classic::BUTTON_ZR},
++    {ControlID::CLASSIC_PLUS_BUTTON, Classic::BUTTON_PLUS},
++    {ControlID::CLASSIC_MINUS_BUTTON, Classic::BUTTON_MINUS},
++    {ControlID::CLASSIC_HOME_BUTTON, Classic::BUTTON_HOME},
++    {ControlID::CLASSIC_DPAD_UP, Classic::PAD_UP},
++    {ControlID::CLASSIC_DPAD_DOWN, Classic::PAD_DOWN},
++    {ControlID::CLASSIC_DPAD_LEFT, Classic::PAD_LEFT},
++    {ControlID::CLASSIC_DPAD_RIGHT, Classic::PAD_RIGHT},
++    {ControlID::CLASSIC_L_DIGITAL, Classic::TRIGGER_L},
++    {ControlID::CLASSIC_R_DIGITAL, Classic::TRIGGER_R},
++};
++
++input::Gamepads s_gamepads;
++// Automation state, both the remote and the classic fields filled.
++std::array<NativeInput, input::Gamepads::MAX_PORTS> s_overlays;
++std::array<std::atomic<bool>, input::Gamepads::MAX_PORTS> s_overlay_active{};
++std::mutex s_overlay_mutex;
++bool s_installed = false;
++
++uint16_t MapButtons(uint32_t pad, const auto& mappings)
++{
++  uint16_t bits = 0;
++  for (const ButtonMapping& m : mappings)
++  {
++    if (pad & m.pad)
++      bits |= m.wii;
++  }
++  return bits;
++}
++
++// The larger deflection wins, so automation and a held pad both register.
++float Merge(float a, float b)
++{
++  return std::fabs(b) > std::fabs(a) ? b : a;
++}
++
++bool Read(void*, int index, NativeInput* input)
++{
++  if (index >= input::Gamepads::MAX_PORTS)
++    return false;
++  input::PadState pad;
++  s_gamepads.Read(index, &pad);
++  if (input->classic)
++  {
++    input->classic_buttons = MapButtons(pad.buttons, classic_buttons);
++    if (pad.left_trigger >= TRIGGER_CLICK)
++      input->classic_buttons |= Classic::TRIGGER_L;
++    if (pad.right_trigger >= TRIGGER_CLICK)
++      input->classic_buttons |= Classic::TRIGGER_R;
++    input->left_x = pad.left_x;
++    input->left_y = pad.left_y;
++    input->right_x = pad.right_x;
++    input->right_y = pad.right_y;
++    input->left_trigger = pad.left_trigger;
++    input->right_trigger = pad.right_trigger;
++  }
++  else
++  {
++    input->buttons = MapButtons(pad.buttons, wiimote_buttons);
++  }
++
++  if (s_overlay_active[index].load(std::memory_order_acquire))
++  {
++    std::lock_guard lock(s_overlay_mutex);
++    const NativeInput& overlay = s_overlays[index];
++    input->buttons |= overlay.buttons;
++    if (input->classic)
++    {
++      input->classic_buttons |= overlay.classic_buttons;
++      input->left_x = Merge(input->left_x, overlay.left_x);
++      input->left_y = Merge(input->left_y, overlay.left_y);
++      input->right_x = Merge(input->right_x, overlay.right_x);
++      input->right_y = Merge(input->right_y, overlay.right_y);
++      input->left_trigger = std::max(input->left_trigger, overlay.left_trigger);
++      input->right_trigger = std::max(input->right_trigger, overlay.right_trigger);
++    }
++  }
++  return true;
++}
++
++void Rumble(void*, int index, bool on)
++{
++  if (index < input::Gamepads::MAX_PORTS)
++    s_gamepads.SetRumble(index, on ? 1.0f : 0.0f);
++}
++
++constexpr WiimoteEmu::NativeInputHooks hooks{nullptr, Read, Rumble};
++}  // namespace
++
++void Install()
++{
++  if (s_installed)
++    return;
++  s_gamepads.Start();
++  WiimoteEmu::SetNativeInput(&hooks);
++  s_installed = true;
++}
++
++void Uninstall()
++{
++  if (!s_installed)
++    return;
++  WiimoteEmu::SetNativeInput(nullptr);
++  s_gamepads.Stop();
++  s_installed = false;
++}
++
++bool Installed()
++{
++  return s_installed;
++}
++
++void SetAutomationPad(int port, const double* controls, std::size_t count)
++{
++  if (port < 0 || port >= input::Gamepads::MAX_PORTS)
++    return;
++  const auto control = [&](ControlID id) {
++    return std::size_t(id) < count ? float(controls[std::size_t(id)]) : 0.0f;
++  };
++  NativeInput overlay;
++  for (const ControlMapping& m : automation_wiimote)
++  {
++    if (control(m.control) > 0.5f)
++      overlay.buttons |= m.bit;
++  }
++  for (const ControlMapping& m : automation_classic)
++  {
++    if (control(m.control) > 0.5f)
++      overlay.classic_buttons |= m.bit;
++  }
++  overlay.left_x = control(ControlID::CLASSIC_LEFT_STICK_X);
++  overlay.left_y = control(ControlID::CLASSIC_LEFT_STICK_Y);
++  overlay.right_x = control(ControlID::CLASSIC_RIGHT_STICK_X);
++  overlay.right_y = control(ControlID::CLASSIC_RIGHT_STICK_Y);
++  overlay.left_trigger = control(ControlID::CLASSIC_L_ANALOG);
++  overlay.right_trigger = control(ControlID::CLASSIC_R_ANALOG);
++
++  std::lock_guard lock(s_overlay_mutex);
++  s_overlays[port] = overlay;
++  s_overlay_active[port].store(true, std::memory_order_release);
++}
++}  // namespace moderngekko::native_input
+diff --git a/src/input/native_input_host.hpp b/src/input/native_input_host.hpp
+new file mode 100644
+index 0000000..e82be4e
+--- /dev/null
++++ b/src/input/native_input_host.hpp
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <cstddef>
++
++namespace moderngekko::native_input
++{
++// Feeds emulated Wii Remotes and Classic Controllers from input::Gamepads in
++// place of Dolphin's InputCommon (which is then no longer polled for them).
++// Gamepad buttons map by position onto the Classic Controller; without one
++// attached, onto an upright Wii Remote. Call before boot.
++void Install();
++void Uninstall();
++bool Installed();
++
++// Automation pad state, indexed by ciface::Touch::ControlID; merged over the
++// gamepad on that port.
++void SetAutomationPad(int port, const double* controls, std::size_t count);
++}  // namespace moderngekko::native_input
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 69ded95..b7a6ec6 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -29,6 +29,7 @@
+ #include "automation_protocol.hpp"
+ #include "dolphin_runtime_internal.hpp"
+ #include "../audio/native_dsp_host.hpp"
++#include "../input/native_input_host.hpp"
+ #ifdef MODERNGEKKO_NATIVE_GX
+ #include "../gpu/native_gx_host.hpp"
+ #endif
+@@ -205,6 +206,8 @@ void ClearAutomationPad(int port)
+     ciface::Touch::SetControlState(
+         port, static_cast<ciface::Touch::ControlID>(control), 0.0);
+   }
++  if (native_input::Installed())
++    native_input::SetAutomationPad(port, nullptr, 0);
+ }
+ 
+ void ApplyAutomationPad(const automation::PadState& pad)
+@@ -219,6 +222,8 @@ void ApplyAutomationPad(const automation::PadState& pad)
+             static_cast<int>(index)),
+         pad.controls[index]);
+   }
++  if (native_input::Installed())
++    native_input::SetAutomationPad(pad.port, pad.controls.data(), pad.controls.size());
+ }
+ 
+ std::filesystem::path NormalizeScreenshotPath(const std::filesystem::path& path)
+@@ -1058,6 +1063,13 @@ RuntimeRunResult Runtime::Run() {
+   }();
+   if (use_native_dsp)
+     native_dsp::Install(Core::System::GetInstance());
++  // MODERNGEKKO_NATIVE_INPUT=0 keeps InputCommon for the Wii Remotes.
++  static const bool use_native_input = [] {
++    const char *v = std::getenv("MODERNGEKKO_NATIVE_INPUT");
++    return !v || !*v || *v != '0';
++  }();
++  if (use_native_input)
++    native_input::Install();
+ #ifdef MODERNGEKKO_NATIVE_GX
+   if (m_impl->native_gx &&
+       !native_gx::Start(Core::System::GetInstance(), m_impl->title,
+@@ -1120,6 +1132,7 @@ RuntimeRunResult Runtime::Run() {
+   Core::Stop(Core::System::GetInstance());
+   Core::Shutdown(Core::System::GetInstance());
+   native_dsp::Uninstall(Core::System::GetInstance());
++  native_input::Uninstall();
+ #ifdef MODERNGEKKO_NATIVE_GX
+   if (m_impl->native_gx)
+     native_gx::Stop(Core::System::GetInstance());
