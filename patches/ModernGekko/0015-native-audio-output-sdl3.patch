@@ -1,0 +1,365 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index af7d2a0..437ca88 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -245,6 +245,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         src/runtime/dolphin_runtime.cpp
+         src/audio/native_dsp.cpp
+         src/audio/native_dsp_host.cpp
++        src/audio/audio_out.cpp
+         tools/automation_protocol.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
+@@ -285,6 +286,12 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         target_compile_definitions(moderngekko PRIVATE _M_GENERIC=1)
+     endif()
+     target_link_libraries(moderngekko PRIVATE core uicommon)
++    # The native audio output plays through the frontend's SDL3.
++    if(TARGET SDL3-static)
++        target_link_libraries(moderngekko PRIVATE SDL3-static)
++    elseif(TARGET SDL3::SDL3)
++        target_link_libraries(moderngekko PRIVATE SDL3::SDL3)
++    endif()
+     if(MODERNGEKKO_NATIVE_GX)
+         # Aurora lives in its own project and DLL so its dependency tree never
+         # links against Dolphin's (both vendor fmt, imgui, xxhash, ...).
+diff --git a/src/audio/audio_out.cpp b/src/audio/audio_out.cpp
+new file mode 100644
+index 0000000..a47b3a5
+--- /dev/null
++++ b/src/audio/audio_out.cpp
+@@ -0,0 +1,183 @@
++#include "audio_out.hpp"
++
++#include <SDL3/SDL.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++
++namespace moderngekko::audio
++{
++namespace
++{
++constexpr uint32_t RATE_DIVIDEND = 108000000;
++// Frames gathered before one SDL_PutAudioStreamData (8 ms at 32 kHz).
++constexpr size_t FLUSH_FRAMES = 256;
++// Queue targets, in milliseconds of input (one more flush waits as look-ahead).
++constexpr uint32_t TARGET_MS = 40;
++// Past this the guest runs faster than real time; input is skipped until the
++// queue is down to the resume level.
++constexpr uint32_t LIMIT_MS = 160;
++constexpr uint32_t RESUME_MS = 80;
++// Largest rate correction: 0.5%, below what pitch perception notices.
++constexpr float MAX_CORRECTION = 0.005f;
++}  // namespace
++
++AudioOut::~AudioOut()
++{
++  Stop();
++}
++
++bool AudioOut::Start()
++{
++  if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
++  {
++    std::fprintf(stderr, "audio: SDL audio unavailable: %s\n", SDL_GetError());
++    return false;
++  }
++  m_rate = 32000;
++  const SDL_AudioSpec spec{SDL_AUDIO_S16LE, 2, static_cast<int>(m_rate)};
++  m_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
++  if (!m_stream)
++  {
++    std::fprintf(stderr, "audio: no playback device: %s\n", SDL_GetError());
++    SDL_QuitSubSystem(SDL_INIT_AUDIO);
++    return false;
++  }
++  m_pending.reserve(FLUSH_FRAMES * 2);
++  m_playing = false;
++  m_ratio = 1.0f;
++  return true;
++}
++
++void AudioOut::Stop()
++{
++  if (!m_stream)
++    return;
++  SDL_DestroyAudioStream(m_stream);
++  m_stream = nullptr;
++  SDL_QuitSubSystem(SDL_INIT_AUDIO);
++}
++
++void AudioOut::SetGain(float gain)
++{
++  if (m_stream)
++    SDL_SetAudioStreamGain(m_stream, gain);
++}
++
++void AudioOut::Push(const int16_t* samples, uint32_t count, uint32_t rate_divisor)
++{
++  if (!m_stream)
++    return;
++  const uint32_t rate = RATE_DIVIDEND / rate_divisor;
++  if (rate != m_rate)
++  {
++    Flush();
++    if (!m_held.empty())
++      SDL_PutAudioStreamData(m_stream, m_held.data(), int(m_held.size() * sizeof(int16_t)));
++    m_held.clear();
++    m_rate = rate;
++    const SDL_AudioSpec spec{SDL_AUDIO_S16LE, 2, static_cast<int>(m_rate)};
++    SDL_SetAudioStreamFormat(m_stream, &spec, nullptr);
++  }
++  for (uint32_t i = 0; i < count; ++i)
++  {
++    const uint16_t right = static_cast<uint16_t>(samples[2 * i]);
++    const uint16_t left = static_cast<uint16_t>(samples[2 * i + 1]);
++    m_pending.push_back(static_cast<int16_t>(__builtin_bswap16(left)));
++    m_pending.push_back(static_cast<int16_t>(__builtin_bswap16(right)));
++  }
++  if (m_pending.size() >= FLUSH_FRAMES * 2)
++    Flush();
++}
++
++void AudioOut::Flush()
++{
++  if (m_pending.empty())
++    return;
++  const int bytes = static_cast<int>(m_pending.size() * sizeof(int16_t));
++  const uint32_t bytes_per_ms = m_rate * 4 / 1000;
++  const uint32_t queued = static_cast<uint32_t>(std::max(SDL_GetAudioStreamQueued(m_stream), 0));
++
++  // Faster than real time: skip input until the queue is back near its
++  // target. Skipping in long runs, with the cut faded out and the resume
++  // faded in, sounds like a jump instead of a buzz.
++  if (m_dropping ? queued > RESUME_MS * bytes_per_ms : queued >= LIMIT_MS * bytes_per_ms)
++  {
++    if (!m_dropping && !m_held.empty())
++    {
++      Fade(m_held.data() + m_held.size() - FADE_FRAMES * 2, false);
++      SDL_PutAudioStreamData(m_stream, m_held.data(), int(m_held.size() * sizeof(int16_t)));
++      m_held.clear();
++    }
++    m_dropping = true;
++  }
++  else if (m_dropping)
++  {
++    m_dropping = false;
++    Fade(m_pending.data(), true);
++  }
++  const bool keep = !m_dropping;
++  // One flush of look-ahead, so a cut can still fade the audio before it.
++  if (keep)
++  {
++    if (!m_held.empty())
++      SDL_PutAudioStreamData(m_stream, m_held.data(), int(m_held.size() * sizeof(int16_t)));
++    m_held.swap(m_pending);
++  }
++  m_pending.clear();
++
++  // MODERNGEKKO_AUDIO_STATS=1: queue depth, rate ratio and drops once a second.
++  static const bool stats = [] {
++    const char* v = std::getenv("MODERNGEKKO_AUDIO_STATS");
++    return v && *v == '1';
++  }();
++  if (stats)
++  {
++    m_stat_frames += bytes / 4;
++    m_stat_dropped += keep ? 0 : bytes / 4;
++    m_stat_min_ms = std::min(m_stat_min_ms, queued / bytes_per_ms);
++    if (m_stat_frames >= m_rate)
++    {
++      std::fprintf(stderr, "[audio] queue %u ms (min %u), ratio %.4f, dropped %u frames\n",
++                   queued / bytes_per_ms, m_stat_min_ms, m_ratio, m_stat_dropped);
++      m_stat_frames = m_stat_dropped = 0;
++      m_stat_min_ms = ~0u;
++    }
++  }
++
++  const uint32_t now_queued = queued + bytes;
++  if (!m_playing)
++  {
++    // Start once a full target is queued, so the first frames never starve.
++    if (now_queued >= TARGET_MS * bytes_per_ms)
++    {
++      SDL_ResumeAudioStreamDevice(m_stream);
++      m_playing = true;
++    }
++    return;
++  }
++
++  // Drain faster above the target and slower below it, smoothed so the
++  // correction never steps audibly.
++  const float error = (float(now_queued) / float(TARGET_MS * bytes_per_ms)) - 1.0f;
++  const float wanted = 1.0f + std::clamp(error * MAX_CORRECTION, -MAX_CORRECTION, MAX_CORRECTION);
++  const float ratio = m_ratio + (wanted - m_ratio) * 0.05f;
++  if (std::fabs(ratio - m_ratio) > 1e-5f)
++  {
++    m_ratio = ratio;
++    SDL_SetAudioStreamFrequencyRatio(m_stream, m_ratio);
++  }
++}
++
++void AudioOut::Fade(int16_t* frames, bool in)
++{
++  for (size_t i = 0; i < FADE_FRAMES; ++i)
++  {
++    const int weight = int(in ? i : FADE_FRAMES - 1 - i);
++    frames[2 * i] = int16_t(frames[2 * i] * weight / int(FADE_FRAMES));
++    frames[2 * i + 1] = int16_t(frames[2 * i + 1] * weight / int(FADE_FRAMES));
++  }
++}
++}  // namespace moderngekko::audio
+diff --git a/src/audio/audio_out.hpp b/src/audio/audio_out.hpp
+new file mode 100644
+index 0000000..13a576d
+--- /dev/null
++++ b/src/audio/audio_out.hpp
+@@ -0,0 +1,48 @@
++#pragma once
++
++// Audio output: the guest's DMA stream to the default playback device through
++// an SDL3 audio stream (SDL resamples to the device rate). A small rate
++// adjustment keeps the queue near its target, so neither underruns nor
++// latency build up when the guest's clock drifts from the device's.
++
++#include <cstdint>
++#include <vector>
++
++struct SDL_AudioStream;
++
++namespace moderngekko::audio
++{
++class AudioOut
++{
++public:
++  AudioOut() = default;
++  ~AudioOut();
++  AudioOut(const AudioOut&) = delete;
++  AudioOut& operator=(const AudioOut&) = delete;
++
++  // False when there is no playback device; Push then discards samples.
++  bool Start();
++  void Stop();
++  // Linear gain, 0 mutes.
++  void SetGain(float gain);
++  // count stereo frames of big-endian s16 (right, left) at 108 MHz / rate_divisor.
++  void Push(const int16_t* samples, uint32_t count, uint32_t rate_divisor);
++
++private:
++  void Flush();
++  // Linear ramp over the first FADE_FRAMES stereo frames at frames.
++  static void Fade(int16_t* frames, bool in);
++  static constexpr size_t FADE_FRAMES = 64;
++
++  SDL_AudioStream* m_stream = nullptr;
++  uint32_t m_rate = 0;
++  bool m_playing = false;
++  float m_ratio = 1.0f;
++  bool m_dropping = false;
++  std::vector<int16_t> m_pending;  // little-endian left, right
++  std::vector<int16_t> m_held;     // the previous flush, not yet queued
++  uint32_t m_stat_frames = 0;
++  uint32_t m_stat_dropped = 0;
++  uint32_t m_stat_min_ms = ~0u;
++};
++}  // namespace moderngekko::audio
+diff --git a/src/audio/native_dsp_host.cpp b/src/audio/native_dsp_host.cpp
+index 2846736..e952668 100644
+--- a/src/audio/native_dsp_host.cpp
++++ b/src/audio/native_dsp_host.cpp
+@@ -3,22 +3,30 @@
+ #include "AudioCommon/AudioCommon.h"
+ #include "Common/ChunkFile.h"
+ #include "Common/FileUtil.h"
++#include "Core/Config/MainSettings.h"
+ #include "Core/CoreTiming.h"
++#include "Core/HW/AudioInterface.h"
+ #include "Core/HW/DSP.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/System.h"
+ 
++#include "audio_out.hpp"
+ #include "native_dsp.hpp"
+ 
++#include <algorithm>
+ #include <memory>
++#include <string>
+ 
+ namespace moderngekko::native_dsp
+ {
+ namespace
+ {
+ std::unique_ptr<audio::DspCore> s_core;
++audio::AudioOut s_out;
++// Dolphin's mixer only sees the stream while it dumps it.
++bool s_dump = false;
+ 
+ Core::System& SystemOf(void* user)
+ {
+@@ -52,7 +60,17 @@ void ForceExceptionCheck(void* user, int64_t cycles)
+ 
+ void PushSamples(void* user, const int16_t* samples, uint32_t count)
+ {
+-  AudioCommon::SendAIBuffer(SystemOf(user), samples, count);
++  Core::System& system = SystemOf(user);
++  s_out.Push(samples, count, system.GetAudioInterface().GetAIDSampleRateDivisor());
++  if (s_dump)
++    AudioCommon::SendAIBuffer(system, samples, count);
++}
++
++void UpdateGain()
++{
++  s_out.SetGain(Config::Get(Config::MAIN_AUDIO_MUTED) ?
++                    0.0f :
++                    std::clamp(Config::Get(Config::MAIN_AUDIO_VOLUME), 0, 100) / 100.0f);
+ }
+ 
+ void Start(void* user)
+@@ -77,6 +95,9 @@ void Start(void* user)
+   host.timebase = Timebase;
+   host.force_exception_check = ForceExceptionCheck;
+   host.push_samples = PushSamples;
++  s_dump = Config::Get(Config::MAIN_DUMP_AUDIO);
++  if (s_out.Start())
++    UpdateGain();
+   s_core = std::make_unique<audio::DspCore>(
+       host, std::vector<std::string>{File::GetUserPath(D_GCUSER_IDX) + "dsp_coef.bin",
+                                      File::GetSysDirectory() + "/GC/dsp_coef.bin"});
+@@ -85,6 +106,7 @@ void Start(void* user)
+ void Stop(void*)
+ {
+   s_core.reset();
++  s_out.Stop();
+ }
+ 
+ uint16_t Read(void*, uint32_t offset)
+@@ -148,6 +170,8 @@ void Install(Core::System& system)
+       .do_state = DoState,
+   };
+   system.GetDSP().SetNative(&s_hooks);
++  // The native output replaces Dolphin's sound backend.
++  Config::SetCurrent(Config::MAIN_AUDIO_BACKEND, std::string(BACKEND_NULLSOUND));
+ }
+ 
+ void Uninstall(Core::System& system)
+diff --git a/src/audio/native_dsp_host.hpp b/src/audio/native_dsp_host.hpp
+index 604e8cc..76c773f 100644
+--- a/src/audio/native_dsp_host.hpp
++++ b/src/audio/native_dsp_host.hpp
+@@ -8,8 +8,9 @@ class System;
+ namespace moderngekko::native_dsp
+ {
+ // Runs the DSP interface and the DSP natively (audio::DspCore) in place of
+-// Dolphin's DSP and DSP HLE. Call before boot; Wii titles only, others keep
+-// Dolphin's.
++// Dolphin's DSP and DSP HLE, and plays its output through audio::AudioOut in
++// place of Dolphin's sound backend. Call before boot; Wii titles only, others
++// keep Dolphin's.
+ void Install(Core::System& system);
+ void Uninstall(Core::System& system);
+ }  // namespace moderngekko::native_dsp
