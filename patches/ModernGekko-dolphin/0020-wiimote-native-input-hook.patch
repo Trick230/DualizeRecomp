@@ -1,0 +1,233 @@
+diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
+index f30654c..215f58d 100644
+--- a/Source/Core/Core/CMakeLists.txt
++++ b/Source/Core/Core/CMakeLists.txt
+@@ -390,6 +390,7 @@ add_library(core
+   HW/WiimoteEmu/I2CBus.h
+   HW/WiimoteEmu/MotionPlus.cpp
+   HW/WiimoteEmu/MotionPlus.h
++  HW/WiimoteEmu/NativeInput.h
+   HW/WiimoteEmu/Speaker.cpp
+   HW/WiimoteEmu/Speaker.h
+   HW/WiimoteEmu/WiimoteEmu.cpp
+diff --git a/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.cpp b/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.cpp
+index d44de1b..42ab4a1 100644
+--- a/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.cpp
++++ b/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.cpp
+@@ -134,6 +134,24 @@ void Classic::BuildDesiredExtensionState(DesiredExtensionState* target_state)
+   target_state->data = classic_data;
+ }
+ 
++void Classic::BuildNativeExtensionState(const NativeInput& input,
++                                        DesiredExtensionState* target_state)
++{
++  using ControllerEmu::MapFloat;
++
++  DataFormat classic_data = {};
++  classic_data.SetLeftStick({MapFloat<u8>(input.left_x, LEFT_STICK_CENTER, 0, LEFT_STICK_RANGE),
++                             MapFloat<u8>(input.left_y, LEFT_STICK_CENTER, 0, LEFT_STICK_RANGE)});
++  classic_data.SetRightStick(
++      {MapFloat<u8>(input.right_x, RIGHT_STICK_CENTER, 0, RIGHT_STICK_RANGE),
++       MapFloat<u8>(input.right_y, RIGHT_STICK_CENTER, 0, RIGHT_STICK_RANGE)});
++  classic_data.SetLeftTrigger(MapFloat<u8>(input.left_trigger, 0, 0, TRIGGER_RANGE));
++  classic_data.SetRightTrigger(MapFloat<u8>(input.right_trigger, 0, 0, TRIGGER_RANGE));
++  classic_data.SetButtons(input.classic_buttons);
++
++  target_state->data = classic_data;
++}
++
+ void Classic::Update(const DesiredExtensionState& target_state)
+ {
+   DefaultExtensionUpdate<DataFormat>(&m_reg, target_state);
+diff --git a/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.h b/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.h
+index 5788fa3..b140c3b 100644
+--- a/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.h
++++ b/Source/Core/Core/HW/WiimoteEmu/Extension/Classic.h
+@@ -8,6 +8,7 @@
+ #include "Common/Matrix.h"
+ #include "Core/HW/WiimoteCommon/WiimoteReport.h"
+ #include "Core/HW/WiimoteEmu/Extension/Extension.h"
++#include "Core/HW/WiimoteEmu/NativeInput.h"
+ 
+ namespace ControllerEmu
+ {
+@@ -181,6 +182,9 @@ public:
+   Classic();
+ 
+   void BuildDesiredExtensionState(DesiredExtensionState* target_state) override;
++  // The same state from a NativeInput source instead of InputCommon.
++  static void BuildNativeExtensionState(const NativeInput& input,
++                                        DesiredExtensionState* target_state);
+   void Update(const DesiredExtensionState& target_state) override;
+   void Reset() override;
+ 
+diff --git a/Source/Core/Core/HW/WiimoteEmu/NativeInput.h b/Source/Core/Core/HW/WiimoteEmu/NativeInput.h
+new file mode 100644
+index 0000000..7153127
+--- /dev/null
++++ b/Source/Core/Core/HW/WiimoteEmu/NativeInput.h
+@@ -0,0 +1,37 @@
++// Copyright 2026 Dolphin Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include "Common/CommonTypes.h"
++
++// A host-side input source that replaces InputCommon for the buttons, sticks
++// and triggers of emulated Wii Remotes and their Classic Controllers. Motion
++// and IR keep Dolphin's emulation.
++namespace WiimoteEmu
++{
++struct NativeInput
++{
++  // In: a Classic Controller is attached, so the classic fields are used.
++  bool classic = false;
++  // Wii Remote button bits (WiimoteCommon::ButtonData).
++  u16 buttons = 0;
++  // Classic Controller button bits (Classic::BUTTON_* / PAD_* / TRIGGER_*).
++  u16 classic_buttons = 0;
++  // Sticks in [-1, 1], up and right positive; triggers in [0, 1].
++  float left_x = 0, left_y = 0, right_x = 0, right_y = 0;
++  float left_trigger = 0, right_trigger = 0;
++};
++
++struct NativeInputHooks
++{
++  void* user;
++  // False leaves this remote on InputCommon.
++  bool (*read)(void* user, int index, NativeInput* input);
++  void (*rumble)(void* user, int index, bool on);
++};
++
++// nullptr restores InputCommon.
++void SetNativeInput(const NativeInputHooks* hooks);
++const NativeInputHooks* GetNativeInput();
++}  // namespace WiimoteEmu
+diff --git a/Source/Core/Core/HW/WiimoteEmu/WiimoteEmu.cpp b/Source/Core/Core/HW/WiimoteEmu/WiimoteEmu.cpp
+index 3350787..31832ef 100644
+--- a/Source/Core/Core/HW/WiimoteEmu/WiimoteEmu.cpp
++++ b/Source/Core/Core/HW/WiimoteEmu/WiimoteEmu.cpp
+@@ -4,6 +4,7 @@
+ #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <fstream>
+ #include <memory>
+ #include <optional>
+@@ -38,6 +39,7 @@
+ #include "Core/HW/WiimoteEmu/Extension/TaTaCon.h"
+ #include "Core/HW/WiimoteEmu/Extension/Turntable.h"
+ #include "Core/HW/WiimoteEmu/Extension/UDrawTablet.h"
++#include "Core/HW/WiimoteEmu/NativeInput.h"
+ 
+ #include "InputCommon/ControllerEmu/ControlGroup/Attachments.h"
+ #include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
+@@ -65,6 +67,18 @@ static const u16 dpad_bitmasks[] = {Wiimote::PAD_UP, Wiimote::PAD_DOWN, Wiimote:
+ static const u16 dpad_sideways_bitmasks[] = {Wiimote::PAD_RIGHT, Wiimote::PAD_LEFT, Wiimote::PAD_UP,
+                                              Wiimote::PAD_DOWN};
+ 
++static std::atomic<const NativeInputHooks*> s_native_input{nullptr};
++
++void SetNativeInput(const NativeInputHooks* hooks)
++{
++  s_native_input.store(hooks, std::memory_order_release);
++}
++
++const NativeInputHooks* GetNativeInput()
++{
++  return s_native_input.load(std::memory_order_acquire);
++}
++
+ void Wiimote::Reset()
+ {
+   const bool want_determinism = Core::WantsDeterminism();
+@@ -393,12 +407,25 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
+   // Update our motion simulations.
+   StepDynamics();
+ 
++  const auto selected_attachment = m_attachments->GetSelectedAttachment();
++  NativeInput native;
++  native.classic = selected_attachment == ExtensionNumber::CLASSIC;
++  const NativeInputHooks* const native_hooks = GetNativeInput();
++  const bool use_native = native_hooks && native_hooks->read(native_hooks->user, m_index, &native);
++
+   // Fetch pressed buttons from user input.
+   target_state->buttons.hex = 0;
+-  m_buttons->GetState(&target_state->buttons.hex, button_bitmasks, m_input_override_function);
+-  m_dpad->GetState(&target_state->buttons.hex,
+-                   IsSideways() ? dpad_sideways_bitmasks : dpad_bitmasks,
+-                   m_input_override_function);
++  if (use_native)
++  {
++    target_state->buttons.hex = native.buttons;
++  }
++  else
++  {
++    m_buttons->GetState(&target_state->buttons.hex, button_bitmasks, m_input_override_function);
++    m_dpad->GetState(&target_state->buttons.hex,
++                     IsSideways() ? dpad_sideways_bitmasks : dpad_bitmasks,
++                     m_input_override_function);
++  }
+ 
+   // Calculate accelerometer state.
+   // Calibration values are 8-bit but we want 10-bit precision, so << 2.
+@@ -432,9 +459,15 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
+   // Build Extension state.
+   // This also allows the extension to perform any regular duties it may need.
+   // (e.g. Nunchuk motion simulation step)
+-  static_cast<Extension*>(
+-      m_attachments->GetAttachmentList()[m_attachments->GetSelectedAttachment()].get())
+-      ->BuildDesiredExtensionState(&target_state->extension);
++  if (use_native && native.classic)
++  {
++    Classic::BuildNativeExtensionState(native, &target_state->extension);
++  }
++  else
++  {
++    static_cast<Extension*>(m_attachments->GetAttachmentList()[selected_attachment].get())
++        ->BuildDesiredExtensionState(&target_state->extension);
++  }
+ }
+ 
+ u8 Wiimote::GetWiimoteDeviceIndex() const
+@@ -728,6 +761,11 @@ bool Wiimote::IsUpright() const
+ 
+ void Wiimote::SetRumble(bool on)
+ {
++  if (const NativeInputHooks* const native_hooks = GetNativeInput())
++  {
++    native_hooks->rumble(native_hooks->user, m_index, on);
++    return;
++  }
+   const auto lock = GetStateLock();
+   m_rumble->controls.front()->control_ref->State(on);
+ }
+diff --git a/Source/Core/Core/IOS/USB/Bluetooth/BTEmu.cpp b/Source/Core/Core/IOS/USB/Bluetooth/BTEmu.cpp
+index 8a7bc50..8da376a 100644
+--- a/Source/Core/Core/IOS/USB/Bluetooth/BTEmu.cpp
++++ b/Source/Core/Core/IOS/USB/Bluetooth/BTEmu.cpp
+@@ -18,6 +18,7 @@
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/HW/Wiimote.h"
+ #include "Core/HW/WiimoteEmu/DesiredWiimoteState.h"
++#include "Core/HW/WiimoteEmu/NativeInput.h"
+ #include "Core/IOS/Device.h"
+ #include "Core/IOS/IOS.h"
+ #include "Core/Movie.h"
+@@ -285,8 +286,12 @@ void BluetoothEmuDevice::Update()
+   {
+     // Throttle before Wii Remote update so input is taken just before needed. (lower input latency)
+     core_timing.Throttle(now);
+-    g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::Bluetooth);
+-    g_controller_interface.UpdateInput();
++    // A native input source reads its own devices.
++    if (!WiimoteEmu::GetNativeInput())
++    {
++      g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::Bluetooth);
++      g_controller_interface.UpdateInput();
++    }
+ 
+     std::array<WiimoteEmu::DesiredWiimoteState, MAX_BBMOTES> wiimote_states;
+     std::array<WiimoteDevice::NextUpdateInputCall, MAX_BBMOTES> next_call;
