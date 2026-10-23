@@ -1,0 +1,242 @@
+diff --git a/src/native_gx/native_gx.cpp b/src/native_gx/native_gx.cpp
+index ccf79dd..135c493 100644
+--- a/src/native_gx/native_gx.cpp
++++ b/src/native_gx/native_gx.cpp
+@@ -11,6 +11,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -78,21 +79,47 @@ struct Stats
+   // frames (waiting for a free frame slot), ending them (handing the frame to
+   // Aurora's submit worker) and idling for guest data.
+   std::chrono::steady_clock::duration decode{}, begin_frame{}, end_frame{}, idle{};
++  // Intervals between frames handed to Aurora; the previous frame's time
++  // carries over so the first interval of each second is counted too.
++  std::chrono::steady_clock::time_point last_frame{};
++  std::chrono::steady_clock::duration frame_sum{}, frame_max{};
++  double frame_sq_ms = 0.0;
++  uint32_t intervals = 0;
++
++  void Frame()
++  {
++    const auto now = std::chrono::steady_clock::now();
++    if (last_frame != std::chrono::steady_clock::time_point{})
++    {
++      const auto interval = now - last_frame;
++      const double ms = std::chrono::duration<double, std::milli>(interval).count();
++      frame_sum += interval;
++      frame_max = std::max(frame_max, interval);
++      frame_sq_ms += ms * ms;
++      ++intervals;
++    }
++    last_frame = now;
++  }
+ 
+   void Report()
+   {
+     const auto now = std::chrono::steady_clock::now();
+     if (!enabled || now - last < std::chrono::seconds(1))
+       return;
++    const double mean =
++        intervals ? std::chrono::duration<double, std::milli>(frame_sum).count() / intervals : 0.0;
++    const double sd = intervals ? std::sqrt(std::max(0.0, frame_sq_ms / intervals - mean * mean)) : 0.0;
+     std::fprintf(stderr,
+                  "[native-gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
+                  "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
+-                 "ms decode %lld / begin frame %lld / end frame %lld / idle %lld\n",
++                 "ms decode %lld / begin frame %lld / end frame %lld / idle %lld, "
++                 "frame ms %.2f sd %.2f max %.2f\n",
+                  frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
+                  peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
+-                 Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle));
++                 Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle), mean, sd,
++                 std::chrono::duration<double, std::milli>(frame_max).count());
+     std::fflush(stderr);
+-    *this = Stats{.enabled = true};
++    *this = Stats{.enabled = true, .last_frame = last_frame};
+     last = now;
+   }
+ 
+@@ -262,6 +289,8 @@ void RenderThread(std::atomic<int>* started)
+         break;
+       case StreamEvent::DisplayCopy:
+         ++s_stats.frames;
++        if (s_stats.enabled)
++          s_stats.Frame();
+         if (const AuroraStats* frame = aurora_get_stats())
+         {
+           s_stats.draws += frame->drawCallCount;
+diff --git a/src/runtime/game.cpp b/src/runtime/game.cpp
+index 3527e63..621891c 100644
+--- a/src/runtime/game.cpp
++++ b/src/runtime/game.cpp
+@@ -11,6 +11,10 @@
+ #include <sstream>
+ #include <vector>
+ 
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
+ namespace moderngekko
+ {
+ namespace
+@@ -26,53 +30,108 @@ std::optional<std::string> HashFileSha256(const std::filesystem::path& path)
+   return Sha256(std::move(*bytes));
+ }
+ 
+-std::optional<std::string> HashDirectorySha256(const std::filesystem::path& root)
++namespace
++{
++struct ListedFile
++{
++  std::string relative;  // generic form, the sort and manifest key
++  std::filesystem::path path;
++  std::uint64_t size;
++  std::uint64_t modified;  // only compared against itself, never converted
++};
++
++#ifdef _WIN32
++// One FindFirstFileExW pass returns every file's size and write time with the
++// listing; std::filesystem stats each file separately, which took ~5 s per
++// call for a 12k-file Wii disc and ran on every launch.
++bool ListFiles(const std::filesystem::path& directory, const std::string& prefix,
++               std::vector<ListedFile>& files)
++{
++  WIN32_FIND_DATAW data;
++  const HANDLE find = FindFirstFileExW((directory / L"*").c_str(), FindExInfoBasic, &data,
++                                       FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
++  if (find == INVALID_HANDLE_VALUE)
++    return GetLastError() == ERROR_FILE_NOT_FOUND;
++  bool ok = true;
++  do
++  {
++    const std::wstring_view name = data.cFileName;
++    if (name == L"." || name == L"..")
++      continue;
++    const std::filesystem::path path = directory / name;
++    std::string relative = prefix + path.filename().generic_string();
++    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
++    {
++      // Like skip_permission_denied, without following junctions.
++      if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
++        ok = ListFiles(path, relative + '/', files);
++    }
++    else
++    {
++      files.push_back({std::move(relative), path,
++                       (std::uint64_t{data.nFileSizeHigh} << 32) | data.nFileSizeLow,
++                       (std::uint64_t{data.ftLastWriteTime.dwHighDateTime} << 32) |
++                           data.ftLastWriteTime.dwLowDateTime});
++    }
++  } while (ok && FindNextFileW(find, &data));
++  ok = ok && GetLastError() == ERROR_NO_MORE_FILES;
++  FindClose(find);
++  return ok;
++}
++#else
++bool ListFiles(const std::filesystem::path& root, const std::string&, std::vector<ListedFile>& files)
+ {
+   std::error_code ec;
+-  if (!std::filesystem::is_directory(root, ec) || ec)
+-    return std::nullopt;
+-  // Relative paths are computed once per file: std::filesystem::relative hits
+-  // the filesystem, and calling it from the sort comparator takes minutes on
+-  // Windows for discs with thousands of files.
+-  std::vector<std::pair<std::string, std::filesystem::path>> files;
+   std::filesystem::recursive_directory_iterator iterator(
+       root, std::filesystem::directory_options::skip_permission_denied, ec);
+   const std::filesystem::recursive_directory_iterator end;
+   while (!ec && iterator != end)
+   {
+     if (iterator->is_regular_file(ec) && !ec)
+-      files.emplace_back(iterator->path().lexically_relative(root).generic_string(),
+-                         iterator->path());
++    {
++      const auto size = iterator->file_size(ec);
++      if (ec)
++        return false;
++      const auto modified = iterator->last_write_time(ec);
++      if (ec)
++        return false;
++      // Relative paths are computed once per file: std::filesystem::relative
++      // hits the filesystem.
++      files.push_back({iterator->path().lexically_relative(root).generic_string(), iterator->path(),
++                       size, static_cast<std::uint64_t>(modified.time_since_epoch().count())});
++    }
+     iterator.increment(ec);
+   }
+-  if (ec)
++  return !ec;
++}
++#endif
++}  // namespace
++
++std::optional<std::string> HashDirectorySha256(const std::filesystem::path& root)
++{
++  std::error_code ec;
++  if (!std::filesystem::is_directory(root, ec) || ec)
++    return std::nullopt;
++  std::vector<ListedFile> files;
++  if (!ListFiles(root, {}, files))
+     return std::nullopt;
+-  std::ranges::sort(files, {}, &std::pair<std::string, std::filesystem::path>::first);
++  std::ranges::sort(files, {}, &ListedFile::relative);
+ 
+   // Hashing every asset reads the whole disc (4GB+ for some Wii games) on each
+   // boot. The result is cached beside the directory, keyed by a fingerprint of
+   // every file's path, size and modification time, so it is only recomputed
+   // when the files actually change.
+   std::vector<std::uint8_t> fingerprint;
+-  std::vector<std::uint64_t> sizes;
+-  sizes.reserve(files.size());
+   const auto append_u64 = [](std::vector<std::uint8_t>& out, std::uint64_t value) {
+     for (int shift = 56; shift >= 0; shift -= 8)
+       out.push_back(static_cast<std::uint8_t>(value >> shift));
+   };
+-  for (const auto& [relative, path] : files)
++  for (const ListedFile& file : files)
+   {
+-    const auto size = std::filesystem::file_size(path, ec);
+-    if (ec)
+-      return std::nullopt;
+-    const auto modified = std::filesystem::last_write_time(path, ec);
+-    if (ec)
+-      return std::nullopt;
+-    sizes.push_back(size);
+-    append_u64(fingerprint, relative.size());
+-    fingerprint.insert(fingerprint.end(), relative.begin(), relative.end());
+-    append_u64(fingerprint, size);
+-    append_u64(fingerprint, static_cast<std::uint64_t>(modified.time_since_epoch().count()));
++    append_u64(fingerprint, file.relative.size());
++    fingerprint.insert(fingerprint.end(), file.relative.begin(), file.relative.end());
++    append_u64(fingerprint, file.size);
++    append_u64(fingerprint, file.modified);
+   }
+   const std::string fingerprint_hash = Sha256(std::move(fingerprint));
+   const auto cache_path =
+@@ -85,15 +144,14 @@ std::optional<std::string> HashDirectorySha256(const std::filesystem::path& root
+   }
+ 
+   std::vector<std::uint8_t> manifest;
+-  for (std::size_t i = 0; i < files.size(); ++i)
++  for (const ListedFile& file : files)
+   {
+-    const auto& [relative, path] = files[i];
+-    const auto hash = HashFileSha256(path);
++    const auto hash = HashFileSha256(file.path);
+     if (!hash)
+       return std::nullopt;
+-    append_u64(manifest, relative.size());
+-    manifest.insert(manifest.end(), relative.begin(), relative.end());
+-    append_u64(manifest, sizes[i]);
++    append_u64(manifest, file.relative.size());
++    manifest.insert(manifest.end(), file.relative.begin(), file.relative.end());
++    append_u64(manifest, file.size);
+     manifest.insert(manifest.end(), hash->begin(), hash->end());
+   }
+   std::string result = Sha256(std::move(manifest));
