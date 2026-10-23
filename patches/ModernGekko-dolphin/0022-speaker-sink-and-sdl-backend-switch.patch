@@ -1,0 +1,111 @@
+diff --git a/Source/Core/Core/HW/WiimoteEmu/Speaker.cpp b/Source/Core/Core/HW/WiimoteEmu/Speaker.cpp
+index a5b1d5c..2a51c43 100644
+--- a/Source/Core/Core/HW/WiimoteEmu/Speaker.cpp
++++ b/Source/Core/Core/HW/WiimoteEmu/Speaker.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "Core/HW/WiimoteEmu/Speaker.h"
+ 
++#include <atomic>
+ #include <cassert>
+ 
+ #include "AudioCommon/AudioCommon.h"
+@@ -19,6 +20,13 @@
+ 
+ namespace WiimoteEmu
+ {
++static std::atomic<NativeSpeakerSink> s_native_sink{nullptr};
++
++void SetNativeSpeakerSink(NativeSpeakerSink sink)
++{
++  s_native_sink.store(sink, std::memory_order_release);
++}
++
+ // Yamaha ADPCM decoder code based on The ffmpeg Project (Copyright (s) 2001-2003)
+ 
+ static const s32 yamaha_difflookup[] = {1,  3,  5,  7,  9,  11,  13,  15,
+@@ -126,13 +134,20 @@ void SpeakerLogic::SpeakerData(const u8* data, int length, float speaker_pan)
+   const u32 l_volume = std::min(u32(std::min(1.f - speaker_pan, 1.f) * volume), 255u);
+   const u32 r_volume = std::min(u32(std::min(1.f + speaker_pan, 1.f) * volume), 255u);
+ 
++  // ADPCM sample rate is thought to be x2.(3000 x2 = 6000).
++  const unsigned int sample_rate = sample_rate_dividend / reg_data.sample_rate;
++
++  if (const NativeSpeakerSink sink = s_native_sink.load(std::memory_order_acquire))
++  {
++    sink(m_wiimote_index, samples.data(), sample_length, sample_rate * 2, u8(l_volume),
++         u8(r_volume));
++    return;
++  }
++
+   auto& system = Core::System::GetInstance();
+   SoundStream* sound_stream = system.GetSoundStream();
+ 
+   sound_stream->GetMixer()->SetWiimoteSpeakerVolume(m_wiimote_index, l_volume, r_volume);
+-
+-  // ADPCM sample rate is thought to be x2.(3000 x2 = 6000).
+-  const unsigned int sample_rate = sample_rate_dividend / reg_data.sample_rate;
+   sound_stream->GetMixer()->PushWiimoteSpeakerSamples(
+       m_wiimote_index, samples.data(), sample_length,
+       Mixer::FIXED_SAMPLE_RATE_DIVIDEND / (sample_rate * 2));
+diff --git a/Source/Core/Core/HW/WiimoteEmu/Speaker.h b/Source/Core/Core/HW/WiimoteEmu/Speaker.h
+index 445ef23..4b1fe85 100644
+--- a/Source/Core/Core/HW/WiimoteEmu/Speaker.h
++++ b/Source/Core/Core/HW/WiimoteEmu/Speaker.h
+@@ -17,6 +17,14 @@ struct ADPCMState
+ 
+ class Wiimote;
+ 
++// A host-side sink for decoded speaker audio, in place of Dolphin's mixer:
++// count mono host-endian samples at sample_rate Hz, with per-channel volumes
++// 0..255 (pan applied).
++using NativeSpeakerSink = void (*)(int wiimote_index, const s16* samples, u32 count,
++                                   u32 sample_rate, u8 left_volume, u8 right_volume);
++// nullptr restores the mixer.
++void SetNativeSpeakerSink(NativeSpeakerSink sink);
++
+ class SpeakerLogic : public I2CSlave
+ {
+   friend class Wiimote;
+diff --git a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
+index 20fd517..35a0922 100644
+--- a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
++++ b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.cpp
+@@ -39,6 +39,13 @@
+ 
+ ControllerInterface g_controller_interface;
+ 
++static bool s_sdl_backend_enabled = true;
++
++void ControllerInterface::SetSDLBackendEnabled(bool enabled)
++{
++  s_sdl_backend_enabled = enabled;
++}
++
+ // We need to save which input channel we are in by thread, so we can access the correct input
+ // update values in different threads by input channel. We start from InputChannel::Host on all
+ // threads as hotkeys are updated from a worker thread, but UI can read from the main thread. This
+@@ -68,7 +75,8 @@ void ControllerInterface::Initialize(const WindowSystemInfo& wsi)
+   m_input_backends.emplace_back(ciface::Quartz::CreateInputBackend(this));
+ #endif
+ #ifdef CIFACE_USE_SDL
+-  m_input_backends.emplace_back(ciface::SDL::CreateInputBackend(this));
++  if (s_sdl_backend_enabled)
++    m_input_backends.emplace_back(ciface::SDL::CreateInputBackend(this));
+ #endif
+ #ifdef CIFACE_USE_ANDROID
+   m_input_backends.emplace_back(ciface::Android::CreateInputBackend(this));
+diff --git a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
+index 8f7f4ba..e1f87e2 100644
+--- a/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
++++ b/Source/Core/InputCommon/ControllerInterface/ControllerInterface.h
+@@ -83,6 +83,9 @@ public:
+ 
+   ControllerInterface() : m_is_init(false) {}
+   void Initialize(const WindowSystemInfo& wsi);
++  // Call before Initialize: false leaves SDL to a host that reads gamepads itself
++  // (the SDL backend pumps SDL events on its own thread and quits SDL on shutdown).
++  static void SetSDLBackendEnabled(bool enabled);
+   // Only call from one thread at a time.
+   void ChangeWindow(void* hwnd, WindowChangeReason reason = WindowChangeReason::Other);
+   // Can be called by any thread at any time (when initialized).
