@@ -5,9 +5,10 @@ A static recompilation of **NiGHTS: Journey of Dreams** (Wii) to native PC code.
 The game's `main.dol` is translated from PowerPC to C by
 [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and compiled into a
 native module. The module runs on
-[ModernGekko](https://github.com/ExpansionPak/ModernGekko), a runtime built on
-a Dolphin-derived core. Every guest instruction runs as native code, with no
-interpreter or JIT fallback. The long-term goal is a fully native port that
+[ModernGekko](https://github.com/ExpansionPak/ModernGekko), either on a
+Dolphin-derived core or on its own [native machine](#native-machine), which
+has no Dolphin code at all. Every game instruction runs as native code, with
+no interpreter or JIT fallback. The long-term goal is a fully native port that
 runs at high, interpolated frame rates, with Dolphin reduced to nothing (see
 [Roadmap](#roadmap)).
 
@@ -26,7 +27,8 @@ gameplay.
 |---|---|
 | Supported version | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
 | Gameplay | Full speed: 30 FPS, the game's native rate, with even frame pacing (33.4 ms, σ ≤ 1.5 ms) |
-| Renderers | Dolphin's Vulkan/OpenGL backends (default), or the [native renderer](#native-renderer) |
+| Runners | `make run`: the Dolphin-derived core. `make native`: the [native machine](#native-machine), no Dolphin |
+| Renderers | Dolphin's Vulkan/OpenGL backends (default), or the [native renderer](#native-renderer) (always, on the native machine) |
 | Audio | Native DSP/AX emulation, played through SDL3 |
 | Input | SDL3 gamepads (any Xbox, PlayStation or Switch layout), mapped to an emulated Classic Controller (see [Controls](#controls)) |
 | Startup | ~4.5 s to the first frame from a savestate (the asset hash is cached after the first boot) |
@@ -36,8 +38,9 @@ gameplay.
 Known limitations:
 
 - The intro FMV runs at ~19 FPS. It is CPU-bound in the game's video decoder.
-- Without a frame cap, gameplay reaches ~100 FPS (it was ~32 before phase 3),
-  so there is about 3× headroom at the game's 30 FPS.
+- Without a frame cap, gameplay reaches ~100 FPS on the Dolphin core and
+  ~113 on the native machine (it was ~32 before phase 3), so there is more
+  than 3× headroom at the game's 30 FPS.
 
 ## Quick start
 
@@ -107,6 +110,7 @@ e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20
 | `make extract ISO=...` | Extract the disc into `extracted/nights/` |
 | `make recompile GAME=nights` | Recompile and build the module without launching |
 | `make run GAME=nights` | Recompile if needed and launch the game |
+| `make native GAME=nights` | The same on the [native machine](#native-machine) |
 | `make llvm` / `make llvm-run` | Same as `recompile` / `run`, with the LLVM backend |
 | `make symbols GAME=nights` | Identify the SDK functions in `main.dol` (writes `build/symbols/nights.map`) |
 | `make clean-extracted` | Remove the extracted disc and compiled modules |
@@ -166,6 +170,44 @@ rates.
 > Steam's frame pacer, can hang or crash the native renderer at startup. Close
 > them or exclude the game if that happens.
 
+## Native machine
+
+`make native GAME=nights` runs the module on `moderngekko-native`, a Wii
+built for this game in ModernGekko's `src/native`, with no Dolphin code. It
+boots the disc cold and plays through to gameplay at full speed.
+
+| Part | What it does |
+|---|---|
+| CPU | The recompiled module wherever it covers the pc; an interpreter with the same semantics for the rest (exception stubs, the apploader). Timebase, decrementer, exceptions, the locked L1 cache and its DMA |
+| Hardware | Processor, video, serial, expansion and audio interfaces, the CP/PE registers and the Starlet IPC/GPIO block, timed the way Dolphin models them |
+| Scheduler | One tick per CPU cycle; the CPU runs in slices that end at the next event |
+| IOS | The kernel's IPC mailbox, fd table and reply queue, with `/dev/di`, `/dev/fs` (NAND in a host directory, Dolphin's metadata format), `/dev/es`, `/dev/stm`, `/dev/net/kd` and Bluetooth with emulated Wii Remotes |
+| Boot | The system menu's launch of a disc title, then the apploader on the interpreter |
+| Host | Native GX for video, the native DSP and SDL3 for audio, SDL3 gamepads |
+
+Savestates (`--load-state`, automation `save_state`) are the machine's own
+format. Dolphin-core states don't load in it.
+
+Options, after `RUN_ARGS=`: `--load-state <file>`, `--automation-dir <dir>`
+(`save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad` and `stop`,
+as for the Dolphin core), `--unthrottled`,
+`--no-vsync`, `--user <dir>`.
+
+Measured on the reference machine:
+
+- **Speed:** ~113 FPS uncapped in Will's first stage, against ~97 on the
+  Dolphin core. A cold boot to the title screen takes the same time on both.
+  At that rate the CPU thread and the render thread (~6.6 ms of GX decode per
+  frame) are about equally busy.
+- **Guest memory:** the guest's whole 32-bit address space is one host
+  reservation. MEM1, MEM2 and the locked L1 cache are views of one shared
+  memory section at their cached and uncached addresses, so a recompiled load
+  or store is a single byte-swapping access off a base pointer. Only the
+  hardware register range (`0xC8000000`–`0xCFFFFFFF`) leaves inline code. A
+  stray access elsewhere is backed with zeros and logged.
+- **Frame pacing:** 33.4 ms, σ ≈ 0.2 ms with the frame cap. The cap wakes on
+  a high-resolution waitable timer and spins the last 0.5 ms.
+
 ## Controls
 
 NiGHTS supports the Classic Controller. Each connected gamepad drives one Wii
@@ -204,7 +246,7 @@ replaced piece by piece rather than extended.
 |---|---|---|
 | 1. SDK symbol map | Identify the Nintendo SDK functions in `main.dol` (no map ships with the game) using Dolphin's signature database | Done: 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the game's GX stream with Aurora instead of Dolphin's video core | Done (FIFO level): the native renderer |
-| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | In progress. Done: SDK natives, direct calls, sparse entry switches, VI batching, native DSP/AX, SDL3 audio, SDL3 input, native IOS disc/STM/KD devices (32 → ~100 FPS uncapped). Left: interrupts/alarms/timing, the rest of IOS (FS, ES, Bluetooth), the Dolphin chassis itself; then the stage RSO modules |
+| 3. Native OS/SDK | Threads, alarms, interrupts, video interface, disc/file system, Wii Remote and audio as native code, then drop the Dolphin core | Done: SDK natives, direct calls, sparse entry switches, VI batching, native DSP/AX, SDL3 audio, SDL3 input, native IOS, and the [native machine](#native-machine), which runs the game from cold boot with no Dolphin code (32 → ~100–113 FPS uncapped). Left: the stage RSO modules |
 | 4. Interpolation | Render between game ticks for 60–240 FPS gameplay | Planned |
 
 ## Patches
@@ -316,6 +358,27 @@ replaced piece by piece rather than extended.
   Dolphin. Cold boot audio is bit-identical to Dolphin's devices for the
   whole 62 s that boot is deterministic, steady-state audio too, and
   gameplay is ~1% faster.
+- **`0022` Native machine.** `moderngekko-native` (`src/native`) and
+  `moderngekko-port run-native`; see [Native machine](#native-machine).
+  `/dev/fs`, `/dev/es` and Bluetooth join `src/ios`. Along the way:
+  - The locked-cache DMA takes physical addresses as well as effective ones.
+    The SDK passes MEM2 matrix arrays as physical addresses, and dropping
+    them left every indexed matrix zero, so the 3D scene was black.
+  - When the module reaches the idle loop, the CPU leaves for the scheduler
+    instead of re-entering native code. Re-entering ran a full
+    wake/poll/sleep round of the game's worker thread for every interrupt,
+    ~45% of the time in gameplay. Gameplay went from 54 to ~90 FPS
+    uncapped.
+  - The disc directory opens and seeks files with the platform's wide-path,
+    64-bit calls.
+  - CPU ABI 7 adds `flat_base`, the guest address space mapped 1:1 (see
+    [Native machine](#native-machine)). Modules index it directly instead of
+    going through the 64 KiB-slice table: 90 → ~113 FPS uncapped, together
+    with the next fix.
+  - The CPU thread waits for the render thread to drain on a semaphore the
+    render thread signals, not a 1 ms sleep, which Windows rounds to its
+    15.6 ms timer tick. With flat memory the sleep alone held the game at
+    64 FPS.
 
 **ModernGekko's Dolphin fork**
 
@@ -405,6 +468,12 @@ replaced piece by piece rather than extended.
   the map for the code that casts them. DVDInterface completions and console
   buttons reach the native `/dev/di` and `/dev/stm`, and a CoreTiming event
   carries the native devices' timers.
+- **`0024` Flat guest memory.** GXRuntime's `mem_read*_at`/`mem_write*_at`
+  index `CPUState::flat_base` when a module is built with
+  `GXRUNTIME_FLAT_MEMORY` (the module template sets it), with one range check
+  for the hardware registers. The Dolphin core hands modules its fastmem
+  arena's logical base. Modules also carry line tables now, for profiling;
+  code generation is unchanged.
 
 **DolRecomp, as vendored in ModernGekko's Dolphin fork**
 
@@ -435,6 +504,10 @@ replaced piece by piece rather than extended.
   compiler optimize across the instructions in between. 96 → 101 FPS, and
   module builds go from 42 to 27 min. `DOLRECOMP_C_SPARSE_ENTRIES=0` restores
   the dense switch.
+- **`0007` Flat base local, CR selects.** Each generated function loads
+  `ctx->flat_base` once into a local, so memory accesses don't reload it
+  after every store through `ctx`. Compares set a CR field with one select
+  chain instead of three conditional ORs.
 
 **Per-game settings (`config/GameSettings/R7EE8P.ini`)**
 
