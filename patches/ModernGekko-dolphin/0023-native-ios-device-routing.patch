@@ -1,0 +1,270 @@
+diff --git a/Source/Core/Core/HW/DVD/DVDInterface.h b/Source/Core/Core/HW/DVD/DVDInterface.h
+index 2e3c562..0bdc4a3 100644
+--- a/Source/Core/Core/HW/DVD/DVDInterface.h
++++ b/Source/Core/Core/HW/DVD/DVDInterface.h
+@@ -142,6 +142,7 @@ public:
+   void SetDisc(std::unique_ptr<DiscIO::VolumeDisc> disc,
+                std::optional<std::vector<std::string>> auto_disc_change_paths);
+   bool IsDiscInside() const;
++  u64 DiscEndOffset() const { return m_disc_end_offset; }
+   void EjectDisc(const Core::CPUThreadGuard& guard, EjectCause cause);
+   void ChangeDisc(const Core::CPUThreadGuard& guard, const std::vector<std::string>& paths);
+   void ChangeDisc(const Core::CPUThreadGuard& guard, const std::string& new_path);
+diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVDThread.cpp
+index c11d0da..28a09bc 100644
+--- a/Source/Core/Core/HW/DVD/DVDThread.cpp
++++ b/Source/Core/Core/HW/DVD/DVDThread.cpp
+@@ -141,6 +141,20 @@ IOS::ES::TicketReader DVDThread::GetTicket(const DiscIO::Partition& partition)
+   return m_disc->GetTicket(partition);
+ }
+ 
++bool DVDThread::ReadDirect(u64 offset, u32 length, u8* buffer, const DiscIO::Partition& partition)
++{
++  if (!m_disc)
++    return false;
++  WaitUntilIdle();
++  return m_disc->Read(offset, length, buffer, partition);
++}
++
++DiscIO::Partition DVDThread::GetGamePartition()
++{
++  // GetGamePartition is thread-safe, so calling WaitUntilIdle isn't necessary.
++  return m_disc ? m_disc->GetGamePartition() : DiscIO::PARTITION_NONE;
++}
++
+ bool DVDThread::IsInsertedDiscRunning()
+ {
+   if (!m_disc)
+diff --git a/Source/Core/Core/HW/DVD/DVDThread.h b/Source/Core/Core/HW/DVD/DVDThread.h
+index 7b40e43..d1f8074 100644
+--- a/Source/Core/Core/HW/DVD/DVDThread.h
++++ b/Source/Core/Core/HW/DVD/DVDThread.h
+@@ -71,6 +71,10 @@ public:
+   IOS::ES::TMDReader GetTMD(const DiscIO::Partition& partition);
+   IOS::ES::TicketReader GetTicket(const DiscIO::Partition& partition);
+   bool IsInsertedDiscRunning();
++  // For a drive emulated outside DVDInterface: reads on the calling (CPU)
++  // thread, after the queued reads.
++  bool ReadDirect(u64 offset, u32 length, u8* buffer, const DiscIO::Partition& partition);
++  DiscIO::Partition GetGamePartition();
+   // This function returns true and calls SConfig::SetRunningGameMetadata(Volume&, Partition&)
+   // if both of the following conditions are true:
+   // - A disc is inserted
+diff --git a/Source/Core/Core/HW/ProcessorInterface.cpp b/Source/Core/Core/HW/ProcessorInterface.cpp
+index 7b999ac..14318fe 100644
+--- a/Source/Core/Core/HW/ProcessorInterface.cpp
++++ b/Source/Core/Core/HW/ProcessorInterface.cpp
+@@ -239,6 +239,9 @@ void ProcessorInterfaceManager::IOSNotifyResetButtonCallback(Core::System& syste
+   if (!ios)
+     return;
+ 
++  const auto* native = IOS::HLE::GetNativeDevices();
++  if (native && native->stm_button && native->stm_button(*ios, false))
++    return;
+   auto stm = ios->GetDeviceByName("/dev/stm/eventhook");
+   if (stm)
+     std::static_pointer_cast<IOS::HLE::STMEventHookDevice>(stm)->ResetButton();
+@@ -251,6 +254,9 @@ void ProcessorInterfaceManager::IOSNotifyPowerButtonCallback(Core::System& syste
+   if (!ios)
+     return;
+ 
++  const auto* native = IOS::HLE::GetNativeDevices();
++  if (native && native->stm_button && native->stm_button(*ios, true))
++    return;
+   auto stm = ios->GetDeviceByName("/dev/stm/eventhook");
+   if (stm)
+     std::static_pointer_cast<IOS::HLE::STMEventHookDevice>(stm)->PowerButton();
+diff --git a/Source/Core/Core/IOS/DI/DI.cpp b/Source/Core/Core/IOS/DI/DI.cpp
+index 4a32c44..0a5c349 100644
+--- a/Source/Core/Core/IOS/DI/DI.cpp
++++ b/Source/Core/Core/IOS/DI/DI.cpp
+@@ -627,6 +627,14 @@ void DIDevice::InterruptFromDVDInterface(DVD::DIInterruptType interrupt_type)
+     break;
+   }
+ 
++  auto* ios = Core::System::GetInstance().GetIOS();
++  const NativeDevices* native = GetNativeDevices();
++  if (ios && native && native->di_interrupt &&
++      native->di_interrupt(*ios, result == DIResult::Success))
++  {
++    return;
++  }
++
+   auto di = GetDevice();
+   if (di)
+   {
+diff --git a/Source/Core/Core/IOS/IOS.cpp b/Source/Core/Core/IOS/IOS.cpp
+index 39ad629..1a8ba33 100644
+--- a/Source/Core/Core/IOS/IOS.cpp
++++ b/Source/Core/Core/IOS/IOS.cpp
+@@ -66,6 +66,18 @@ constexpr u64 ENQUEUE_REQUEST_FLAG = 0x100000000ULL;
+ static CoreTiming::EventType* s_event_enqueue;
+ static CoreTiming::EventType* s_event_finish_ppc_bootstrap;
+ static CoreTiming::EventType* s_event_finish_ios_boot;
++static CoreTiming::EventType* s_event_native;
++static const NativeDevices* s_native_devices = nullptr;
++
++void SetNativeDevices(const NativeDevices* devices)
++{
++  s_native_devices = devices;
++}
++
++const NativeDevices* GetNativeDevices()
++{
++  return s_native_devices;
++}
+ 
+ constexpr u32 ADDR_LEGACY_MEM_SIZE = 0x28;
+ constexpr u32 ADDR_LEGACY_ARENA_LOW = 0x30;
+@@ -328,11 +340,15 @@ EmulationKernel::EmulationKernel(Core::System& system, u64 title_id)
+   AddDevice(std::make_unique<ESDevice>(*this, *m_es_core, "/dev/es"));
+ 
+   AddStaticDevices();
++  if (s_native_devices && s_native_devices->create)
++    s_native_devices->create(*this);
+ }
+ 
+ EmulationKernel::~EmulationKernel()
+ {
+   m_system.GetCoreTiming().RemoveAllEvents(s_event_enqueue);
++  m_system.GetCoreTiming().RemoveAllEvents(s_event_native);
++  m_native_device_map.clear();
+ 
+   m_device_map.clear();
+   m_socket_manager.reset();
+@@ -640,6 +656,30 @@ std::shared_ptr<Device> EmulationKernel::GetDeviceByName(std::string_view device
+   return iterator != m_device_map.end() ? iterator->second : nullptr;
+ }
+ 
++void EmulationKernel::AddNativeDevice(std::shared_ptr<Device> device)
++{
++  ASSERT(m_device_map.contains(device->GetDeviceName()));
++  m_native_device_map[device->GetDeviceName()] = std::move(device);
++}
++
++std::shared_ptr<Device> EmulationKernel::GetNativeDevice(std::string_view device_name)
++{
++  const auto iterator = m_native_device_map.find(device_name);
++  return iterator != m_native_device_map.end() ? iterator->second : nullptr;
++}
++
++void EmulationKernel::ScheduleNativeEvent(s64 cycles, u64 userdata)
++{
++  m_system.GetCoreTiming().ScheduleEvent(cycles, s_event_native, userdata);
++}
++
++std::shared_ptr<Device> EmulationKernel::GetIPCDevice(std::string_view device_name)
++{
++  if (auto device = GetNativeDevice(device_name))
++    return device;
++  return GetDeviceByName(device_name);
++}
++
+ std::shared_ptr<Device> EmulationKernel::GetDeviceByFileDescriptor(const u32 fd)
+ {
+   if (fd < IPC_MAX_FDS)
+@@ -677,7 +717,7 @@ std::optional<IPCReply> EmulationKernel::OpenDevice(OpenRequest& request)
+   }
+   else if (request.path.starts_with("/dev/"))
+   {
+-    device = GetDeviceByName(request.path);
++    device = GetIPCDevice(request.path);
+   }
+   else if (request.path.starts_with('/'))
+   {
+@@ -879,8 +919,11 @@ void EmulationKernel::DoState(PointerWrap& p)
+   if (m_socket_manager)
+     m_socket_manager->DoState(p);
+ 
+-  for (const auto& entry : m_device_map)
+-    entry.second->DoState(p);
++  for (const auto& [name, device] : m_device_map)
++  {
++    const auto native = m_native_device_map.find(name);
++    (native != m_native_device_map.end() ? native->second : device)->DoState(p);
++  }
+ 
+   if (p.IsReadMode())
+   {
+@@ -898,7 +941,7 @@ void EmulationKernel::DoState(PointerWrap& p)
+         {
+           std::string device_name;
+           p.Do(device_name);
+-          m_fdmap[i] = GetDeviceByName(device_name);
++          m_fdmap[i] = GetIPCDevice(device_name);
+           break;
+         }
+         case Device::DeviceType::OH0:
+@@ -974,6 +1017,13 @@ void Init(Core::System& system)
+       "IOSFinishIOSBoot",
+       [](Core::System& system_, u64 ios_title_id, s64) { FinishIOSBoot(system_, ios_title_id); });
+ 
++  s_event_native =
++      core_timing.RegisterEvent("IOSNativeDevice", [](Core::System& system_, u64 userdata, s64) {
++        auto* ios = system_.GetIOS();
++        if (ios && s_native_devices && s_native_devices->event)
++          s_native_devices->event(*ios, userdata);
++      });
++
+   DIDevice::s_finish_executing_di_command =
+       core_timing.RegisterEvent("FinishDICommand", DIDevice::FinishDICommandCallback);
+ 
+diff --git a/Source/Core/Core/IOS/IOS.h b/Source/Core/Core/IOS/IOS.h
+index a79c1bd..ee6b19b 100644
+--- a/Source/Core/Core/IOS/IOS.h
++++ b/Source/Core/Core/IOS/IOS.h
+@@ -40,6 +40,7 @@ class ESDevice;
+ class FSCore;
+ class FSDevice;
+ class WiiSockMan;
++class EmulationKernel;
+ 
+ struct Request;
+ struct OpenRequest;
+@@ -147,6 +148,23 @@ protected:
+   std::shared_ptr<WiiSockMan> m_socket_manager;
+ };
+ 
++// Devices the host serves itself under the names of devices in the map. The
++// map keeps Dolphin's devices for the code that reaches them directly; the
++// game's IPC goes to the native ones.
++struct NativeDevices
++{
++  // Adds the host's devices to a new kernel (EmulationKernel::AddNativeDevice).
++  void (*create)(EmulationKernel& kernel);
++  // An EmulationKernel::ScheduleNativeEvent event.
++  void (*event)(EmulationKernel& kernel, u64 userdata);
++  // DVDInterface finished a /dev/di command: true if a native /dev/di took it.
++  bool (*di_interrupt)(EmulationKernel& kernel, bool success);
++  // A console button press: true if a native /dev/stm/eventhook took it.
++  bool (*stm_button)(EmulationKernel& kernel, bool power);
++};
++void SetNativeDevices(const NativeDevices* devices);
++const NativeDevices* GetNativeDevices();
++
+ // HLE for an IOS tied to emulation: base kernel which may have additional modules loaded.
+ class EmulationKernel final : public Kernel
+ {
+@@ -187,8 +205,14 @@ public:
+ 
+   Core::System& GetSystem() const { return m_system; }
+ 
++  void AddNativeDevice(std::shared_ptr<Device> device);
++  std::shared_ptr<Device> GetNativeDevice(std::string_view device_name);
++  void ScheduleNativeEvent(s64 cycles, u64 userdata);
++
+ private:
+   void ExecuteIPCCommand(u32 address);
++  // The device the game reaches under this name.
++  std::shared_ptr<Device> GetIPCDevice(std::string_view device_name);
+   std::optional<IPCReply> HandleIPCCommand(const Request& request);
+ 
+   void AddDevice(std::unique_ptr<Device> device);
+@@ -201,6 +225,7 @@ private:
+ 
+   static constexpr u8 IPC_MAX_FDS = 0x18;
+   std::map<std::string, std::shared_ptr<Device>, std::less<>> m_device_map;
++  std::map<std::string, std::shared_ptr<Device>, std::less<>> m_native_device_map;
+   // TODO: make this fdmap per process.
+   std::array<std::shared_ptr<Device>, IPC_MAX_FDS> m_fdmap;
+ 
