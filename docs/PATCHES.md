@@ -244,6 +244,11 @@ the reference machine (i5-9600KF, RTX 4060) at the time of each change.
     replayed at the display's refresh rate with blended matrices, lights and
     post-transform texture matrices. See
     [Frame interpolation](../README.md#frame-interpolation).
+    Draws are paired with the older frame's in two passes: first every draw
+    exactly where an older one is, then the rest with the nearest close
+    instance of their model. In one pass a tree coming into view next to
+    another instance of its model took that one's older draw and slid
+    across from it.
   - The window keeps the console's aspect ratio and letterboxes when it
     can't (maximized, fullscreen).
   - A window resize is applied at the start of the next guest frame, and
