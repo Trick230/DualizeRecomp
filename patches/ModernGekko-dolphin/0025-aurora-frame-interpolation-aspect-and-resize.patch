@@ -547,10 +547,10 @@ index 866c02d..2c891d1 100644
  wgpu::BindGroup find_bind_group(BindGroupRef id);
 diff --git a/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp b/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp
 new file mode 100644
-index 0000000..e91bd2a
+index 0000000..c55e5db
 --- /dev/null
 +++ b/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp
-@@ -0,0 +1,1388 @@
+@@ -0,0 +1,1391 @@
 +#include "frame_interp.hpp"
 +
 +#include "render_worker.hpp"
@@ -689,7 +689,10 @@ index 0000000..e91bd2a
 +
 +// The older draw's slot holding what the newer one loaded into a slot: the
 +// one loaded from the same index, or for inline loads the same slot if that
-+// was inline too.
++// was inline too. Else the same slot: the draws were paired by where they
++// are, and the game builds some models' matrices in a scratch buffer whose
++// order changes from frame to frame. The plausibility checks reject a wrong
++// pair.
 +uint8_t pair_slot(uint32_t source, uint32_t slot, const DrawRecord& other, uint32_t MatrixSources::* field) {
 +  if (source == 0) {
 +    return other.sources[slot].*field == 0 ? static_cast<uint8_t>(slot) : NoSlot;
@@ -699,7 +702,7 @@ index 0000000..e91bd2a
 +      return static_cast<uint8_t>(j);
 +    }
 +  }
-+  return NoSlot;
++  return static_cast<uint8_t>(slot);
 +}
 +
 +bool g_enabled = false;
