@@ -55,8 +55,8 @@ are **interpolated** at the display's refresh rate.
 
 **Known issues**
 
-- Interpolation: some trees and the ground shadow can still waver while the
-  camera turns. Being worked on.
+- Interpolation: some trees close by can briefly jitter as you walk up to
+  them. Being worked on.
 - The intro FMV runs at ~19 FPS, bound by the game's own video decoder. FMVs
   aren't interpolated.
 - The stage RSO modules still run on the Dolphin core's JIT; on the native

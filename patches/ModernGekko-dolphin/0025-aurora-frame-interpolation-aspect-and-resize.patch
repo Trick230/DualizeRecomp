@@ -547,10 +547,10 @@ index 866c02d..2c891d1 100644
  wgpu::BindGroup find_bind_group(BindGroupRef id);
 diff --git a/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp b/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp
 new file mode 100644
-index 0000000..d8a0435
+index 0000000..8ef4ca2
 --- /dev/null
 +++ b/GXRuntime/graphics/aurora/lib/gfx/frame_interp.cpp
-@@ -0,0 +1,1434 @@
+@@ -0,0 +1,1463 @@
 +#include "frame_interp.hpp"
 +
 +#include "render_worker.hpp"
@@ -903,6 +903,8 @@ index 0000000..d8a0435
 +SlotIndex g_byKey;
 +SlotIndex g_byGroup;
 +std::vector<uint8_t> g_used;
++// The older draw paired with each newer one.
++std::vector<uint32_t> g_pairs;
 +
 +// A draw's identity: a hash (its key, or for geometry whose size changes its
 +// group) and the address its current matrix was loaded from. The game keeps
@@ -1206,8 +1208,10 @@ index 0000000..d8a0435
 +// Only one close by, or one that loaded most of its matrices from where
 +// this one did (a batch of instances, its current matrix unused): an
 +// instance just come into view would otherwise pair with another (a rock
-+// with the next rock along) and slide across to it.
-+uint32_t pick(SlotIndex& index, const DrawRecord& draw, HashType key, const float* prevBase, const float* mtx) {
++// with the next rock along) and slide across to it. With exact, only the
++// one exactly where it is.
++uint32_t pick(SlotIndex& index, const DrawRecord& draw, HashType key, const float* prevBase, const float* mtx,
++              bool exact) {
 +  const auto it = index.ranges.find(key);
 +  if (it == index.ranges.end()) {
 +    return NoMatch;
@@ -1221,7 +1225,7 @@ index 0000000..d8a0435
 +  // (trees), the order the game draws them in changes as the camera turns.
 +  const Vec3 target = translation(mtx);
 +  const float tight = 1e-4f * length2(target) + 1e-4f;
-+  uint32_t exact = NoMatch;
++  uint32_t found = NoMatch;
 +  float exactDistance = tight;
 +  for (uint32_t k = range.next; k < range.end; ++k) {
 +    const uint32_t j = index.slots[k].index;
@@ -1232,11 +1236,11 @@ index 0000000..d8a0435
 +    const float distance = std::min(distance2(transform_point(g_camera, other), target), distance2(other, target));
 +    if (distance < exactDistance) {
 +      exactDistance = distance;
-+      exact = j;
++      found = j;
 +    }
 +  }
-+  if (exact != NoMatch) {
-+    return exact;
++  if (found != NoMatch || exact) {
++    return found;
 +  }
 +  const float nearby = near_enough(target);
 +  uint32_t best = NoMatch;
@@ -1335,18 +1339,23 @@ index 0000000..d8a0435
 +// The older frame's draw with this one's identity. Some draws share one: a
 +// model's instances whose matrices the game builds in one scratch buffer
 +// (distant trees). Among those, as in pick, the one exactly where this one
-+// is, else the plausible one closest to it.
-+uint32_t pick_identity(const IdentityIndex& index, const DrawRecord& draw, const float* prevBase, const float* mtx) {
++// is, else the plausible one closest to it. With exact, only the one exactly
++// where it is, or the one draw with the identity.
++uint32_t pick_identity(const IdentityIndex& index, const DrawRecord& draw, const float* prevBase, const float* mtx,
++                       bool exact) {
 +  const uint64_t id = identity(draw, index.hash);
 +  const auto it = id == 0 ? index.first.end() : index.first.find(id);
 +  if (it == index.first.end()) {
 +    return NoMatch;
 +  }
 +  uint32_t j = it->second;
++  if (index.next[j] == NoMatch) {
++    return g_used[j] ? NoMatch : j;
++  }
 +  while (j != NoMatch && g_used[j]) {
 +    j = index.next[j];
 +  }
-+  if (j == NoMatch || index.next[j] == NoMatch) {
++  if (j == NoMatch || (!exact && index.next[j] == NoMatch)) {
 +    return j;
 +  }
 +  const Vec3 target = translation(mtx);
@@ -1363,6 +1372,9 @@ index 0000000..d8a0435
 +    const float distance = std::min(distance2(transform_point(g_camera, at), target), distance2(at, target));
 +    if (distance < tight) {
 +      return j;
++    }
++    if (exact) {
++      continue;
 +    }
 +    if (distance < bestDistance && (distance < nearby || shares_sources(draw, g_prev.draws[j])) &&
 +        plausible_move(other, mtx)) {
@@ -1410,28 +1422,45 @@ index 0000000..d8a0435
 +  const auto* curBase = reinterpret_cast<const float*>(g_cur.uniforms.data());
 +  const size_t prevSize = g_prev.uniforms.size();
 +  const size_t curSize = g_cur.uniforms.size();
++  // Each draw exactly where an older one is takes it first: one just come
++  // into view next to another instance of its model (a pair of trees) would
++  // otherwise take that one's older draw as the closest and slide across.
++  g_pairs.assign(g_cur.draws.size(), NoMatch);
++  for (const bool exact : {true, false}) {
++    for (size_t i = 0; i < g_cur.draws.size(); ++i) {
++      const auto& draw = g_cur.draws[i];
++      if (g_pairs[i] != NoMatch || draw.offset + BlendBytes > curSize) {
++        continue;
++      }
++      const float* mtx = current_matrix(curBase, draw);
++      uint32_t j = pick_identity(g_byKeyIdentity, draw, prevBase, mtx, exact);
++      if (j == NoMatch) {
++        j = pick_identity(g_byGroupIdentity, draw, prevBase, mtx, exact);
++      }
++      if (j == NoMatch) {
++        j = pick(g_byKey, draw, draw.key, prevBase, mtx, exact);
++      }
++      if (j == NoMatch) {
++        j = pick(g_byGroup, draw, draw.group, prevBase, mtx, exact);
++      }
++      if (j != NoMatch) {
++        g_used[j] = 1;
++        g_pairs[i] = j;
++      }
++    }
++  }
 +  uint32_t matched = 0;
 +  uint32_t implausible = 0;
-+  for (const auto& draw : g_cur.draws) {
++  for (size_t i = 0; i < g_cur.draws.size(); ++i) {
++    const auto& draw = g_cur.draws[i];
 +    if (draw.offset + BlendBytes > curSize) {
 +      continue;
 +    }
-+    const float* mtx = current_matrix(curBase, draw);
-+    uint32_t j = pick_identity(g_byKeyIdentity, draw, prevBase, mtx);
++    const uint32_t j = g_pairs[i];
 +    if (j == NoMatch) {
-+      j = pick_identity(g_byGroupIdentity, draw, prevBase, mtx);
-+    }
-+    if (j == NoMatch) {
-+      j = pick(g_byKey, draw, draw.key, prevBase, mtx);
-+    }
-+    if (j == NoMatch) {
-+      j = pick(g_byGroup, draw, draw.group, prevBase, mtx);
-+    }
-+    if (j == NoMatch) {
-+      g_unmatched.push_back(static_cast<uint32_t>(&draw - g_cur.draws.data()));
++      g_unmatched.push_back(static_cast<uint32_t>(i));
 +      continue;
 +    }
-+    g_used[j] = 1;
 +    const auto& other = prev[j];
 +    // Draws with the same GX state share a uniform block; the first match
 +    // blends it.
