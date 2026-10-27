@@ -1,7 +1,8 @@
-[submodule "lib/ModernGekko"]
-	path = lib/ModernGekko
-	url = https://github.com/ExpansionPak/ModernGekko.git
-	ignore = dirty
-[submodule "lib/DolRecomp"]
-	path = lib/DolRecomp
-	url = https://github.com/ExpansionPak/DolRecomp.git
+[submodule "tools/DolRecomp"]
+	path = tools/DolRecomp
+	url = https://github.com/Trick230/DolRecomp.git
+	branch = dualize
+[submodule "thirdparty/aurora"]
+	path = thirdparty/aurora
+	url = https://github.com/Trick230/aurora.git
+	branch = dualize

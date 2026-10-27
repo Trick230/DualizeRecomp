@@ -4,7 +4,7 @@
 
 **NiGHTS: Journey of Dreams (Wii), statically recompiled to native PC code**
 
-Native CPU · native Wii machine · WebGPU renderer · interpolated up to your refresh rate
+Native CPU · native Wii runtime · WebGPU renderer · interpolated up to your refresh rate
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x86__64-0078d4)
 ![Game](https://img.shields.io/badge/game-R7EE8P%20(USA)-7b3fe4)
@@ -13,13 +13,13 @@ Native CPU · native Wii machine · WebGPU renderer · interpolated up to your r
 
 </div>
 
-The game's `main.dol` and its RSO modules are translated from PowerPC to C by
-[DolRecomp](https://github.com/ExpansionPak/DolRecomp) and compiled into one
-native module. That module runs on
-[ModernGekko](https://github.com/ExpansionPak/ModernGekko), either on its own
-**native Wii machine** (no Dolphin code) or on a Dolphin-derived core kept
-for reference. The game still ticks at its original 30 Hz; frames in between
-are **interpolated** at the display's refresh rate.
+The game's `main.dol` and its RSO modules are translated from PowerPC to C at
+build time by our fork of [DolRecomp](https://github.com/Trick230/DolRecomp/tree/dualize)
+and compiled into the executable, together with a runtime written for this
+game: its own Wii hardware, IOS, DSP, audio and input, and a GX renderer on
+our fork of [Aurora](https://github.com/Trick230/aurora/tree/dualize). No
+emulator is involved. The game still ticks at its original 30 Hz; frames in
+between are **interpolated** at the display's refresh rate.
 
 > [!IMPORTANT]
 > This repository contains **no game code, assets, disc images or keys**, and
@@ -30,8 +30,9 @@ are **interpolated** at the display's refresh rate.
 
 - **Every game instruction is native code.** No JIT, and an interpreter only
   for the exception stubs and the apploader.
-- **No Dolphin at runtime.** `make native` runs a Wii built for this game:
-  CPU, hardware, scheduler, IOS, DSP, GX, audio and input.
+- **One program.** The recompiled game, the runtime and the renderer build
+  into one executable from one CMake project, the way
+  [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
 - **High refresh gameplay.** 30 Hz game logic, presented at 60, 144 or 240 Hz
   with interpolated matrices, camera, lights and projected textures.
 - **3.5× headroom.** ~113 FPS uncapped in gameplay, up from ~32 at the start
@@ -49,9 +50,8 @@ are **interpolated** at the display's refresh rate.
 | **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
 | **Audio** | Native DSP/AX, bit-identical to Dolphin's HLE, out through SDL3 |
 | **Input** | SDL3 gamepads as Classic Controllers (Xbox, PlayStation and Switch layouts) |
-| **Startup** | ~4.5 s to the first frame from a savestate |
-| **Tested on** | Windows 11, MSYS2 UCRT64, Clang `-O3`, i5-9600KF + RTX 4060, 240 Hz display |
-| **Untested** | Linux and macOS (the tools support both), PAL `R7EP8P`, JP `R7EJ8P` |
+| **Tested on** | Windows 11, MSYS2 UCRT64, Clang 22, i5-9600KF + RTX 4060, 240 Hz display |
+| **Untested** | Linux and macOS, PAL `R7EP8P`, JP `R7EJ8P` |
 
 **Known issues**
 
@@ -59,114 +59,65 @@ are **interpolated** at the display's refresh rate.
   them. Being worked on.
 - The intro FMV runs at ~19 FPS, bound by the game's own video decoder. FMVs
   aren't interpolated.
-- The stage RSO modules still run on the Dolphin core's JIT; on the native
-  machine they run on the interpreter.
-
-## Quick start
-
-```sh
-git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
-cd DualizeRecomp
-make check                          # verify the toolchain
-make native ISO=iso/nights.iso      # first run: build, extract, recompile, play
-make native GAME=nights             # later runs
-```
-
-`make run` launches the same module on the Dolphin-derived core instead.
+- The stage RSO modules aren't recompiled yet and run on the interpreter.
+- Quitting ends with a non-zero exit code: the renderer's teardown aborts
+  after the game has stopped.
 
 ## Building
 
 ### Requirements
 
-- CMake, Ninja, pkg-config, Git and Python 3
-- A C11/C++23 toolchain
-  - **Windows:** MSYS2 UCRT64 (tested), with `mingw-w64-ucrt-x86_64-clang`,
-    `-lld` and `-abseil-cpp`. Visual Studio 2022 ("Desktop development with
-    C++") also builds.
-  - **Linux:** GCC or Clang, plus Dolphin's NoGUI packages:
-    ```sh
-    sudo apt-get install -y ninja-build build-essential pkg-config cmake \
-      libevdev-dev libudev-dev libgtk-3-dev libsystemd-dev \
-      libbluetooth-dev libasound2-dev libpulse-dev libgl1-mesa-dev \
-      libxrandr-dev libxi-dev
-    ```
-  - **macOS:** Xcode command line tools, `brew install cmake ninja pkg-config`
+- CMake 3.25+, Ninja, Git
+- Clang with lld (ThinLTO links the game's code); on Windows, MSYS2 UCRT64
+  with `mingw-w64-ucrt-x86_64-clang`, `-lld`, `-cmake` and `-ninja`
 - A 64-bit host and your own NiGHTS: Journey of Dreams (USA) disc image
 
-`make check` validates all of this and offers to fetch missing submodules
-(`make check FETCH=1` doesn't ask). The first sync downloads a few hundred MB:
-ModernGekko vendors much of Dolphin's dependency tree.
+### Steps
 
-### First run
+```sh
+git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
+cd DualizeRecomp
+cmake --preset release            # no game yet: configures the tools only
+cmake --build build/release
+build/release/tools/DolRecomp/dolrecomp --setup                    # Wiimms ISO Tools into extern/wit
+build/release/tools/DolRecomp/dolrecomp extract iso/nights.iso extracted/nights
+cmake --preset release            # now with the game
+cmake --build build/release       # ~30 min the first time
+build/release/DualizeRecomp/DualizeRecomp --game extracted/nights
+```
 
-1. Put the disc image at `iso/nights.iso` (gitignored).
-2. Run `make native ISO=iso/nights.iso`. The first time, this:
-   1. builds DolRecomp and ModernGekko and applies the local [patches](docs/PATCHES.md);
-   2. downloads [Wiimms ISO Tools](https://wit.wiimm.de/) into `extern/wit`;
-   3. extracts the disc into `extracted/nights/`;
-   4. recompiles the game and compiles the module (about 30 min with ThinLTO);
-   5. launches the game.
-3. Later, `make native GAME=nights`. Modules are cached under `build/modules/`
-   by DOL hash and toolchain, so nothing is rebuilt unless something changed.
+The build runs DolRecomp on `extracted/nights` (set `DUALIZE_GAME_DIR` to use
+another directory) with [`DualizeRecompLib/config/R7EE8P.toml`](DualizeRecompLib/config/R7EE8P.toml)
+and compiles what it writes. ThinLTO caches its work in `build/release`, so a
+rebuild only re-optimizes what changed.
 
 To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 `e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20`.
 
-### Make targets
-
-| Target | Description |
-|---|---|
-| `make check` | Validate tools, compilers, architecture and sources |
-| `make tools` | Build DolRecomp and ModernGekko only |
-| `make extract ISO=…` | Extract the disc into `extracted/nights/` |
-| `make recompile GAME=nights` | Recompile and build the module without launching |
-| `make native GAME=nights` | Run on the [native machine](#native-machine) |
-| `make run GAME=nights` | Run on the Dolphin-derived core |
-| `make llvm` / `make llvm-run` | `recompile` / `run` with the LLVM backend |
-| `make symbols GAME=nights` | Name the SDK functions in `main.dol` (`build/symbols/nights.map`) |
-| `make clean-extracted` · `clean-tools` · `clean` | Remove the extracted disc and modules · the tool builds · both |
-
-| Variable | Default | Description |
-|---|---|---|
-| `ISO` | | Disc image; only needed the first time |
-| `GAME` | | Extracted game slug (`nights`) |
-| `RUN_ARGS` | | Runner flags, see [Running](#running) |
-| `BACKEND` | `c` | `c` or `llvm` (LLVM 19+; ~20% slower on this game) |
-| `TOOLCHAIN` | `clang` if installed | Module compiler: `auto`, `clang`, `gcc` or `msvc` |
-| `OPT_LEVEL` | `3` | Module optimization level |
-| `LLVM_DIR` | CMake discovery | LLVM's CMake package, if not found |
-| `USER_DIR` | ModernGekko's | Where `make run` installs `config/` |
-| `CMAKE_BUILD_TYPE` · `JOBS` | `Release` · CPU count | Tool build type and parallelism |
-
 ## Running
 
-Flags go in `RUN_ARGS="…"`.
-
-| Native machine flag | Effect |
+| Flag | Effect |
 |---|---|
+| `--game <dir>` | The extracted disc (required) |
+| `--user <dir>` | User directory: NAND and saves (default `%LOCALAPPDATA%\DualizeRecomp`, `~/.local/share/DualizeRecomp`) |
 | `--no-interpolation` | Show the game's own 30 FPS |
 | `--no-vsync` | Present without vsync, paced by a timer |
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
+| `--window <w>x<h>` | Initial window size |
 | `--load-state <file>` | Start from a savestate |
-| `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop`, `call` (see `scripts/automation.py`) |
-| `--user <dir>` | User directory (NAND, saves) |
-
-On the Dolphin core, `--graphics Native` selects the native renderer
-(without interpolation) and `--headless` runs without a window.
+| `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop` (client: `scripts/automation.py`) |
 
 <details>
 <summary><b>Environment switches</b></summary>
 
 | Variable | Effect |
 |---|---|
-| `NATIVE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
-| `MODERNGEKKO_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
-| `MODERNGEKKO_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
-| `MODERNGEKKO_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
-| `MODERNGEKKO_REAL_DISC_TIMING=1` | Emulate disc seeks and rotation instead of buffer-speed reads |
-| `MODERNGEKKO_AUDIO_STATS=1` | Log the audio queue once per second |
-| `MODERNGEKKO_NATIVE_INPUT=0` · `_DSP=0` · `_IOS=0` | Dolphin core only: use Dolphin's input, DSP HLE or IOS devices instead of the native ones |
+| `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
+| `DUALIZE_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
+| `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
+| `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
+| `DUALIZE_AUDIO_STATS=1` | Log the audio queue once per second |
 | `AURORA_INTERP_NOBLEND=1` | Debug: replay frames without blending, to compare |
 | `AURORA_INTERP_CHECK=<dir>` | Debug: write PPM pairs that must match (older frame at t = 1, newer frame at t = 0) |
 
@@ -195,10 +146,9 @@ Switch pads work the same way (Xbox names below).
 ## How it works
 
 ```
- disc ─► DolRecomp ─► C ─► clang -O3 + ThinLTO ─► game module (.dll)
-                                                        │
- ┌─ moderngekko-native ─────────────────────────────────┼──────────────────────────┐
- │                                                      ▼                          │
+ disc ─► dolrecomp (R7EE8P.toml) ─► ppc_recomp.*.c ─► clang -O3 + ThinLTO ─┐
+                                                                            ▼
+ ┌─ DualizeRecomp ──────────────────────────────────────────────────────────────────┐
  │  CPU thread                                    recompiled game                  │
  │   ├ native SDK functions (OS scheduler, mutexes, PSMTX, memcpy, cache, MWCC)    │
  │   ├ flat guest memory: one load or store per access                             │
@@ -217,41 +167,29 @@ Switch pads work the same way (Xbox names below).
 ### Recompiler
 
 DolRecomp turns each chunk of PowerPC code into a C function with a switch
-over its entry points. On top of upstream, this project's patches make the
-generated code call other chunks, virtual calls and jump tables directly,
-keep entry cases only where code can actually be entered, inline the common
-FPU and paired-single paths, and load the guest memory base once per
-function. Hot SDK functions (thread switching, mutexes, interrupts, matrix
-math, memcpy, cache ranges, MWCC's register save/restore helpers) are
-replaced by host code, each pinned to a hash of the guest bytes it replaces.
-The game's RSO modules are linked ahead of time at the addresses the game
-loads them to, so they recompile with the DOL.
+over its entry points. Our fork makes the generated code call other chunks,
+virtual calls and jump tables directly, keeps entry cases only where code can
+actually be entered, inlines the common FPU and paired-single paths, and loads
+the guest memory base once per function. Hot SDK functions (thread switching,
+mutexes, interrupts, matrix math, memcpy, cache ranges, MWCC's register
+save/restore helpers) are replaced by host code in
+[`DualizeRecomp/sdk`](DualizeRecomp/sdk), each pinned to a hash of the guest
+bytes it replaces ([`R7EE8P.natives`](DualizeRecompLib/config/R7EE8P.natives)).
+The game's RSO modules are linked inside the recompiler at the addresses the
+game loads them to, so they recompile with the DOL.
 
-### Native machine
-
-`moderngekko-native` (ModernGekko's `src/native`) is a Wii built for this
-game, with no Dolphin code.
+### Runtime
 
 | Part | What it does |
 |---|---|
-| CPU | The module wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions, locked L1 cache and its DMA |
-| Memory | The guest's 32-bit space as one host reservation; MEM1, MEM2 and the locked cache are views of one section at their cached and uncached addresses. Only `0xC8000000`–`0xCFFFFFFF` leaves inline code |
-| Hardware | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Starlet IPC/GPIO, timed as Dolphin models them |
-| Scheduler | One tick per CPU cycle; the CPU runs in slices up to the next event, and the idle loop leaves for the scheduler |
-| IOS | IPC mailbox, fd table and replies; `/dev/di`, `/dev/fs` (NAND in a host directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, Bluetooth with emulated Wii Remotes |
-| Boot | The system menu's disc launch, then the apploader |
-| Host | Native GX, native DSP + SDL3 audio, SDL3 gamepads |
-
-Savestates use the machine's own format; Dolphin-core states don't load.
-
-### Native renderer
-
-The game's GX command stream comes straight off the gather pipe and is drawn
-on a render thread by [Aurora](https://github.com/encounter/aurora), a GX
-implementation on WebGPU through Dawn. Retail textures are cached by content
-hash, vertex arrays upload once per frame, identical uniform blocks are
-shared, and draws with unchanged state reuse their pipeline and merge, so a
-dense level goes from ~45k to ~1k GPU draws per frame.
+| `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions, locked L1 cache and its DMA |
+| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS: IPC, fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, Bluetooth with emulated Wii Remotes |
+| `hw/` | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Starlet IPC/GPIO |
+| `apu/` | The AX DSP microcode in host code, mixed out through SDL3 |
+| `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
+| `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
+| `sdk/` | Native replacements for SDK functions |
+| `boot.cpp` | The system menu's disc launch, then the apploader |
 
 ### Frame interpolation
 
@@ -293,11 +231,12 @@ Uncapped gameplay in Will's first stage, i5-9600KF + RTX 4060.
 | Native SDK: mutexes, interrupts, scheduler, memcpy | 65 |
 | Idle until interrupt | 82 |
 | Direct indirect calls, PSMTX natives, builtin byte swaps | 88 |
-| CPU ABI 6: cache-range and MWCC helper natives, gather-pipe fast path | 96 |
+| Cache-range and MWCC helper natives, gather-pipe fast path | 96 |
 | Sparse entry switches | 101 |
-| **Native machine** with flat guest memory | **113** |
+| **Native runtime** with flat guest memory | **113** |
 
-At 30 FPS that leaves the CPU thread idle about 70% of the time.
+At 30 FPS that leaves the CPU thread idle about 70% of the time. How each
+step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 
 ## Roadmap
 
@@ -305,46 +244,56 @@ At 30 FPS that leaves the CPU thread idle about 70% of the time.
 |---|---|---|
 | 1. SDK symbol map | Name the SDK functions in `main.dol` from Dolphin's signature database | ✅ 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the GX stream with Aurora | ✅ Native renderer |
-| 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, then a machine with no Dolphin | ✅ Native machine · ⏳ stage RSO modules |
+| 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator | ✅ · ⏳ stage RSO modules |
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
+| 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
+| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ⏳ |
+| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | ⏳ |
+
+## Working on the forks
+
+DolRecomp and Aurora are our forks, checked out as submodules on their
+`dualize` branch; this repository pins a commit of each. Once per clone:
+
+```sh
+scripts/sync.sh setup     # submodules follow checkouts and pulls; push sends fork commits first
+```
+
+A change to a fork is a commit in it, then a commit here that moves the pin
+(`git add tools/DolRecomp`). `scripts/sync.sh push` pushes both forks and then
+this repository, `status` shows where each fork stands, and `upstream` lists
+what DolRecomp and Aurora upstream have that the forks don't.
 
 ## Repository layout
 
 ```
-lib/DolRecomp/       submodule: PowerPC → C / LLVM static recompiler
-lib/ModernGekko/     submodule: the runtime, native machine and renderer host
-patches/             local changes to the submodules, applied by make (docs/PATCHES.md)
-config/              game settings, RSO load layout, native SDK list, controller profile
-scripts/             toolchain check, SDK symbol finder, natives hashes, automation client
-docs/                patch notes
-Makefile             the whole pipeline
-iso/ extracted/ build/ extern/ database/   your disc, its extraction, builds, downloads (gitignored)
+tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler and the guest CPU core
+thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3
+DualizeRecompLib/     the game's code: recompiler config, natives list, generated sources
+DualizeRecomp/        the runtime and the executable (cpu, kernel, hw, apu, gpu, hid, sdk)
+scripts/              fork sync, SDK symbol finder, natives hashes, automation client, window capture
+docs/                 the history of the port
+iso/ extracted/ build/ extern/   your disc, its extraction, builds, downloads (gitignored)
 ```
-
-The changes to ModernGekko, its Dolphin fork, Aurora and DolRecomp live in
-[`patches/`](patches) so the submodules stay at their upstream commits. What
-each patch does, and what it bought, is in [docs/PATCHES.md](docs/PATCHES.md).
-
-Per-game settings (`config/GameSettings/R7EE8P.ini`, installed by `make run`)
-turn on idle-loop skipping for the game's `OSWakeupThread` idle thread and
-Dolphin's dual-core mode.
 
 ## Credits
 
-- [ModernGekko-Template](https://github.com/ExpansionPak/ModernGekko-Template),
-  the pipeline this project started from
 - [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and
-  [ModernGekko](https://github.com/ExpansionPak/ModernGekko)
+  [ModernGekko](https://github.com/ExpansionPak/ModernGekko), where this
+  project started
+- [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) and
+  XenonRecomp, whose structure this follows
 - [Aurora](https://github.com/encounter/aurora) and Google's
   [Dawn](https://dawn.googlesource.com/dawn)
 - [SDL3](https://libsdl.org/)
-- The [Dolphin](https://dolphin-emu.org/) team
-- [Wiimms ISO Tools](https://wit.wiimm.de/) and [GameTDB](https://www.gametdb.com/)
+- The [Dolphin](https://dolphin-emu.org/) team, whose hardware research the
+  runtime follows
+- [Wiimms ISO Tools](https://wit.wiimm.de/)
 
 ## Legal
 
 An unofficial fan project, not affiliated with or endorsed by SEGA or
 Nintendo. NiGHTS and NiGHTS: Journey of Dreams are trademarks of SEGA; Wii is
-a trademark of Nintendo. DolRecomp and ModernGekko are under their own
-licenses (`lib/DolRecomp/LICENSE`, `lib/ModernGekko/LICENSE`); ModernGekko is
-GPL-3.0-or-later because of its Dolphin-derived runtime.
+a trademark of Nintendo. The runtime is GPL-3.0-or-later; DolRecomp and
+Aurora are under their own licenses (`tools/DolRecomp/LICENSE`,
+`thirdparty/aurora/LICENSE`).
