@@ -42,7 +42,7 @@ public:
   void RunFunction(uint32_t address);
 
   // Asserted by the processor interface while any unmasked cause is set.
-  void SetExternalInterrupt(bool asserted) { m_external = asserted; }
+  void SetExternalInterrupt(bool asserted);
 
   // Code at [address, address + length) may have changed.
   void InvalidateICache(uint32_t address, uint32_t length);
@@ -99,6 +99,8 @@ private:
 
   // Delivers a pending external or decrementer interrupt if MSR[EE] allows.
   void CheckInterrupts();
+  // Ends the slice early if an interrupt is pending and unmasked.
+  void RequestInterruptCheck();
   void TakeInterrupt(uint32_t vector);
 
   // The function holding pc, verified first if it never was, or NO_FUNCTION
@@ -133,6 +135,8 @@ private:
   static void HookCacheControl(CPUState* cpu, uint8_t operation, uint32_t ea, uint32_t cia);
   static void HookCacheRange(CPUState* cpu, uint8_t operation, uint32_t ea, uint32_t lines);
   static void HookFallback(CPUState* cpu, uint32_t raw, uint32_t cia);
+  static uint64_t HookReadTimebase(CPUState* cpu);
+  static void HookMsrWritten(CPUState* cpu);
 
   void LockedCacheDma();
 
@@ -147,7 +151,6 @@ private:
   // Timebase = m_tb_start_value + (Now - m_tb_start_ticks) / TIMER_RATIO.
   uint64_t m_tb_start_value = 0;
   uint64_t m_tb_start_ticks = 0;
-  uint64_t m_tb_remainder = 0;  // ticks since the last whole timebase step
   uint32_t m_dec_start_value = 0xFFFFFFFF;
   uint64_t m_dec_start_ticks = 0;
 

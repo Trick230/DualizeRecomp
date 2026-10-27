@@ -116,6 +116,8 @@ Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
   state.cache_control = HookCacheControl;
   state.cache_range = HookCacheRange;
   state.instruction_fallback = HookFallback;
+  state.read_timebase = HookReadTimebase;
+  state.msr_written = HookMsrWritten;
   state.external_user_data = this;
   state.ram = machine.memory.mem1;
   state.ram_size = Memory::MEM1_SIZE;
@@ -130,6 +132,7 @@ Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
   m_spr[SPR_PVR] = 0x00087102;
   m_spr[SPR_HID1] = 0x80000000;
   m_dec_event = m_scheduler.Register(DecrementerEvent, this);
+  m_scheduler.BindDowncount(&state.downcount);
 }
 
 Cpu::~Cpu()
@@ -301,16 +304,19 @@ void Cpu::SetTimebase(uint64_t value)
 {
   m_tb_start_value = value;
   m_tb_start_ticks = m_scheduler.Now();
-  state.timebase = value;
-  m_tb_remainder = 0;
 }
 
 void Cpu::Charge(int64_t cycles)
 {
-  m_scheduler.downcount -= cycles;
-  const uint64_t total = m_tb_remainder + static_cast<uint64_t>(cycles);
-  state.timebase += total / Scheduler::TIMER_RATIO;
-  m_tb_remainder = total % Scheduler::TIMER_RATIO;
+  state.downcount -= cycles;
+}
+
+void Cpu::RequestInterruptCheck()
+{
+  // End the slice now: generated code leaves at its next loop or exit, and
+  // the run loop delivers the interrupt.
+  if ((state.msr & MSR_EE) && (m_external || m_decrementer))
+    m_scheduler.ForceCheck(0);
 }
 
 uint32_t Cpu::Decrementer() const
@@ -328,6 +334,12 @@ void Cpu::DecrementerSet()
   m_dec_start_ticks = m_scheduler.Now();
   m_dec_start_value = value;
   m_scheduler.Schedule(static_cast<int64_t>(value) * Scheduler::TIMER_RATIO, m_dec_event);
+}
+
+void Cpu::SetExternalInterrupt(bool asserted)
+{
+  m_external = asserted;
+  RequestInterruptCheck();
 }
 
 void Cpu::DecrementerEvent(void* user, uint64_t, int64_t)
@@ -369,19 +381,16 @@ bool Cpu::RunNative(int function)
   do
   {
     const uint32_t pc = state.pc;
-    const int64_t downcount_before = m_scheduler.downcount;
+    const int64_t downcount_before = state.downcount;
     m_module->functions[function](&state);
     // Nothing ran: the entry switch has no case for this pc (an exception
-    // return, a computed pointer), so the interpreter steps it. A fallback
-    // charges the scheduler itself, so it counts as having run.
-    if (state.pc == pc && state.downcount == 0 && m_scheduler.downcount == downcount_before &&
-        !state.exception)
+    // return, a computed pointer), so the interpreter steps it.
+    if (state.pc == pc && state.downcount == downcount_before && !state.exception)
       return false;
     ++m_stats.dispatches;
     // Every dispatch costs at least a cycle, so a burst always moves time.
-    const int64_t charge = -state.downcount;
-    state.downcount = 0;
-    Charge(charge > 0 ? charge : 1);
+    if (state.downcount == downcount_before)
+      Charge(1);
     if (state.exception)
     {
       // The runtime already moved pc/msr/srr to the vector.
@@ -393,7 +402,7 @@ bool Cpu::RunNative(int function)
     if (state.pc == m_idle_pc && m_idle_pc)
       break;
     function = FunctionAt(state.pc);
-  } while (m_scheduler.downcount > 0 && function >= 0 && m_function_state[function] == FUNCTION_VERIFIED &&
+  } while (state.downcount > 0 && function >= 0 && m_function_state[function] == FUNCTION_VERIFIED &&
            m_running);
   return true;
 }
@@ -405,9 +414,6 @@ void Cpu::Run()
   {
     m_scheduler.Advance();
     m_machine.AfterEvents();
-    // Events and idling move time without Charge.
-    state.timebase = Timebase();
-    m_tb_remainder = (m_scheduler.Now() - m_tb_start_ticks) % Scheduler::TIMER_RATIO;
     CheckInterrupts();
     if (m_idle_pc && state.pc == m_idle_pc)
     {
@@ -417,7 +423,7 @@ void Cpu::Run()
       m_scheduler.Idle();
       continue;
     }
-    while (m_scheduler.downcount > 0 && m_running)
+    while (state.downcount > 0 && m_running)
     {
       const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
       if (function >= 0)
@@ -444,7 +450,7 @@ void Cpu::RunFunction(uint32_t address)
   while (state.pc != 0)
   {
     Charge(Step());
-    if (m_scheduler.downcount <= 0)
+    if (state.downcount <= 0)
       m_scheduler.Advance();
   }
 }
@@ -588,9 +594,10 @@ void Cpu::HookSprWrite(CPUState* state, uint16_t spr, uint32_t value, uint32_t c
   switch (spr)
   {
   case SPR_TL_W:
+    cpu.SetTimebase((cpu.Timebase() & 0xFFFFFFFF00000000ull) | value);
+    return;
   case SPR_TU_W:
-    // ppc_mtspr already wrote the half into state->timebase.
-    cpu.SetTimebase(state->timebase);
+    cpu.SetTimebase(static_cast<uint64_t>(value) << 32 | (cpu.Timebase() & 0xFFFFFFFFu));
     return;
   case SPR_PVR:
     cpu.m_spr[SPR_PVR] = old_value;
@@ -611,7 +618,10 @@ void Cpu::HookSprWrite(CPUState* state, uint16_t spr, uint32_t value, uint32_t c
     return;
   case SPR_DEC:
     if ((old_value >> 31) == 0 && (value >> 31) != 0)
+    {
       cpu.m_decrementer = true;
+      cpu.RequestInterruptCheck();
+    }
     cpu.DecrementerSet();
     return;
   case SPR_THRM1:
@@ -686,14 +696,20 @@ void Cpu::HookCacheRange(CPUState* state, uint8_t operation, uint32_t ea, uint32
   }
 }
 
+uint64_t Cpu::HookReadTimebase(CPUState* state)
+{
+  return CpuOf(state).Timebase();
+}
+
+void Cpu::HookMsrWritten(CPUState* state)
+{
+  CpuOf(state).RequestInterruptCheck();
+}
+
 void Cpu::HookFallback(CPUState* state, uint32_t raw, uint32_t cia)
 {
   Cpu& cpu = CpuOf(state);
   ++cpu.m_stats.fallbacks;
-  // The block's charge so far belongs before the instruction.
-  const int64_t charge = -state->downcount;
-  state->downcount = 0;
-  cpu.Charge(charge);
   state->pc = cia;
   cpu.Charge(cpu.Execute(raw, cia));
 }
@@ -736,8 +752,6 @@ void Cpu::DoState(StateIO& io)
   if (io.Reading())
   {
     m_gather_ptr = m_gather + std::min<uint32_t>(gather, 31);
-    state.timebase = Timebase();
-    state.downcount = 0;
     state.exception = 0;
     state.program_exception = 0;
     ppc_fpscr_control_updated(&state);

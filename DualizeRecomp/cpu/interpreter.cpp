@@ -483,6 +483,7 @@ int Cpu::Execute(uint32_t raw, uint32_t cia)
       break;
     case 146:  // mtmsr
       c.msr = c.gpr[rs];
+      RequestInterruptCheck();
       break;
     case 595:  // mfsr
       c.gpr[rd] = c.sr[ra & 15];
