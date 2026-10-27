@@ -167,11 +167,13 @@ Machine::Machine(MachineConfig config_)
 
 Machine::~Machine()
 {
+  // Audio and gamepads first: the renderer's shutdown ends with SDL_Quit,
+  // which frees their streams and devices under them.
+  m_gamepads.Stop();
+  m_audio.Stop();
   if (m_gx_started)
     native_gx_stop();
   dsp.reset();
-  m_audio.Stop();
-  m_gamepads.Stop();
 }
 
 bool Machine::Start(std::string* error)
