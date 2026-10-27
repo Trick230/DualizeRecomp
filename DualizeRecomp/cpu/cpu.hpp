@@ -1,7 +1,7 @@
 #pragma once
 
 // The Broadway CPU: recompiled code where it covers the pc and its
-// chunk still holds the code it was built from (verified by hash on entry,
+// function still holds the code it was built from (verified by hash on entry,
 // reset by icache invalidation), the interpreter everywhere else (exception
 // vector stubs, the apploader, code the module does not know). Both run on
 // one CPUState; this class owns the SPRs the module reaches through hooks,
@@ -52,7 +52,7 @@ public:
   uint32_t& Spr(uint32_t index) { return m_spr[index & 1023]; }
 
   void DoState(StateIO& io);
-  // After loading a state: chunk verification starts over.
+  // After loading a state: function verification starts over.
   void ResetCodeState();
 
   // Statistics for the shutdown report.
@@ -74,12 +74,16 @@ public:
 
   alignas(64) CPUState state{};
 
+  // The verified function holding pc, verifying it first if it never was;
+  // NULL if none does or its guest text changed.
+  GuestCode Lookup(uint32_t pc);
+
 private:
-  enum ChunkState : uint8_t
+  enum FunctionState : uint8_t
   {
-    CHUNK_UNVERIFIED,
-    CHUNK_VERIFIED,
-    CHUNK_FAILED,
+    FUNCTION_UNVERIFIED,
+    FUNCTION_VERIFIED,
+    FUNCTION_FAILED,
   };
 
   // One instruction at state.pc on the interpreter; returns its cycles.
@@ -97,22 +101,18 @@ private:
   void CheckInterrupts();
   void TakeInterrupt(uint32_t vector);
 
-  bool Dispatchable(uint32_t pc);
-  bool FastDispatchable(uint32_t pc) const
-  {
-    const int chunk = ChunkAt(pc);
-    return chunk >= 0 && m_chunk_state[chunk] == CHUNK_VERIFIED;
-  }
-  int ChunkAt(uint32_t pc) const;
-  int ChunkAtSplitLine(uint32_t pc) const;
-  void VerifyChunk(uint32_t index);
-  void SetChunkState(uint32_t index, ChunkState chunk_state);
+  // The function holding pc, verified first if it never was, or NO_FUNCTION
+  // if none does or it does not match guest RAM.
+  int Dispatchable(uint32_t pc);
+  int FunctionAt(uint32_t pc) const;
+  void VerifyFunction(uint32_t index);
+  void SetFunctionState(uint32_t index, FunctionState function_state);
   bool LineMayHoldCode(uint32_t ea) const;
-  void BuildChunkTables();
+  void BuildFunctionTables();
   void PublishDirectCalls(bool enable);
-  // Runs native code from state.pc until it leaves verified code or the slice
-  // ends; false if the module had no entry for the pc.
-  bool RunNative();
+  // Runs native code from function, which holds state.pc, until it leaves
+  // verified code or the slice ends; false if it had no entry for the pc.
+  bool RunNative(int function);
   void Charge(int64_t cycles);
 
   void DecrementerSet();
@@ -157,16 +157,13 @@ private:
 
   const GuestModule* m_module = nullptr;
 
-  std::vector<uint8_t> m_chunk_state;
-  std::vector<uint8_t> m_direct_call_ok;
-  static constexpr uint32_t DIRECT_LINE_SHIFT = GUEST_DIRECT_LINE_SHIFT;
-  std::vector<uint8_t> m_direct_lines;
-  // Chunk of each 128-byte line of MEM1+MEM2: the index when one chunk covers
-  // the whole line, NO_CHUNK when none touches it, SPLIT_LINE otherwise.
-  static constexpr uint32_t CHUNK_LINE_SHIFT = 7;
-  static constexpr int16_t NO_CHUNK = -1;
-  static constexpr int16_t SPLIT_LINE = -2;
-  std::vector<int16_t> m_chunk_lines;
+  std::vector<uint8_t> m_function_state;
+  std::vector<uint8_t> m_direct_call_ok;  // FUNCTION_VERIFIED, for generated code
+  // Per 32-byte line of MEM1 up to the end of its code: the first function
+  // ending past the line's start, or NO_FUNCTION if none starts before its end.
+  static constexpr uint32_t FUNCTION_LINE_SHIFT = 5;
+  static constexpr int NO_FUNCTION = -1;
+  std::vector<int32_t> m_line_function;
   // One bit per 32-byte line: set where the line overlaps module code.
   std::vector<uint64_t> m_code_lines;
   uint32_t m_idle_pc = 0;

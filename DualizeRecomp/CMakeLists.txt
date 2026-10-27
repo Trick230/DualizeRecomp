@@ -28,6 +28,9 @@ target_link_libraries(DualizeRecomp PRIVATE
     DualizeRecompLib aurora::core aurora::gx aurora::vi SDL3::SDL3)
 if(WIN32)
     target_link_libraries(DualizeRecomp PRIVATE winmm shell32 ole32 uuid)
+    # Guest calls nest as host calls on the main thread (up to
+    # DOLRECOMP_C_MAX_CALL_DEPTH of them).
+    target_link_options(DualizeRecomp PRIVATE "LINKER:--stack,33554432")
 else()
     target_link_libraries(DualizeRecomp PRIVATE ${CMAKE_DL_LIBS} pthread)
 endif()

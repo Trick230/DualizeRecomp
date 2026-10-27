@@ -62,25 +62,25 @@ bool RangesSorted(const GuestRange* ranges, uint32_t count)
   return true;
 }
 
-bool ChunksTileCode(const GuestModule& desc)
+bool FunctionsTileCode(const GuestModule& desc)
 {
-  if (!RangesSorted(desc.chunk_ranges, desc.num_chunk_ranges) || !desc.chunk_hashes)
+  if (!RangesSorted(desc.function_ranges, desc.num_functions) || !desc.functions || !desc.function_hashes)
     return false;
-  uint32_t chunk = 0;
+  uint32_t function = 0;
   for (uint32_t code = 0; code < desc.num_code_ranges; ++code)
   {
     uint32_t cursor = desc.code_ranges[code].start;
-    while (chunk < desc.num_chunk_ranges && desc.chunk_ranges[chunk].start < desc.code_ranges[code].end)
+    while (function < desc.num_functions && desc.function_ranges[function].start < desc.code_ranges[code].end)
     {
-      if (desc.chunk_ranges[chunk].start != cursor ||
-          desc.chunk_ranges[chunk].end > desc.code_ranges[code].end)
+      if (desc.function_ranges[function].start != cursor ||
+          desc.function_ranges[function].end > desc.code_ranges[code].end)
         return false;
-      cursor = desc.chunk_ranges[chunk++].end;
+      cursor = desc.function_ranges[function++].end;
     }
     if (cursor != desc.code_ranges[code].end)
       return false;
   }
-  return chunk == desc.num_chunk_ranges;
+  return function == desc.num_functions;
 }
 
 // Index of an instruction in MEM1 then MEM2, or -1.
@@ -98,6 +98,11 @@ Cpu& CpuOf(CPUState* state)
   return *static_cast<Cpu*>(state->external_user_data);
 }
 }  // namespace
+
+extern "C" GuestCode dolrecomp_lookup(CPUState* ctx, u32 target)
+{
+  return CpuOf(ctx).Lookup(target);
+}
 
 Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
 {
@@ -135,127 +140,117 @@ Cpu::~Cpu()
 bool Cpu::AttachModule(std::string* error)
 {
   const GuestModule& module = g_guest_module;
-  if (!RangesSorted(module.code_ranges, module.num_code_ranges) || !ChunksTileCode(module))
+  if (!RangesSorted(module.code_ranges, module.num_code_ranges) || !FunctionsTileCode(module))
   {
-    *error = "recompiled code has malformed code or chunk ranges";
+    *error = "recompiled code has malformed code or function ranges";
     return false;
   }
   m_module = &module;
-  BuildChunkTables();
+  BuildFunctionTables();
   return true;
 }
 
-void Cpu::BuildChunkTables()
+void Cpu::BuildFunctionTables()
 {
-  const uint32_t chunks = m_module->num_chunk_ranges;
-  m_chunk_state.assign(chunks, CHUNK_UNVERIFIED);
-  m_direct_call_ok.assign(chunks, 0);
+  const uint32_t functions = m_module->num_functions;
+  m_function_state.assign(functions, FUNCTION_UNVERIFIED);
+  m_direct_call_ok.assign(functions, 0);
 
-  constexpr uint32_t insns_per_line = 1u << (CHUNK_LINE_SHIFT - 2);
   const uint32_t total = (Memory::MEM1_SIZE + Memory::MEM2_SIZE) >> 2;
-  m_chunk_lines.assign((total + insns_per_line - 1) / insns_per_line, NO_CHUNK);
   m_code_lines.assign((total / 8 + 63) / 64, 0);
   uint32_t mem1_code_end = 0;
-  for (uint32_t i = 0; i < chunks; ++i)
+  for (uint32_t i = 0; i < functions; ++i)
   {
-    const GuestRange& chunk = m_module->chunk_ranges[i];
-    if (chunk.start >= 0x80000000u && chunk.end <= 0x81800000u)
-      mem1_code_end = std::max(mem1_code_end, chunk.end - 0x80000000u);
-    const int start = LookupIndex(chunk.start);
+    const GuestRange& function = m_module->function_ranges[i];
+    if (function.start >= 0x80000000u && function.end <= 0x80000000u + Memory::MEM1_SIZE)
+      mem1_code_end = std::max(mem1_code_end, function.end - 0x80000000u);
+  }
+  m_line_function.assign((mem1_code_end + (1u << FUNCTION_LINE_SHIFT) - 1) >> FUNCTION_LINE_SHIFT, NO_FUNCTION);
+  for (uint32_t i = 0; i < functions; ++i)
+  {
+    const GuestRange& function = m_module->function_ranges[i];
+    if (function.start >= 0x80000000u && function.end <= 0x80000000u + mem1_code_end)
+    {
+      // Ascending, so the first function to reach a line is its first.
+      for (uint32_t line = (function.start - 0x80000000u) >> FUNCTION_LINE_SHIFT;
+           line << FUNCTION_LINE_SHIFT < function.end - 0x80000000u; ++line)
+        if (m_line_function[line] == NO_FUNCTION)
+          m_line_function[line] = static_cast<int32_t>(i);
+    }
+    const int start = LookupIndex(function.start);
     if (start < 0)
       continue;
     const uint32_t first = static_cast<uint32_t>(start);
-    const uint32_t last = std::min(first + ((chunk.end - chunk.start) >> 2), total);
-    for (uint32_t line = first / insns_per_line; line * insns_per_line < last; ++line)
-    {
-      const bool whole = first <= line * insns_per_line && (line + 1) * insns_per_line <= last;
-      int16_t& entry = m_chunk_lines[line];
-      entry = whole && entry == NO_CHUNK && i < 0x7FFF ? static_cast<int16_t>(i) : SPLIT_LINE;
-    }
+    const uint32_t last = std::min(first + ((function.end - function.start) >> 2), total);
     for (uint32_t line = first >> 3; line << 3 < last; ++line)
       m_code_lines[line >> 6] |= uint64_t{1} << (line & 63);
   }
-  m_direct_lines.assign(mem1_code_end >> DIRECT_LINE_SHIFT, 0);
   m_idle_pc = m_machine.config.idle_pc;
   PublishDirectCalls(true);
 }
 
 void Cpu::PublishDirectCalls(bool enable)
 {
-  if (!m_module)
-    return;
-  guest_set_direct_calls(enable ? m_direct_call_ok.data() : nullptr, m_idle_pc);
-  guest_set_direct_lines(enable ? m_direct_lines.data() : nullptr,
-                         enable ? static_cast<uint32_t>(m_direct_lines.size() << DIRECT_LINE_SHIFT) : 0);
+  if (m_module)
+    guest_set_direct_calls(enable ? m_direct_call_ok.data() : nullptr, m_idle_pc);
 }
 
-int Cpu::ChunkAtSplitLine(uint32_t pc) const
+int Cpu::FunctionAt(uint32_t pc) const
 {
-  const GuestRange* ranges = m_module->chunk_ranges;
-  uint32_t lo = 0, hi = m_module->num_chunk_ranges;
-  while (lo < hi)
-  {
-    const uint32_t mid = (lo + hi) / 2;
-    if (ranges[mid].end <= pc)
-      lo = mid + 1;
-    else
-      hi = mid;
-  }
-  return lo < m_module->num_chunk_ranges && ranges[lo].start <= pc ? static_cast<int>(lo) : NO_CHUNK;
+  const uint32_t line = (pc - 0x80000000u) >> FUNCTION_LINE_SHIFT;
+  if (line >= m_line_function.size())
+    return NO_FUNCTION;
+  int32_t index = m_line_function[line];
+  if (index == NO_FUNCTION)
+    return NO_FUNCTION;
+  const GuestRange* ranges = m_module->function_ranges;
+  const uint32_t count = m_module->num_functions;
+  while (ranges[index].end <= pc)
+    if (static_cast<uint32_t>(++index) == count)
+      return NO_FUNCTION;
+  return ranges[index].start <= pc ? index : NO_FUNCTION;
 }
 
-int Cpu::ChunkAt(uint32_t pc) const
+void Cpu::SetFunctionState(uint32_t index, FunctionState function_state)
 {
-  const int index = LookupIndex(pc);
-  if (index < 0 || m_chunk_lines.empty())
-    return NO_CHUNK;
-  const int16_t chunk = m_chunk_lines[static_cast<uint32_t>(index) >> (CHUNK_LINE_SHIFT - 2)];
-  return chunk == SPLIT_LINE ? ChunkAtSplitLine(pc) : chunk;
+  m_function_state[index] = function_state;
+  m_direct_call_ok[index] = function_state == FUNCTION_VERIFIED;
 }
 
-void Cpu::SetChunkState(uint32_t index, ChunkState chunk_state)
+void Cpu::VerifyFunction(uint32_t index)
 {
-  m_chunk_state[index] = chunk_state;
-  m_direct_call_ok[index] = chunk_state == CHUNK_VERIFIED;
-  const GuestRange& chunk = m_module->chunk_ranges[index];
-  if (chunk.start < 0x80000000u)
-    return;
-  constexpr uint32_t line_size = 1u << DIRECT_LINE_SHIFT;
-  const uint32_t first = (chunk.start - 0x80000000u + line_size - 1) >> DIRECT_LINE_SHIFT;
-  const uint32_t last = std::min<uint32_t>((chunk.end - 0x80000000u) >> DIRECT_LINE_SHIFT,
-                                           static_cast<uint32_t>(m_direct_lines.size()));
-  for (uint32_t line = first; line < last; ++line)
-    m_direct_lines[line] = m_direct_call_ok[index];
-}
-
-void Cpu::VerifyChunk(uint32_t index)
-{
-  const GuestRange& chunk = m_module->chunk_ranges[index];
-  const uint8_t* bytes = m_machine.memory.Effective(chunk.start, chunk.end - chunk.start);
+  const GuestRange& function = m_module->function_ranges[index];
+  const uint8_t* bytes = m_machine.memory.Effective(function.start, function.end - function.start);
   ++m_stats.verifications;
   if (!bytes)
   {
-    SetChunkState(index, CHUNK_FAILED);
+    SetFunctionState(index, FUNCTION_FAILED);
     return;
   }
-  // FNV-1a 64, as gen_module_tables.py hashes the original text.
+  // FNV-1a 64, as DolRecomp hashes the original text.
   uint64_t hash = 0xCBF29CE484222325ull;
-  for (uint32_t i = 0, n = chunk.end - chunk.start; i < n; ++i)
+  for (uint32_t i = 0, n = function.end - function.start; i < n; ++i)
   {
     hash ^= bytes[i];
     hash *= 0x100000001B3ull;
   }
-  SetChunkState(index, hash == m_module->chunk_hashes[index] ? CHUNK_VERIFIED : CHUNK_FAILED);
+  SetFunctionState(index, hash == m_module->function_hashes[index] ? FUNCTION_VERIFIED : FUNCTION_FAILED);
 }
 
-bool Cpu::Dispatchable(uint32_t pc)
+int Cpu::Dispatchable(uint32_t pc)
 {
-  const int chunk = ChunkAt(pc);
-  if (chunk < 0)
-    return false;
-  if (m_chunk_state[chunk] == CHUNK_UNVERIFIED)
-    VerifyChunk(static_cast<uint32_t>(chunk));
-  return m_chunk_state[chunk] == CHUNK_VERIFIED;
+  const int function = FunctionAt(pc);
+  if (function < 0)
+    return NO_FUNCTION;
+  if (m_function_state[function] == FUNCTION_UNVERIFIED)
+    VerifyFunction(static_cast<uint32_t>(function));
+  return m_function_state[function] == FUNCTION_VERIFIED ? function : NO_FUNCTION;
+}
+
+GuestCode Cpu::Lookup(uint32_t pc)
+{
+  const int function = Dispatchable(pc);
+  return function < 0 ? nullptr : m_module->functions[function];
 }
 
 bool Cpu::LineMayHoldCode(uint32_t ea) const
@@ -273,26 +268,26 @@ void Cpu::InvalidateICache(uint32_t address, uint32_t length)
   if (address < 0x20000000u || (address >> 30) == 3)
     address = (address & 0x1FFFFFFF) | 0x80000000u;
   const uint32_t last = address + (length - 1);
-  uint32_t lo = 0, hi = m_module->num_chunk_ranges;
+  uint32_t lo = 0, hi = m_module->num_functions;
   while (lo < hi)
   {
     const uint32_t mid = lo + (hi - lo) / 2;
-    if (m_module->chunk_ranges[mid].end <= address)
+    if (m_module->function_ranges[mid].end <= address)
       lo = mid + 1;
     else
       hi = mid;
   }
-  for (uint32_t i = lo; i < m_module->num_chunk_ranges && m_module->chunk_ranges[i].start <= last; ++i)
-    if (m_chunk_state[i] != CHUNK_UNVERIFIED)
-      SetChunkState(i, CHUNK_UNVERIFIED);
+  for (uint32_t i = lo; i < m_module->num_functions && m_module->function_ranges[i].start <= last; ++i)
+    if (m_function_state[i] != FUNCTION_UNVERIFIED)
+      SetFunctionState(i, FUNCTION_UNVERIFIED);
 }
 
 void Cpu::ResetCodeState()
 {
   if (!m_module)
     return;
-  for (uint32_t i = 0; i < m_module->num_chunk_ranges; ++i)
-    SetChunkState(i, CHUNK_UNVERIFIED);
+  for (uint32_t i = 0; i < m_module->num_functions; ++i)
+    SetFunctionState(i, FUNCTION_UNVERIFIED);
 }
 
 // --- Time ---------------------------------------------------------------------
@@ -369,13 +364,13 @@ void Cpu::CheckInterrupts()
 
 // --- Run loop -----------------------------------------------------------------
 
-bool Cpu::RunNative()
+bool Cpu::RunNative(int function)
 {
   do
   {
     const uint32_t pc = state.pc;
     const int64_t downcount_before = m_scheduler.downcount;
-    m_module->dispatch(&state, pc);
+    m_module->functions[function](&state);
     // Nothing ran: the entry switch has no case for this pc (an exception
     // return, a computed pointer), so the interpreter steps it. A fallback
     // charges the scheduler itself, so it counts as having run.
@@ -397,7 +392,9 @@ bool Cpu::RunNative()
       CheckInterrupts();
     if (state.pc == m_idle_pc && m_idle_pc)
       break;
-  } while (m_scheduler.downcount > 0 && FastDispatchable(state.pc) && m_running);
+    function = FunctionAt(state.pc);
+  } while (m_scheduler.downcount > 0 && function >= 0 && m_function_state[function] == FUNCTION_VERIFIED &&
+           m_running);
   return true;
 }
 
@@ -422,9 +419,10 @@ void Cpu::Run()
     }
     while (m_scheduler.downcount > 0 && m_running)
     {
-      if (m_module && Dispatchable(state.pc))
+      const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
+      if (function >= 0)
       {
-        if (!RunNative())
+        if (!RunNative(function))
           ++m_stats.entry_misses;
         else if (m_idle_pc && state.pc == m_idle_pc)
           break;
@@ -598,7 +596,7 @@ void Cpu::HookSprWrite(CPUState* state, uint16_t spr, uint32_t value, uint32_t c
     cpu.m_spr[SPR_PVR] = old_value;
     return;
   case SPR_HID0:
-    // ICFI (flash invalidate) self-clears; module chunks follow icbi and the
+    // ICFI (flash invalidate) self-clears; module functions follow icbi and the
     // per-line invalidations, never the whole-cache flash.
     cpu.m_spr[SPR_HID0] &= ~0x800u;
     return;
