@@ -63,6 +63,17 @@ std::vector<uint8_t> s_work;
 std::thread s_thread;
 std::atomic<bool> s_stop{false};
 
+// CPU-thread time spent waiting on the render thread: a full ring, or a drain
+// before idling. Written by the CPU thread, collected by Stats::Report.
+std::atomic<int64_t> s_cpu_wait_ns{0};
+
+void AddCpuWait(std::chrono::steady_clock::time_point start)
+{
+  s_cpu_wait_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - start).count(),
+                          std::memory_order_relaxed);
+}
+
 // DUALIZE_GX_STATS=1 prints one line per second of render-thread counters.
 struct Stats
 {
@@ -124,11 +135,12 @@ struct Stats
     std::fprintf(stderr,
                  "[native-gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
                  "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
-                 "ms decode %lld / begin frame %lld / end frame %lld / idle %lld, "
+                 "ms decode %lld / begin frame %lld / end frame %lld / idle %lld, cpu waits %lld ms, "
                  "frame ms %.2f sd %.2f max %.2f, %u interpolated presents (%.0f%% of draws blended, %.2f ms each)\n",
                  frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
                  peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
-                 Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle), mean, sd,
+                 Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle),
+                 static_cast<long long>(s_cpu_wait_ns.exchange(0, std::memory_order_relaxed) / 1000000), mean, sd,
                  std::chrono::duration<double, std::milli>(frame_max).count(), presents,
                  interp_draws ? 100.0 * blended / interp_draws : 0.0,
                  presents ? replay_us / 1000.0 / presents : 0.0);
@@ -386,11 +398,16 @@ bool native_gx_start(const NativeGxConfig* config, const NativeGxHost* host)
 void native_gx_submit(const uint8_t* data, size_t size)
 {
   const uint64_t write = s_ring.write.load(std::memory_order_relaxed);
-  while (write + size - s_ring.read.load(std::memory_order_acquire) > RING_SIZE)
+  if (write + size - s_ring.read.load(std::memory_order_acquire) > RING_SIZE)
   {
-    if (s_stop.load(std::memory_order_relaxed))
-      return;
-    std::this_thread::yield();
+    const auto start = std::chrono::steady_clock::now();
+    while (write + size - s_ring.read.load(std::memory_order_acquire) > RING_SIZE)
+    {
+      if (s_stop.load(std::memory_order_relaxed))
+        return;
+      std::this_thread::yield();
+    }
+    AddCpuWait(start);
   }
   const size_t offset = static_cast<size_t>(write & RING_MASK);
   const size_t first = std::min(size, RING_SIZE - offset);
@@ -406,7 +423,8 @@ void native_gx_drain(void)
   const uint64_t target = s_ring.write.load(std::memory_order_relaxed);
   if (s_ring.consumer_waiting.exchange(false, std::memory_order_seq_cst))
     SDL_SignalSemaphore(s_ring.wake);
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto start = std::chrono::steady_clock::now();
+  const auto deadline = start + std::chrono::seconds(5);
   while (s_ring.settled.load(std::memory_order_acquire) < target)
   {
     if (s_stop.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() > deadline)
@@ -421,6 +439,7 @@ void native_gx_drain(void)
       SDL_WaitSemaphoreTimeout(s_ring.drained, 100);
     s_ring.drain_waiting.store(false, std::memory_order_relaxed);
   }
+  AddCpuWait(start);
 }
 
 const uint8_t* native_gx_save_state(size_t* size)

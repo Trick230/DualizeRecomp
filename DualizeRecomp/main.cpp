@@ -304,8 +304,10 @@ int main(int argc, char** argv)
   if (watcher.joinable())
     watcher.join();
   const auto& stats = machine->cpu.GetStats();
-  std::fprintf(stderr, "[native] dispatches %llu, interpreted %llu, entry misses %llu, fallbacks %llu\n",
+  std::fprintf(stderr,
+               "[native] dispatches %llu, safepoints %llu, interpreted %llu, entry misses %llu, fallbacks %llu\n",
                static_cast<unsigned long long>(stats.dispatches),
+               static_cast<unsigned long long>(stats.safepoints),
                static_cast<unsigned long long>(stats.interpreted),
                static_cast<unsigned long long>(stats.entry_misses),
                static_cast<unsigned long long>(stats.fallbacks));

@@ -43,6 +43,9 @@ void guest_set_direct_calls(const unsigned char* function_ok, u32 idle_pc);
 
 // The runtime's (cpu.cpp): the verified function holding target, or NULL.
 GuestCode dolrecomp_lookup(CPUState* ctx, u32 target);
+// The runtime's: the slice ran out at a loop about to go to pc. Runs the due
+// events in place; nonzero if generated code must leave for the dispatcher.
+int dolrecomp_safepoint(CPUState* ctx, u32 pc);
 
 #ifdef __cplusplus
 }

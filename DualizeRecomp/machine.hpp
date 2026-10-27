@@ -81,6 +81,9 @@ public:
   void MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32_t pc);
   void GatherPipeBursts(const uint8_t* data, size_t size);
   void AfterEvents();
+  // AfterEvents' work that is safe with generated code on the stack: false
+  // if a request (stop, save, load) waits for the CPU's run loop.
+  bool AfterEventsInPlace();
   void BeforeIdle();
   void OnFieldEnd(uint64_t ticks);
   void Throttle(uint64_t ticks);

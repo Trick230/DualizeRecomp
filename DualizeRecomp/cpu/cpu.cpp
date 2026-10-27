@@ -104,6 +104,11 @@ extern "C" GuestCode dolrecomp_lookup(CPUState* ctx, u32 target)
   return CpuOf(ctx).Lookup(target);
 }
 
+extern "C" int dolrecomp_safepoint(CPUState* ctx, u32 pc)
+{
+  return CpuOf(ctx).Safepoint(pc);
+}
+
 Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
 {
   state.external_read = HookRead;
@@ -405,6 +410,20 @@ bool Cpu::RunNative(int function)
   } while (state.downcount > 0 && function >= 0 && m_function_state[function] == FUNCTION_VERIFIED &&
            m_running);
   return true;
+}
+
+bool Cpu::Safepoint(uint32_t pc)
+{
+  // As far as events can tell, the CPU is at the loop target.
+  state.pc = pc;
+  if (!m_running || (m_idle_pc && pc == m_idle_pc))
+    return true;
+  ++m_stats.safepoints;
+  m_scheduler.Advance();
+  if (!m_machine.AfterEventsInPlace() || !m_running)
+    return true;
+  // Delivered by the run loop: the handler runs from an empty host stack.
+  return (state.msr & MSR_EE) && (m_external || m_decrementer);
 }
 
 void Cpu::Run()
