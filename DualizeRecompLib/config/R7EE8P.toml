@@ -1,0 +1,34 @@
+# NiGHTS: Journey of Dreams (USA), recompiled by tools/DolRecomp.
+# Paths are relative to the extracted disc, except natives (next to this file).
+
+[main]
+dol = "sys/main.dol"
+# Revolution SDK and runtime functions with host implementations
+# (DualizeRecomp/sdk), each pinned to the SDK bytes it replaces.
+natives = "R7EE8P.natives"
+# Fixed number of generated sources, so the build can list them up front.
+shards = 64
+
+# Much of the game's code ships in RSO modules (files/rso) that the game loads
+# into the heap at run time. Boot and heap order are deterministic, so each
+# module always lands at the same address; linking them there ahead of time
+# reproduces their loaded text byte for byte. If a module ever lands
+# elsewhere, the runtime's chunk hash check sees different bytes and that code
+# stays on the interpreter.
+#
+# Values read back from guest RAM during gameplay (the RSO list starting at
+# the static module header, 0x904B0120).
+[rso]
+sel = "files/rso/NightsWii.sel"
+# NightsWii.sel section index -> run-time address (.init, .text, .rodata,
+# .data, .bss, .sdata, .sdata2, .sbss, .sbss2).
+static_sections = [
+    0, 0x80004000, 0x8000BB20, 0, 0, 0x804E7400, 0x8050FA20,
+    0x80581780, 0x806F5600, 0x806F7120, 0, 0x806F6640, 0x806F7D60,
+]
+modules = [
+    { file = "files/rso/global.rso", base = 0x8106E4C0, bss = 0x812C7F80 },
+    { file = "files/rso/play.rso", base = 0x8154B780 },
+    { file = "files/rso/select.rso", base = 0x81577020, bss = 0x815B4580 },
+    { file = "files/rso/title.rso", base = 0x81732020, bss = 0x81731FA0 },
+]

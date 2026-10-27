@@ -1,4 +1,4 @@
-# Revolution SDK and runtime functions with host implementations (lib/ModernGekko/src/module_natives).
+# Revolution SDK and runtime functions with host implementations (DualizeRecomp/sdk).
 # <address> <size> <fnv1a64 of the code bytes> <symbol> [jump]; regenerate hashes with
 # scripts/natives_hash.py. Hashes pin each entry to the SDK build the native was written for.
 8000626C 0050 48D07741FF0575B4 msl_memcpy
