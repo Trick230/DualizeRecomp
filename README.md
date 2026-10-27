@@ -164,11 +164,14 @@ Switch pads work the same way (Xbox names below).
 
 ### Recompiler
 
-DolRecomp turns each chunk of PowerPC code into a C function with a switch
-over its entry points. Our fork makes the generated code call other chunks,
-virtual calls and jump tables directly, keeps entry cases only where code can
-actually be entered, inlines the common FPU and paired-single paths, and loads
-the guest memory base once per function. Hot SDK functions (thread switching,
+DolRecomp finds the game's functions (from calls, symbols, code pointers in
+data, and MWCC's switch tables) and turns each into a C function. Calls
+between them are C calls, virtual calls and jump tables enter their target
+directly, and each function keeps a switch only for the points it can be
+resumed at. Generated code counts its cycles down against the runtime's event
+scheduler and leaves only when the next event is due. Our fork also inlines
+the common FPU and paired-single paths and loads the guest memory base once
+per function. Hot SDK functions (thread switching,
 mutexes, interrupts, matrix math, memcpy, cache ranges, MWCC's register
 save/restore helpers) are replaced by host code in
 [`DualizeRecomp/sdk`](DualizeRecomp/sdk), each pinned to a hash of the guest
@@ -231,7 +234,8 @@ Uncapped gameplay in Will's first stage, i5-9600KF + RTX 4060.
 | Direct indirect calls, PSMTX natives, builtin byte swaps | 88 |
 | Cache-range and MWCC helper natives, gather-pipe fast path | 96 |
 | Sparse entry switches | 101 |
-| **Native runtime** with flat guest memory | **113** |
+| Native runtime with flat guest memory | 113 |
+| **One C function per guest function** | **122** |
 
 At 30 FPS that leaves the CPU thread idle about 70% of the time. How each
 step was done is in [docs/HISTORY.md](docs/HISTORY.md).
@@ -245,7 +249,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator | ✅ · ⏳ stage RSO modules |
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
-| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ⏳ |
+| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter; safepoints and registers as locals left |
 | 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | ⏳ |
 
 ## Working on the forks
