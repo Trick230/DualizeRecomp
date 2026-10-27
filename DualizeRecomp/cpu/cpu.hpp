@@ -63,6 +63,7 @@ public:
     uint64_t entry_misses = 0;
     uint64_t fallbacks = 0;
     uint64_t verifications = 0;
+    uint64_t safepoints = 0;
   };
   const Stats& GetStats() const { return m_stats; }
 
@@ -77,6 +78,10 @@ public:
   // The verified function holding pc, verifying it first if it never was;
   // NULL if none does or its guest text changed.
   GuestCode Lookup(uint32_t pc);
+  // Generated code ran its slice out at a loop about to go to pc: runs the
+  // events due there; true if it must return to the run loop instead of
+  // going on (an interrupt to take, the idle loop, a stop or other request).
+  bool Safepoint(uint32_t pc);
 
 private:
   enum FunctionState : uint8_t

@@ -553,6 +553,12 @@ void Machine::AfterEvents()
     ServiceRequests();
 }
 
+bool Machine::AfterEventsInPlace()
+{
+  gfx.Poll();
+  return !m_requests.load(std::memory_order_relaxed);
+}
+
 void Machine::BeforeIdle()
 {
   // The idle loop waits on what the GPU finishes; let it finish first.
