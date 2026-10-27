@@ -61,10 +61,10 @@ void Scheduler::ForceCheck(int64_t cycles)
 {
   if (cycles < 0)
     cycles = 0;
-  if (downcount > cycles)
+  if (*m_downcount > cycles)
   {
-    m_slice -= downcount - cycles;
-    downcount = cycles;
+    m_slice -= *m_downcount - cycles;
+    *m_downcount = cycles;
   }
 }
 
@@ -78,7 +78,7 @@ void Scheduler::StartSlice()
     slice = next > m_slice_start ? std::min<int64_t>(slice, next - m_slice_start) : 0;
   }
   m_slice = slice;
-  downcount = slice;
+  *m_downcount = slice;
 }
 
 void Scheduler::Advance()
@@ -86,7 +86,7 @@ void Scheduler::Advance()
   // Time runs on from where the CPU stopped, overshoot included.
   m_slice_start = Now();
   m_slice = 0;
-  downcount = 0;
+  *m_downcount = 0;
   while (!m_heap.empty() && m_heap.front().time <= m_slice_start)
   {
     std::pop_heap(m_heap.begin(), m_heap.end(), Later);
@@ -104,7 +104,7 @@ void Scheduler::Idle()
   {
     m_slice_start = m_heap.front().time;
     m_slice = 0;
-    downcount = 0;
+    *m_downcount = 0;
   }
 }
 
@@ -129,7 +129,7 @@ void Scheduler::DoState(StateIO& io)
     std::make_heap(m_heap.begin(), m_heap.end(), Later);
     m_slice_start = now;
     m_slice = 0;
-    downcount = 0;
+    *m_downcount = 0;
   }
 }
 }  // namespace dualize

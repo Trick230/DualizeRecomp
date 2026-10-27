@@ -30,7 +30,7 @@ public:
   bool IsScheduled(int type) const;
 
   // The current tick, counting what the CPU has run of its slice.
-  uint64_t Now() const { return m_slice_start + static_cast<uint64_t>(m_slice - downcount); }
+  uint64_t Now() const { return m_slice_start + static_cast<uint64_t>(m_slice - *m_downcount); }
   // Makes the running slice end within cycles ticks.
   void ForceCheck(int64_t cycles);
 
@@ -41,10 +41,19 @@ public:
 
   void DoState(StateIO& io);
 
-  // Ticks left in the slice; the CPU counts it down.
-  int64_t downcount = 0;
+  // Ticks left in the slice. The CPU counts it down in a counter of its own
+  // (its CPUState's, so generated code charges time directly), bound here.
+  void BindDowncount(int64_t* counter)
+  {
+    *counter = *m_downcount;
+    m_downcount = counter;
+  }
+  int64_t Downcount() const { return *m_downcount; }
 
 private:
+  int64_t m_own_downcount = 0;
+  int64_t* m_downcount = &m_own_downcount;
+
   struct Event
   {
     uint64_t time;

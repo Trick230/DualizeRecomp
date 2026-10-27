@@ -85,6 +85,8 @@ bool rvl_OSEnableInterrupts(CPUState* ctx) {
     ctx->gpr[4] = msr | PPC_MSR_EE;
     ctx->msr = ctx->gpr[4];
     ctx->gpr[3] = msr_ee(msr);
+    if (ctx->msr_written)
+        ctx->msr_written(ctx);
     ctx->downcount -= 5;
     return true;
 }
@@ -97,6 +99,8 @@ bool rvl_OSRestoreInterrupts(CPUState* ctx) {
     ctx->gpr[5] = ctx->gpr[3] ? msr | PPC_MSR_EE : msr & ~PPC_MSR_EE;
     ctx->msr = ctx->gpr[5];
     ctx->gpr[3] = msr_ee(msr);
+    if (ctx->msr_written)
+        ctx->msr_written(ctx);
     ctx->downcount -= 7;
     return true;
 }
