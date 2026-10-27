@@ -60,8 +60,6 @@ between are **interpolated** at the display's refresh rate.
 - The intro FMV runs at ~19 FPS, bound by the game's own video decoder. FMVs
   aren't interpolated.
 - The stage RSO modules aren't recompiled yet and run on the interpreter.
-- Quitting ends with a non-zero exit code: the renderer's teardown aborts
-  after the game has stopped.
 
 ## Building
 
