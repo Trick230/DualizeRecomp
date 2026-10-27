@@ -21,8 +21,9 @@ build/
 build-*/
 cmake-build-*/
 extern/
-# GameTDB title list downloaded by `dolrecomp --setup` (third-party data,
-# regenerated automatically on first run)
+# The pre-CMake pipeline's submodule checkouts and title database, if left
+# over from an older clone
+lib/
 database/
 CMakeUserPresets.json
 .cache/
@@ -33,4 +34,6 @@ CMakeUserPresets.json
 *.swp
 .DS_Store
 Thumbs.db
+# Driver logs dropped in the working directory
+NVIDIA Corporation/
 __pycache__/
