@@ -44,14 +44,14 @@ between are **interpolated** at the display's refresh rate.
 
 | | |
 |---|---|
-| **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
+| **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) only |
 | **Playable** | Cold boot, intro, Story Select and gameplay |
 | **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.2 ms); shown at the display's refresh rate |
 | **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
 | **Audio** | Native DSP/AX, bit-identical to Dolphin's HLE, out through SDL3 |
 | **Input** | SDL3 gamepads as Classic Controllers (Xbox, PlayStation and Switch layouts) |
 | **Tested on** | Windows 11, MSYS2 UCRT64, Clang 22, i5-9600KF + RTX 4060, 240 Hz display |
-| **Untested** | Linux and macOS, PAL `R7EP8P`, JP `R7EJ8P` |
+| **Untested** | Linux and macOS |
 
 **Known issues**
 
