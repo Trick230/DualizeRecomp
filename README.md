@@ -28,9 +28,9 @@ between are **interpolated** at the display's refresh rate.
 
 ## Highlights
 
-- **Every game instruction is native code.** No JIT. Interrupts enter the
-  OS's handlers directly, and an interpreter is left only for the apploader
-  and rare exceptions.
+- **Every game instruction is native code.** No JIT. Interrupts and the
+  exceptions the OS handles (FPU switch, system call) enter its handlers
+  directly; in play the interpreter runs nothing.
 - **One program.** The recompiled game, the runtime and the renderer build
   into one executable from one CMake project, the way
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
@@ -197,7 +197,7 @@ game loads them to, so they recompile with the DOL.
 
 | Part | What it does |
 |---|---|
-| `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (external and decrementer interrupts save the OS context natively and start in the OS handler), locked L1 cache and its DMA |
+| `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
 | `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, Bluetooth with emulated Wii Remotes |
 | `hw/` | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Hollywood GPIO |
 | `apu/` | The AX DSP microcode in host code, mixed out through SDL3 |
@@ -276,7 +276,7 @@ What phase 7 still has to do, in order:
 
 | Step | What changes | Status |
 |---|---|---|
-| Native interrupt entry | External and decrementer interrupts save the OSContext in host code and start in the recompiled OS handler; no interpreter | ✅ |
+| Native interrupt entry | External and decrementer interrupts and FP-unavailable save the OSContext in host code and start in the recompiled OS handler; the system call (a memory sync) runs in host code. No interpreter in play | ✅ |
 | Guest calls from the host | Run a guest function to its return from host code, inside an interrupt handler (scheduler off, so no thread switch) | ✅ |
 | IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ✅ |
 | Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏳ |

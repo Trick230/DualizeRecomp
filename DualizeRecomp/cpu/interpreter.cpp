@@ -1228,6 +1228,7 @@ done:
     // The helper already moved pc to the vector.
     c.exception = 0;
     c.program_exception = 0;
+    EnterException();
   }
   else
   {
