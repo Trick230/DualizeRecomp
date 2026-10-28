@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -100,8 +101,16 @@ public:
   // return to the run loop at state.pc instead of going on (a handler that
   // switched threads, the idle loop, a stop or other request).
   bool Safepoint(uint32_t pc);
-  // A native loaded an OSContext (OSLoadContext or a thread switch).
-  void ContextLoaded() { ++m_context_loads; }
+  // A native loaded the OSContext at `context` (OSLoadContext or a thread
+  // switch). Another thread's context parks this host fiber and resumes the
+  // one that thread parked at the same point, if any: the call returns once
+  // this fiber's own thread is loaded again.
+  void ContextLoaded(uint32_t context);
+  // Runs the code at state.pc, function by function, until it returns to pc:
+  // a native that resumed its own thread finishes the guest call it was in,
+  // so the caller's host frame goes on inline. Gives up (the caller then
+  // leaves for the dispatcher) if it doesn't get there soon.
+  void RunTo(uint32_t pc);
 
 private:
   enum FunctionState : uint8_t
@@ -132,6 +141,8 @@ private:
   // safepoint, which then goes on in place; false leaves for the run loop,
   // which goes on wherever the handler left the CPU.
   bool InterruptInPlace(uint32_t pc);
+  // The run loop proper, on the running fiber.
+  void RunLoop();
   // Enters the OS handler of exception `number` (4 external, 7 FP
   // unavailable, 8 decrementer) natively when its vector holds the OS's stub;
   // else pc stays at the vector.
@@ -224,6 +235,20 @@ private:
   bool m_in_handler = false;
   uint64_t m_handler_loads = 0;
   uint32_t m_guest_calls = 0;  // CallGuest depth
+
+  // Guest threads on host fibers (Windows; elsewhere every switch unwinds to
+  // the dispatcher). Each fiber runs one guest thread, keyed by its OSContext
+  // (0 until a switch names it); a parked one waits to be resumed where its
+  // thread's saved context says it stopped.
+  struct Fiber;
+  Fiber* NewFiber(uint32_t context);
+  void SwitchTo(Fiber* fiber);
+  // After a state loads: the parked fibers' stacks belong to the old state.
+  void DropFibers();
+  static void FiberMain(Cpu& cpu);
+  std::vector<std::unique_ptr<Fiber>> m_fibers;
+  Fiber* m_fiber = nullptr;  // the running one, inside Run
+  void* m_home = nullptr;    // the host thread's own fiber, which Run returns on
 
   Stats m_stats;
 };

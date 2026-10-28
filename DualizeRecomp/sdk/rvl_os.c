@@ -275,12 +275,15 @@ static inline void store16(u8* base, u32 offset, u16 value) {
     base[offset + 1] = (u8)value;
 }
 
-// The runtime's note that a context was loaded (cpu/cpu.cpp).
-void dualize_context_loaded(CPUState* ctx);
+// The runtime (cpu/cpu.cpp): a context was loaded, which switches host fibers
+// when it is another thread's and returns once this one's is loaded again;
+// and the rest of a guest call, run up to its return to `pc`.
+void dualize_context_loaded(CPUState* ctx, u32 context);
+void dualize_run_to(CPUState* ctx, u32 pc);
 
 // Resumes `context` the way OSLoadContext's closing rfi does: at its SRR0
 // with its SRR1, never at the caller.
-static void resume_context(CPUState* ctx, u8* context) {
+static void resume_context(CPUState* ctx, u8* context, u32 address) {
     u32 srr0 = load(context, CONTEXT_SRR0);
     if (srr0 > OS_DISABLE_INTERRUPTS && srr0 < OS_DISABLE_INTERRUPTS_END) {
         srr0 = OS_DISABLE_INTERRUPTS;
@@ -312,7 +315,7 @@ static void resume_context(CPUState* ctx, u8* context) {
     const u32 msr = ctx->msr & ~(PPC_MSR_EE | PPC_MSR_RI);
     ctx->msr = ((msr & ~PPC_MSR_RFI_MASK) | (ctx->srr1 & PPC_MSR_RFI_MASK)) & ~PPC_MSR_POW;
     ctx->pc = srr0 & ~3u;
-    dualize_context_loaded(ctx);
+    dualize_context_loaded(ctx, address);
 }
 
 // void OSLoadContext(OSContext* context)
@@ -322,7 +325,7 @@ bool rvl_OSLoadContext(CPUState* ctx) {
     u8* context = object(ctx, ctx->gpr[3], CONTEXT_SIZE);
     if (!context || (ctx->msr & PPC_MSR_PR))
         return false;
-    resume_context(ctx, context);
+    resume_context(ctx, context, ctx->gpr[3]);
     ctx->downcount -= 50;
     return true;
 }
@@ -517,8 +520,16 @@ static void commit_select(CPUState* ctx, const SelectPlan* plan, u8* frame, u32 
               ? srr1 | PPC_MSR_FP
               : srr1 & ~PPC_MSR_FP);
 
-    resume_context(ctx, plan->next);
+    resume_context(ctx, plan->next, plan->next_address);
     ctx->downcount -= 150;
+}
+
+// After commit_select: back on this thread (no switch, or its host fiber
+// resumed) at its saved SelectThread with the frame at `sp`, the guest call
+// runs on to its return to `caller`, where the caller's host frame goes on.
+static void finish_select(CPUState* ctx, u32 sp, u32 caller) {
+    if (ctx->pc == SELECT_THREAD_SAVE_RETURN && ctx->gpr[1] == sp)
+        dualize_run_to(ctx, caller);
 }
 
 // static OSThread* SelectThread(BOOL yield)
@@ -535,7 +546,10 @@ bool rvl_SelectThread(CPUState* ctx) {
     u8* frame = object(ctx, ctx->gpr[1] - SELECT_THREAD_FRAME, SELECT_THREAD_FRAME + 8u);
     if (!frame)
         return false;
+    const u32 caller = ctx->lr;
+    const u32 sp = ctx->gpr[1] - SELECT_THREAD_FRAME;
     commit_select(ctx, &plan, frame, yield);
+    finish_select(ctx, sp, caller);
     return true;
 }
 
@@ -575,6 +589,7 @@ bool rvl_OSSleepThread(CPUState* ctx) {
 
     // Prologue, OSDisableInterrupts (r31 keeps the old EE), then the thread
     // waits: state, queue and its place in it.
+    const u32 sp = ctx->gpr[1] - SLEEP_THREAD_FRAME - SELECT_THREAD_FRAME;
     push_frame(frames + SELECT_THREAD_FRAME, ctx, SLEEP_THREAD_FRAME);
     ctx->gpr[30] = queue_address;
     ctx->gpr[31] = msr_ee(ctx->msr);
@@ -594,9 +609,11 @@ bool rvl_OSSleepThread(CPUState* ctx) {
     store(plan.hint_slot, 0, 1);
 
     // SelectThread(FALSE), returning into OSSleepThread's epilogue.
+    const u32 caller = ctx->lr;
     ctx->lr = SLEEP_THREAD_SELECT_RETURN;
     commit_select(ctx, &plan, frames, 0);
     ctx->downcount -= 40;
+    finish_select(ctx, sp, caller);
     return true;
 }
 

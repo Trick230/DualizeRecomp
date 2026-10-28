@@ -111,10 +111,31 @@ extern "C" int dolrecomp_safepoint(CPUState* ctx, u32 pc)
   return CpuOf(ctx).Safepoint(pc);
 }
 
-extern "C" void dualize_context_loaded(CPUState* ctx)
+extern "C" void dualize_context_loaded(CPUState* ctx, u32 context)
 {
-  CpuOf(ctx).ContextLoaded();
+  CpuOf(ctx).ContextLoaded(context);
 }
+
+extern "C" void dualize_run_to(CPUState* ctx, u32 pc)
+{
+  CpuOf(ctx).RunTo(pc);
+}
+
+// DolRecomp's direct-call depth: each host stack has its own.
+extern "C" unsigned dolrecomp_call_depth;
+
+struct Cpu::Fiber
+{
+  void* handle = nullptr;
+  uint32_t context = 0;
+  // Parked: where its thread's saved context resumes.
+  uint32_t pc = 0, sp = 0;
+  // The run's per-stack state while it is parked.
+  unsigned call_depth = 0;
+  uint32_t guest_calls = 0;
+  bool in_handler = false;
+  uint64_t handler_loads = 0;
+};
 
 Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
 {
@@ -150,6 +171,13 @@ Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
 Cpu::~Cpu()
 {
   PublishDirectCalls(false);
+  DropFibers();
+#ifdef _WIN32
+  for (const std::unique_ptr<Fiber>& fiber : m_fibers)
+    DeleteFiber(fiber->handle);
+  if (m_home)
+    ConvertFiberToThread();
+#endif
 }
 
 bool Cpu::AttachModule(std::string* error)
@@ -637,9 +665,167 @@ bool Cpu::InterruptInPlace(uint32_t pc)
   return state.pc == pc && state.gpr[1] == sp && m_running;
 }
 
+// --- Fibers -------------------------------------------------------------------
+
+Cpu::Fiber* Cpu::NewFiber(uint32_t context)
+{
+#ifdef _WIN32
+  // A guest thread's direct calls nest as deep as on the host thread.
+  constexpr size_t STACK_COMMIT = 256 * 1024, STACK_RESERVE = 32 * 1024 * 1024;
+  void* handle = CreateFiberEx(
+      STACK_COMMIT, STACK_RESERVE, 0, [](void* cpu) { FiberMain(*static_cast<Cpu*>(cpu)); }, this);
+  if (!handle)
+    return nullptr;
+  m_fibers.push_back(std::make_unique<Fiber>());
+  m_fibers.back()->handle = handle;
+  m_fibers.back()->context = context;
+  return m_fibers.back().get();
+#else
+  (void)context;
+  return nullptr;
+#endif
+}
+
+void Cpu::FiberMain(Cpu& cpu)
+{
+  for (;;)
+  {
+    cpu.RunLoop();
+#ifdef _WIN32
+    SwitchToFiber(cpu.m_home);
+#endif
+  }
+}
+
+void Cpu::SwitchTo(Fiber* fiber)
+{
+#ifdef _WIN32
+  Fiber* self = m_fiber;
+  self->call_depth = dolrecomp_call_depth;
+  self->guest_calls = m_guest_calls;
+  self->in_handler = m_in_handler;
+  self->handler_loads = m_handler_loads;
+  m_fiber = fiber;
+  dolrecomp_call_depth = fiber->call_depth;
+  m_guest_calls = fiber->guest_calls;
+  m_in_handler = fiber->in_handler;
+  m_handler_loads = fiber->handler_loads;
+  SwitchToFiber(fiber->handle);
+#else
+  (void)fiber;
+#endif
+}
+
+void Cpu::ContextLoaded(uint32_t context)
+{
+  ++m_context_loads;
+  Fiber* self = m_fiber;
+  if (!self || context == self->context)
+    return;
+  if (!self->context)
+  {
+    // A fiber nothing named yet carries on as this thread's.
+    self->context = context;
+    return;
+  }
+#ifdef _WIN32
+  // The thread leaving resumes where its saved context says.
+  constexpr uint32_t CONTEXT_R1 = 4, CONTEXT_SRR0 = 408;
+  const uint8_t* saved = m_machine.memory.Effective(self->context, CONTEXT_SRR0 + 4);
+  if (!saved)
+  {
+    self->context = context;
+    return;
+  }
+  self->pc = Load32(saved + CONTEXT_SRR0) & ~3u;
+  self->sp = Load32(saved + CONTEXT_R1);
+
+  Fiber* target = nullptr;
+  for (auto it = m_fibers.begin(); it != m_fibers.end(); ++it)
+  {
+    Fiber* fiber = it->get();
+    if (fiber == self || fiber->context != context)
+      continue;
+    if (fiber->pc == state.pc && fiber->sp == state.gpr[1])
+      target = fiber;
+    else
+    {
+      // Its thread moved on without it (exited, or its context was rewritten).
+      DeleteFiber(fiber->handle);
+      m_fibers.erase(it);
+    }
+    break;
+  }
+  // Else the thread's first run on a fiber: from the dispatcher, at state.pc.
+  if (!target && !(target = NewFiber(context)))
+  {
+    self->context = context;
+    return;
+  }
+  SwitchTo(target);
+#endif
+}
+
+void Cpu::DropFibers()
+{
+#ifdef _WIN32
+  for (auto it = m_fibers.begin(); it != m_fibers.end();)
+  {
+    if (it->get() == m_fiber)
+    {
+      ++it;
+      continue;
+    }
+    DeleteFiber((*it)->handle);
+    it = m_fibers.erase(it);
+  }
+#endif
+  if (m_fiber)
+    m_fiber->context = 0;
+}
+
+void Cpu::RunTo(uint32_t pc)
+{
+  constexpr int MAX_DISPATCHES = 16;
+  for (int i = 0; i < MAX_DISPATCHES && state.pc != pc && m_running; ++i)
+  {
+    if (state.downcount <= 0)
+      m_scheduler.Advance();
+    const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
+    const uint32_t start = state.pc;
+    const int64_t downcount_before = state.downcount;
+    if (function >= 0)
+      m_module->functions[function](&state);
+    if (function < 0 || (state.pc == start && state.downcount == downcount_before && !state.exception))
+      return;
+    ++m_stats.dispatches;
+    if (state.exception)
+    {
+      state.exception = 0;
+      state.program_exception = 0;
+      EnterException();
+    }
+  }
+}
+
 void Cpu::Run()
 {
   m_running = true;
+#ifdef _WIN32
+  if (!m_home)
+    m_home = ConvertThreadToFiber(nullptr);
+  if (m_home && (m_fiber || (m_fiber = NewFiber(0))))
+  {
+    // Back here once the run loop stops, on whichever fiber.
+    SwitchToFiber(m_fiber->handle);
+    return;
+  }
+#endif
+  RunLoop();
+}
+
+void Cpu::RunLoop()
+{
   while (m_running)
   {
     m_scheduler.Advance();
@@ -1022,6 +1208,7 @@ void Cpu::DoState(StateIO& io)
     state.program_exception = 0;
     ppc_fpscr_control_updated(&state);
     ResetCodeState();
+    DropFibers();
   }
   io.Marker(0xC0DE0001);
 }
