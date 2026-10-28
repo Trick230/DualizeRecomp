@@ -5,6 +5,7 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
+#include <aurora/texture.hpp>
 #include <gx/recomp.hpp>
 
 #include <SDL3/SDL_mutex.h>
@@ -58,6 +59,7 @@ NativeGxConfig s_config;
 // Owned copies: the caller's strings need not outlive native_gx_start.
 std::string s_title;
 std::string s_cache_path;
+std::string s_texture_path;
 Ring s_ring;
 // Received bytes not yet processed: after a batch, the head of an incomplete
 // packet. Render thread only, except while drained (native_gx_save_state).
@@ -279,6 +281,8 @@ void RenderThread(std::atomic<int>* started)
   config.windowPosY = -1;
   config.logCallback = Log;
   config.logLevel = LOG_WARNING;
+  // Writes each texture no pack replaces to <cache>/texture_dumps, for making packs.
+  config.allowTextureDumps = std::getenv("DUALIZE_DUMP_TEXTURES") != nullptr;
   const AuroraInfo info = aurora_initialize(0, nullptr, &config);
   if (!info.window)
   {
@@ -287,6 +291,7 @@ void RenderThread(std::atomic<int>* started)
     return;
   }
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
+  aurora::texture::load_replacement_directory(s_texture_path);
   dualize::profiler::RegisterThisThread("gx");
   started->store(1, std::memory_order_release);
   started->notify_one();
@@ -377,6 +382,8 @@ bool native_gx_start(const NativeGxConfig* config, const NativeGxHost* host)
   s_cache_path = config->cache_path ? config->cache_path : "";
   s_config.title = s_title.c_str();
   s_config.cache_path = s_cache_path.c_str();
+  s_texture_path = config->texture_path ? config->texture_path : "";
+  s_config.texture_path = s_texture_path.c_str();
   s_host = *host;
   s_stop.store(false);
   s_stats.enabled = std::getenv("DUALIZE_GX_STATS") != nullptr;
