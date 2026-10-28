@@ -51,11 +51,8 @@ target_compile_definitions(DualizeRecompLib PRIVATE GXRUNTIME_FLAT_MEMORY=1)
 # line tables let a sampling profiler map host code back to guest code.
 target_compile_options(DualizeRecompLib PRIVATE
     -O3 -ffp-contract=off -fno-fast-math -gline-tables-only)
-# Built on the machine that runs it: the inline FP fast paths need a hardware
-# fma(), which the generic x86-64 baseline only reaches through libm.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    target_compile_options(DualizeRecompLib PRIVATE -march=native)
-endif()
+# The CPU target comes from DUALIZE_CPU_TARGET at the top: the inline FP fast
+# paths need a hardware fma(), which x86-64-v2 only reaches through libm.
 
 # ThinLTO across the chunks: cross-chunk calls inline. The cache makes a
 # rebuild re-optimize only what changed; each backend job holds a few large

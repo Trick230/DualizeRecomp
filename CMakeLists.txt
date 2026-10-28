@@ -28,6 +28,18 @@ if(NOT EXISTS "${DUALIZE_GAME_DIR}/sys/main.dol")
     return()
 endif()
 
+# The CPU the game, the renderer and the runtime are built for. x86-64-v3
+# (AVX2, FMA, BMI2, LZCNT, MOVBE; Haswell / Zen and later, ~96% of Steam's
+# survey) gives the guest's fused multiply-adds a hardware fma() and its
+# big-endian loads a movbe. `native` tunes for the build machine only.
+set(DUALIZE_CPU_TARGET "x86-64-v3" CACHE STRING "-march for the game and runtime (x86-64-v3, x86-64-v2, native)")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    add_compile_options(-march=${DUALIZE_CPU_TARGET})
+    # MSYS2's Abseil includes <bmi2intrin.h> by itself when BMI2 is on, which
+    # Clang only accepts through <immintrin.h>.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include immintrin.h>")
+endif()
+
 add_subdirectory(thirdparty)
 add_subdirectory(DualizeRecompLib)
 add_subdirectory(DualizeRecomp)
