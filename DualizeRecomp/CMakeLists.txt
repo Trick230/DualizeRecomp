@@ -20,7 +20,8 @@ add_executable(DualizeRecomp
     apu/native_dsp.cpp
     apu/audio_out.cpp
     hid/gamepads.cpp
-    gpu/native_gx.cpp)
+    gpu/native_gx.cpp
+    sdk/rvl_ipc.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

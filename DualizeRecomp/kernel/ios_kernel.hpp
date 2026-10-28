@@ -1,10 +1,10 @@
 #pragma once
 
-// The IOS kernel as the PPC sees it through the IPC mailbox: the fd table,
-// request and reply queues with Dolphin's timings (acknowledge 500 timebase
-// ticks after the doorbell, replies kept in order), routing of /dev/ paths to
-// the native devices and other paths to the NAND, and the devices' timed
-// events and periodic update.
+// The IOS kernel at the SDK's IPC boundary: the fd table, requests run as
+// the SDK hands them over, replies queued in order after each device's delay
+// (Dolphin's timings), routing of /dev/ paths to the native devices and other
+// paths to the NAND, and the devices' timed events and periodic update. There
+// is no mailbox: sdk/rvl_ipc.cpp replaces the SDK code that drove it.
 
 #include "kernel/ios/devices.hpp"
 #include "state.hpp"
@@ -27,12 +27,13 @@ public:
   // Creates the devices; the disc and NAND come from config.
   void Start(const ios::Config& config);
 
-  // Hollywood: the PPC rang the doorbell with a request at address.
-  void EnqueueRequest(uint32_t address);
-  // Hollywood: the mailbox may be free; sends the next ack or reply.
-  void UpdateIpc();
-  // The boot's ES_GenerateAck at IPC init.
-  void InitIpc();
+  // The SDK's IPC client (natives in sdk/rvl_ipc.cpp) hands IOS the request
+  // block at physical address; its reply comes back through PopReply after
+  // the device's delay, with the IPC interrupt raised while any is waiting.
+  void Submit(uint32_t address);
+  bool PopReply(uint32_t* address);
+  // A reply a state saved before SDK-level IPC had left in the mailbox.
+  void AdoptMailboxReply(uint32_t address);
 
   ios::Nand& Nand() { return *m_nand; }
   ios::Es& Es() { return *m_es; }
@@ -72,7 +73,7 @@ private:
   ios::Nand* m_nand = nullptr;
   ios::Es* m_es = nullptr;
   std::array<int8_t, MAX_FDS> m_fds;  // device id, -1 free
-  std::deque<uint32_t> m_requests, m_replies;
+  std::deque<uint32_t> m_replies;  // physical request addresses, in order
   uint64_t m_last_reply_time = 0;
   int m_trace = 0;
   std::unordered_set<uint32_t> m_traced;  // replies traced, until delivered

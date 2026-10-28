@@ -4,6 +4,7 @@
 #include "machine.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -573,6 +574,40 @@ void Cpu::RunFunction(uint32_t address)
     if (state.downcount <= 0)
       m_scheduler.Advance();
   }
+}
+
+uint32_t Cpu::CallGuest(uint32_t address, std::initializer_list<uint32_t> args)
+{
+  // A return address no guest code lives at.
+  constexpr uint32_t CALL_RETURN = 0xFFFFFFF0u;
+  // gpr through msr are contiguous in CPUState.
+  constexpr size_t REGISTERS_BEGIN = offsetof(CPUState, gpr);
+  constexpr size_t REGISTERS_END = offsetof(CPUState, msr) + sizeof(state.msr);
+  uint8_t saved[REGISTERS_END - REGISTERS_BEGIN];
+  uint8_t* registers = reinterpret_cast<uint8_t*>(&state) + REGISTERS_BEGIN;
+  std::memcpy(saved, registers, sizeof(saved));
+  const bool reserve_valid = state.reserve_valid;
+
+  uint32_t reg = 3;
+  for (uint32_t arg : args)
+    state.gpr[reg++] = arg;
+  state.lr = CALL_RETURN;
+  state.pc = address;
+  while (state.pc != CALL_RETURN)
+  {
+    if (state.downcount <= 0)
+      m_scheduler.Advance();
+    const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
+    if (function >= 0 && RunNative(function))
+      continue;
+    Charge(Step());
+  }
+
+  const uint32_t result = state.gpr[3];
+  std::memcpy(registers, saved, sizeof(saved));
+  state.reserve_valid = reserve_valid;
+  ++m_stats.guest_calls;
+  return result;
 }
 
 // --- Gather pipe --------------------------------------------------------------

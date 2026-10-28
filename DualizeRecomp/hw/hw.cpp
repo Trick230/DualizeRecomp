@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace dualize
 {
@@ -1233,30 +1234,16 @@ enum : uint32_t
 };
 }  // namespace
 
-void Hollywood::Reset()
+Hollywood::Hollywood(Machine& machine)
 {
-  if (m_event < 0)
-    m_event = m_machine.scheduler.Register(Event, this);
-  m_ctrl = 0;
-  m_ppc_msg = 0;
-  m_arm_msg = 0;
-  m_irq_flags = 0;
-  m_irq_mask = IRQ_BROADWAY;
-  m_gpio_dir = 0xFFDF3F;
-  m_gpio_out = 0;
-  m_resets = 0xFFFFFFFF;
+  // Event types are saved by index: keep the slot the mailbox's event had.
+  machine.scheduler.Register([](void*, uint64_t, int64_t) {}, nullptr);
 }
 
 uint32_t Hollywood::Read32(uint32_t offset) const
 {
   switch (offset)
   {
-  case 0x04:
-    return uint32_t((m_ctrl & IY2) ? 1 : 0) << 5 | uint32_t((m_ctrl & IY1) ? 1 : 0) << 4 |
-           uint32_t((m_ctrl & X2) ? 1 : 0) << 3 | uint32_t((m_ctrl & Y1) ? 1 : 0) << 2 |
-           uint32_t((m_ctrl & Y2) ? 1 : 0) << 1 | ((m_ctrl & X1) ? 1 : 0);
-  case 0x08:
-    return m_arm_msg;
   case 0x64:
     return 0xFFFFFFFF;  // AHBPROT: everything accessible
   case 0xC0:
@@ -1279,42 +1266,6 @@ void Hollywood::Write32(uint32_t offset, uint32_t value)
 {
   switch (offset)
   {
-  case 0x00:
-    m_ppc_msg = value;
-    break;
-  case 0x04:
-  {
-    uint8_t ctrl = m_ctrl & ~(X1 | X2 | IY1 | IY2);
-    ctrl |= (value & 1) ? X1 : 0;
-    ctrl |= (value & 8) ? X2 : 0;
-    if (value & 4)
-      ctrl &= ~Y1;
-    if (value & 2)
-      ctrl &= ~Y2;
-    ctrl |= (value & 0x10) ? IY1 : 0;
-    ctrl |= (value & 0x20) ? IY2 : 0;
-    m_ctrl = ctrl;
-    if (((value & 4) && (m_ctrl & IY1)) || ((value & 2) && (m_ctrl & IY2)))
-      m_irq_flags |= IRQ_BROADWAY;
-    if (m_ctrl & X1)
-      m_machine.ios.EnqueueRequest(m_ppc_msg);
-    m_machine.ios.UpdateIpc();
-    ScheduleUpdate(0);
-    break;
-  }
-  case 0x30:
-    m_irq_flags &= ~value;
-    m_machine.ios.UpdateIpc();
-    ScheduleUpdate(0);
-    break;
-  case 0x34:
-    m_irq_mask = value;
-    // As Dolphin: unmasking the Broadway IRQ resets the block.
-    if (m_irq_mask & IRQ_BROADWAY)
-      Reset();
-    m_machine.ios.UpdateIpc();
-    ScheduleUpdate(0);
-    break;
   case 0xC0:
     m_gpio_out = (value & GPIO_PPC_OWNED) | (m_gpio_out & ~GPIO_PPC_OWNED);
     break;
@@ -1335,54 +1286,26 @@ void Hollywood::Write32(uint32_t offset, uint32_t value)
   }
 }
 
-bool Hollywood::Ready() const
+bool Hollywood::TakeMailboxReply(uint32_t* address)
 {
-  return !(m_ctrl & (Y1 | Y2)) && !(m_irq_flags & IRQ_BROADWAY);
-}
-
-void Hollywood::ScheduleUpdate(int64_t cycles)
-{
-  m_machine.scheduler.Schedule(cycles, m_event);
-}
-
-void Hollywood::GenerateAck()
-{
-  m_ctrl |= Y2;
-  ScheduleUpdate(100 * Scheduler::TIMER_RATIO);
-}
-
-void Hollywood::GenerateReply(uint32_t address)
-{
-  m_arm_msg = address;
-  m_ctrl |= Y1;
-  ScheduleUpdate(100 * Scheduler::TIMER_RATIO);
-}
-
-void Hollywood::UpdateInterrupts()
-{
-  if (((m_ctrl & Y1) && (m_ctrl & IY1)) || ((m_ctrl & Y2) && (m_ctrl & IY2)))
-    m_irq_flags |= IRQ_BROADWAY;
-  if (((m_ctrl & X1) && (m_ctrl & IX1)) || ((m_ctrl & X2) && (m_ctrl & IX2)))
-    m_irq_flags |= IRQ_STARLET;
-  m_machine.pi.SetInterrupt(PI_INT_WII_IPC, (m_irq_flags & m_irq_mask) != 0);
-}
-
-void Hollywood::Event(void* user, uint64_t, int64_t)
-{
-  static_cast<Hollywood*>(user)->UpdateInterrupts();
+  *address = std::exchange(m_mailbox_reply, 0);
+  return *address != 0;
 }
 
 void Hollywood::DoState(StateIO& io)
 {
-  io.Do(m_ppc_msg);
-  io.Do(m_arm_msg);
-  io.Do(m_ctrl);
-  io.Do(m_irq_flags);
-  io.Do(m_irq_mask);
+  // The mailbox registers keep their place in the state.
+  uint32_t ppc_msg = 0, arm_msg = 0, irq_flags = 0, irq_mask = 0;
+  uint8_t ctrl = 0;
+  io.Do(ppc_msg);
+  io.Do(arm_msg);
+  io.Do(ctrl);
+  io.Do(irq_flags);
+  io.Do(irq_mask);
   io.Do(m_gpio_dir);
   io.Do(m_gpio_out);
   io.Do(m_resets);
-  if (io.Reading())
-    UpdateInterrupts();
+  // Y1: a reply the PPC had not taken yet.
+  m_mailbox_reply = io.Reading() && (ctrl & 0x04) ? arm_msg : 0;
 }
 }  // namespace dualize

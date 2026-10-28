@@ -96,38 +96,22 @@ int IosKernel::DeviceId(std::string_view name) const
   return -1;
 }
 
-void IosKernel::InitIpc()
+void IosKernel::Submit(uint32_t address)
 {
-  m_machine.hollywood.GenerateAck();
+  ExecuteCommand(address);
 }
 
-void IosKernel::EnqueueRequest(uint32_t address)
+bool IosKernel::PopReply(uint32_t* address)
 {
-  // Hardware acknowledges 456 to 658 timebase ticks after the doorbell.
-  m_machine.scheduler.Schedule(ios::Tb(500), m_queue_event, address | REQUEST_FLAG);
-}
-
-void IosKernel::UpdateIpc()
-{
-  Hollywood& hollywood = m_machine.hollywood;
-  if (!hollywood.Ready())
-    return;
-  if (!m_requests.empty())
-  {
-    const uint32_t address = m_requests.front();
-    m_requests.pop_front();
-    hollywood.ClearX1();
-    hollywood.GenerateAck();
-    ExecuteCommand(address);
-    return;
-  }
-  if (!m_replies.empty())
-  {
-    if (m_trace && m_traced.erase(m_replies.front()))
-      std::fprintf(stderr, "[ios] %08x delivered\n", m_replies.front());
-    hollywood.GenerateReply(m_replies.front());
-    m_replies.pop_front();
-  }
+  if (m_replies.empty())
+    return false;
+  *address = m_replies.front();
+  m_replies.pop_front();
+  if (m_trace && m_traced.erase(*address))
+    std::fprintf(stderr, "[ios] %08x delivered\n", *address);
+  if (m_replies.empty())
+    m_machine.pi.SetInterrupt(PI_INT_WII_IPC, false);
+  return true;
 }
 
 void IosKernel::ExecuteCommand(uint32_t address)
@@ -234,11 +218,15 @@ void IosKernel::EnqueueReply(uint32_t address, uint32_t command, int32_t value, 
 void IosKernel::QueueEvent(void* user, uint64_t userdata, int64_t)
 {
   IosKernel& kernel = *static_cast<IosKernel*>(user);
+  // A request a state saved before SDK-level IPC had rung in but IOS had not
+  // taken yet.
   if (userdata & REQUEST_FLAG)
-    kernel.m_requests.push_back(static_cast<uint32_t>(userdata));
-  else
-    kernel.m_replies.push_back(static_cast<uint32_t>(userdata));
-  kernel.UpdateIpc();
+  {
+    kernel.Submit(static_cast<uint32_t>(userdata));
+    return;
+  }
+  kernel.m_replies.push_back(static_cast<uint32_t>(userdata));
+  kernel.m_machine.pi.SetInterrupt(PI_INT_WII_IPC, true);
 }
 
 void IosKernel::DeviceEvent(void* user, uint64_t userdata, int64_t)
@@ -329,13 +317,14 @@ void IosKernel::DoState(StateIO& io)
 {
   io.Do(m_fds);
   io.Do(m_last_reply_time);
-  for (std::deque<uint32_t>* queue : {&m_requests, &m_replies})
-  {
-    std::vector<uint32_t> items(queue->begin(), queue->end());
-    io.Do(items);
-    if (io.Reading())
-      queue->assign(items.begin(), items.end());
-  }
+  // Requests: only states saved before SDK-level IPC have any (taken by IOS,
+  // not executed yet); they run once the devices are loaded.
+  std::vector<uint32_t> requests;
+  io.Do(requests);
+  std::vector<uint32_t> replies(m_replies.begin(), m_replies.end());
+  io.Do(replies);
+  if (io.Reading())
+    m_replies.assign(replies.begin(), replies.end());
   ios::StateIO device_io = DeviceStream(io);
   for (const auto& device : m_devices)
   {
@@ -343,5 +332,17 @@ void IosKernel::DoState(StateIO& io)
       device->DoState(device_io);
   }
   io.Marker(0x105C0DE);
+  if (io.Reading())
+  {
+    for (uint32_t address : requests)
+      Submit(address);
+    m_machine.pi.SetInterrupt(PI_INT_WII_IPC, !m_replies.empty());
+  }
+}
+
+void IosKernel::AdoptMailboxReply(uint32_t address)
+{
+  m_replies.push_front(address);
+  m_machine.pi.SetInterrupt(PI_INT_WII_IPC, true);
 }
 }  // namespace dualize

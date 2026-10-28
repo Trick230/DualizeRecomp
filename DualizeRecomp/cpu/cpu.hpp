@@ -12,6 +12,7 @@
 #include "state.hpp"
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,16 @@ public:
   // as the HLE boot calls the apploader.
   void RunFunction(uint32_t address);
 
+  // Calls the guest function at address with args in r3.. and runs it to its
+  // return, recompiled where possible; returns its r3. Every register comes
+  // back as it was, so host code (a native, an OS handler) can call the SDK
+  // in the middle of its own work. The callee must return to its caller: no
+  // thread switch, which holds inside an OS interrupt handler (the scheduler
+  // is off there). r1 must leave the callee room below it.
+  uint32_t CallGuest(uint32_t address, std::initializer_list<uint32_t> args = {});
+
+  Machine& GetMachine() { return m_machine; }
+
   // Asserted by the processor interface while any unmasked cause is set.
   void SetExternalInterrupt(bool asserted);
 
@@ -65,6 +76,7 @@ public:
     uint64_t verifications = 0;
     uint64_t safepoints = 0;
     uint64_t native_exceptions = 0;
+    uint64_t guest_calls = 0;
   };
   const Stats& GetStats() const { return m_stats; }
 
