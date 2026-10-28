@@ -279,10 +279,11 @@ What phase 7 still has to do, in order:
 | Native interrupt entry | External and decrementer interrupts and FP-unavailable save the OSContext in host code and start in the recompiled OS handler; the system call (a memory sync) runs in host code. No interpreter in play | ✅ |
 | Guest calls from the host | Run a guest function to its return from host code, inside an interrupt handler (scheduler off, so no thread switch) | ✅ |
 | IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ✅ |
-| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏳ |
-| Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏳ |
+| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏭️ Skipped: the whole decrementer path is 0.8% of the CPU thread in play |
+| Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏭️ Skipped: `__OSDispatchInterrupt` is 4.1% inclusive, nearly all of it the handlers' own work |
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
-| Threads as fibers | Each guest thread on its own host stack, if measurements say it pays | ❔ |
+| Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |
+| Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ❔ ~1K switches and ~3K interrupts a second; at most ~2.5% left to win |
 
 ## Working on the forks
 
