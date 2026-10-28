@@ -35,10 +35,13 @@ between are **interpolated** at the display's refresh rate.
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
 - **High refresh gameplay.** 30 Hz game logic, presented at 60, 144 or 240 Hz
   with interpolated matrices, camera, lights and projected textures.
-- **3.5× headroom.** ~113 FPS uncapped in gameplay, up from ~32 at the start
+- **5× headroom.** ~162 FPS uncapped in gameplay, up from ~32 at the start
   of the native port.
 - **Modern host stack.** Aurora on Dawn (D3D12 / Vulkan / Metal) for video,
-  SDL3 for audio and gamepads.
+  SDL3 for audio and gamepads. The fork keeps only what the game runs: its
+  Dolphin SDK layer, input, card/DVD, rmlui and the D3D11/OpenGL backends are
+  gone (34k lines). ImGui stays for in-game menus and costs nothing while none
+  is open.
 
 ## Status
 
