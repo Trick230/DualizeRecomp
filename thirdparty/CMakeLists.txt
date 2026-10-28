@@ -1,9 +1,5 @@
 # Aurora brings SDL3 and Dawn with it; the runtime uses its SDL3 for audio and
 # gamepads too, so there is one SDL in the process.
-set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
-set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
-set(AURORA_ENABLE_RMLUI OFF CACHE BOOL "" FORCE)
-set(AURORA_CACHE_USE_ZSTD OFF CACHE BOOL "" FORCE)
 if(WIN32)
     # Prebuilt Dawn and SDL3 are MSVC builds; as DLLs their C APIs link from
     # MinGW too.

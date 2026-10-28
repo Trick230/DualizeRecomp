@@ -274,11 +274,8 @@ void RenderThread(std::atomic<int>* started)
   config.windowHeight = s_config.height;
   config.windowPosX = -1;
   config.windowPosY = -1;
-  config.disableInput = true;  // the emulator reads the controllers
   config.logCallback = Log;
   config.logLevel = LOG_WARNING;
-  config.mem1Size = 0;  // guest memory is the host's, reached through Resolve
-  config.mem2Size = 0;
   const AuroraInfo info = aurora_initialize(0, nullptr, &config);
   if (!info.window)
   {
