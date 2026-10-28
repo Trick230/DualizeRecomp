@@ -25,7 +25,8 @@ struct Target
 {
   std::string name;
   HANDLE thread;
-  std::vector<uint64_t> samples;  // per sample: frame count, then the frames
+  ULONG_PTR stack_low, stack_high;  // the thread's stack, which bounds the walk
+  std::vector<uint64_t> samples;    // per sample: frame count, then the frames
 };
 
 std::mutex s_mutex;
@@ -34,23 +35,56 @@ std::thread s_sampler;
 std::atomic<bool> s_running{false};
 std::string s_path;
 
+bool OnStack(const Target& target, DWORD64 address)
+{
+  return address >= target.stack_low && address + sizeof(DWORD64) <= target.stack_high;
+}
+
+// The frame register a function's unwind data restores rsp from (rbp, say),
+// or 0 for none; chained entries take it from the entry they chain to.
+// Registers are numbered as in CONTEXT, from Rax.
+unsigned FrameRegister(DWORD64 image_base, const RUNTIME_FUNCTION* function)
+{
+  for (int depth = 0; depth < 8; ++depth)
+  {
+    const auto* info = reinterpret_cast<const uint8_t*>(image_base + function->UnwindData);
+    if (const unsigned reg = info[3] & 0x0F)
+      return reg;
+    if (!((info[0] >> 3) & UNW_FLAG_CHAININFO))
+      return 0;
+    const unsigned codes = (info[2] + 1u) & ~1u;  // the code array is padded to an even count
+    function = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + codes * 2);
+  }
+  return 0;
+}
+
 // Runs with the target suspended, so it must not allocate: the target may
-// hold the heap lock.
-int Walk(const CONTEXT& start, uint64_t* frames)
+// hold the heap lock. A walk gone wrong (a guessed leaf frame that wasn't
+// one) leaves garbage in rsp or in a frame register the unwinder reads
+// through, so both must point into the thread's stack before each step.
+int Walk(const CONTEXT& start, const Target& target, uint64_t* frames)
 {
   CONTEXT context = start;
   int count = 0;
-  while (count < MAX_FRAMES && context.Rip)
+  while (count < MAX_FRAMES && context.Rip && OnStack(target, context.Rsp))
   {
     frames[count++] = context.Rip;
     DWORD64 image_base = 0;
     RUNTIME_FUNCTION* function = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
     if (!function)
     {
-      // A leaf without unwind data: the return address is on top of the stack.
+      // Only the innermost frame can be a leaf without unwind data, with its
+      // return address on top of the stack.
+      if (count != 1)
+        break;
       context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
       context.Rsp += 8;
       continue;
+    }
+    if (const unsigned reg = FrameRegister(image_base, function))
+    {
+      if (!OnStack(target, (&context.Rax)[reg]))
+        break;
     }
     void* handler_data = nullptr;
     DWORD64 establisher = 0;
@@ -74,7 +108,7 @@ void Sample()
         CONTEXT context{};
         context.ContextFlags = CONTEXT_FULL;
         uint64_t frames[MAX_FRAMES];
-        const int count = GetThreadContext(target.thread, &context) ? Walk(context, frames) : 0;
+        const int count = GetThreadContext(target.thread, &context) ? Walk(context, target, frames) : 0;
         ResumeThread(target.thread);
         if (count)
         {
@@ -98,8 +132,10 @@ void RegisterThisThread(const char* name)
   if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0))
     return;
+  ULONG_PTR low = 0, high = 0;
+  GetCurrentThreadStackLimits(&low, &high);
   std::lock_guard lock(s_mutex);
-  s_targets.push_back({name, thread, {}});
+  s_targets.push_back({name, thread, low, high, {}});
   if (!s_running.exchange(true))
   {
     s_path = path;
