@@ -270,7 +270,19 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
-| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | ⏳ |
+| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | 🟡 Interrupts enter the OS handlers natively; the rest below |
+
+What phase 7 still has to do, in order:
+
+| Step | What changes | Status |
+|---|---|---|
+| Native interrupt entry | External and decrementer interrupts save the OSContext in host code and start in the recompiled OS handler; no interpreter | ✅ |
+| Guest calls from the host | Run a guest function to its return from host code, inside an interrupt handler (scheduler off, so no thread switch) | ⏳ |
+| IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ⏳ |
+| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏳ |
+| Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏳ |
+| WPAD/KPAD | Wii Remote reads answered from the SDL gamepads at the SDK; the Bluetooth stack (HCI, L2CAP, emulated remotes) goes | ⏳ |
+| Threads as fibers | Each guest thread on its own host stack, if measurements say it pays | ❔ |
 
 ## Working on the forks
 
