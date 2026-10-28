@@ -242,11 +242,13 @@ Uncapped gameplay in Will's first stage, i5-9600KF + RTX 4060.
 | Native runtime with flat guest memory | 113 |
 | One C function per guest function | 122 |
 | GX decoder: leaner merge path for the ~16K small draws a frame | 143 |
-| **GX decoder: vertex array uploads grow geometrically** | **158** |
+| GX decoder: vertex array uploads grow geometrically | 158 |
+| **Built for x86-64-v3 (AVX2, FMA, MOVBE) instead of the build machine** | **162** |
 
-The render thread's GX decode, not guest code, sets the uncapped rate: the
-CPU thread waits on it at each frame's draw-done. At 30 FPS that leaves the
-CPU thread idle about 70% of the time. How each
+The guest CPU thread sets the uncapped rate again: GX decode takes ~4.2 ms a
+frame and the render thread idles a third of the time, with the CPU waiting
+on it ~3 ms a second. At 30 FPS that leaves the CPU thread idle about 70% of
+the time. How each
 step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 
 ## Roadmap
