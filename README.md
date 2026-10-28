@@ -272,7 +272,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 
-What phase 7 still has to do, in order (then phase 6's registers as locals, the API-level steps below, and the stage RSO modules of phase 3 last):
+What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
 
 | Step | What changes | Status |
 |---|---|---|
@@ -284,18 +284,18 @@ What phase 7 still has to do, in order (then phase 6's registers as locals, the 
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |
 | Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ✅ Interrupts run in place at the safepoint; each guest thread runs on its own Windows fiber, parked where it switched away and resumed there. Cold boot dispatches −22%, forest 350 VPS |
-| VI at the SDK | The retrace interrupt, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API in host code; no video interface register model | ⏳ |
-| GX registers at the SDK | The token, finish and CP interrupts and GX's FIFO setup in host code; no CP/PE/MI register files | ⏳ |
-| AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | ⏳ |
-| SI and EXI at the SDK | Pads and the RTC/SRAM through the SDK's SI and EXI functions; no serial or expansion interface models | ⏳ |
-| DVD and NAND at the SDK | `DVD*` and `NAND*` served by host functions instead of IOS requests; IOS keeps only what the SDK can't skip | ⏳ |
+| VI at the SDK | The retrace interrupt, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API in host code; no video interface register model | 🔸 Optional: the VI model and the retrace handler are ~0.1% of the CPU thread |
+| GX registers at the SDK | The token, finish and CP interrupts and GX's FIFO setup in host code; no CP/PE/MI register files | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
+| AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
+| SI and EXI at the SDK | Pads and the RTC/SRAM through the SDK's SI and EXI functions; no serial or expansion interface models | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
+| DVD and NAND at the SDK | `DVD*` and `NAND*` served by host functions instead of IOS requests; IOS keeps only what the SDK can't skip | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
 
 After phase 6, before the stage modules:
 
 | Step | What changes | Status |
 |---|---|---|
-| GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | ⏳ |
-| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | ⏳ |
+| GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
+| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: the DSP's AX mixing is already host code (~1.3% of the CPU thread) |
 | Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
 | Interpolation wobble | Trees and shadows hold still between game ticks | ⏳ |
 
