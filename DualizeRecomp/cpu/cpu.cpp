@@ -235,8 +235,11 @@ void Cpu::BuildFunctionTables()
 
 void Cpu::PublishDirectCalls(bool enable)
 {
-  if (m_module)
-    guest_set_direct_calls(enable ? m_direct_call_ok.data() : nullptr, m_idle_pc);
+  if (!m_module)
+    return;
+  guest_set_direct_calls(enable ? m_direct_call_ok.data() : nullptr, m_idle_pc);
+  dolrecomp_lookup_cache = enable ? m_dispatch_cache.data() : nullptr;
+  dolrecomp_lookup_cache_mask = DISPATCH_CACHE_SIZE - 1;
 }
 
 int Cpu::FunctionAt(uint32_t pc) const
