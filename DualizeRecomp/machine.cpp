@@ -696,6 +696,8 @@ void Machine::DoState(StateIO& io)
   hollywood.DoState(io);
   io.Marker(0x3E3E0002);
   ios.DoState(io);
+  if (uint32_t reply; io.Reading() && hollywood.TakeMailboxReply(&reply))
+    ios.AdoptMailboxReply(reply);
   const apu::DspStateIO dsp_io{
       .user = &io,
       .bytes = [](void* user, void* data, uint32_t size) { static_cast<StateIO*>(user)->Bytes(data, size); },

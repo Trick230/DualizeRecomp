@@ -380,7 +380,6 @@ bool BootWiiDisc(Machine& machine, std::string* error)
     return false;
   // The game's IOS (from its TMD) replaces the menu's.
   WriteIosMemory(memory, IOS21, true);
-  machine.ios.InitIpc();
 
   DiscRead(machine, 0, 0, 0x20, ios::PARTITION_NONE);
   DiscRead(machine, 0, 0x3180, 4, partition);

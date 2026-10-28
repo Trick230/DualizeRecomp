@@ -256,46 +256,24 @@ private:
   std::atomic<uint32_t> m_posted_token{0};
 };
 
+// The Hollywood registers the game touches besides IPC: GPIO (disc slot,
+// sensor bar), AHBPROT and the reset lines. IPC goes through the SDK
+// natives in sdk/rvl_ipc.cpp, so the mailbox registers read as zero and
+// ignore writes.
 class Hollywood
 {
 public:
-  explicit Hollywood(Machine& machine) : m_machine(machine) { Reset(); }
+  explicit Hollywood(Machine& machine);
   uint32_t Read32(uint32_t offset) const;
   void Write32(uint32_t offset, uint32_t value);
-  // The IOS side of the mailbox.
-  bool Ready() const;
-  void ClearX1() { m_ctrl &= ~X1; }
-  void GenerateAck();
-  void GenerateReply(uint32_t address);
   void DoState(StateIO& io);
+  // A reply that a state saved before SDK-level IPC had left in the mailbox
+  // for the PPC (taken once, after loading).
+  bool TakeMailboxReply(uint32_t* address);
 
 private:
-  enum : uint8_t
-  {
-    X1 = 1 << 0,
-    X2 = 1 << 1,
-    Y1 = 1 << 2,
-    Y2 = 1 << 3,
-    IX1 = 1 << 4,
-    IX2 = 1 << 5,
-    IY1 = 1 << 6,
-    IY2 = 1 << 7,
-  };
-  static constexpr uint32_t IRQ_BROADWAY = 0x40000000;
-  static constexpr uint32_t IRQ_STARLET = 0x80000000;
-  void Reset();
-  void ScheduleUpdate(int64_t cycles);
-  void UpdateInterrupts();
-  static void Event(void* user, uint64_t, int64_t);
-
-  Machine& m_machine;
-  int m_event = -1;
-  uint32_t m_ppc_msg = 0, m_arm_msg = 0;
-  uint8_t m_ctrl = 0;
-  uint32_t m_irq_flags = 0, m_irq_mask = 0;
-  uint32_t m_gpio_dir = 0, m_gpio_out = 0;
-  uint32_t m_resets = 0;
-
-  friend class Machine;
+  uint32_t m_gpio_dir = 0xFFDF3F, m_gpio_out = 0;
+  uint32_t m_resets = 0xFFFFFFFF;
+  uint32_t m_mailbox_reply = 0;
 };
 }  // namespace dualize
