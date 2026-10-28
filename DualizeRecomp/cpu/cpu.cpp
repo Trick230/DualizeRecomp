@@ -387,6 +387,11 @@ constexpr uint32_t OS_SAVE_HANDLER[] = {
     0x900401AC, 0x7C13E2A6, 0x900401B0, 0x7C14E2A6, 0x900401B4, 0x7C15E2A6, 0x900401B8,
     0x7C16E2A6, 0x900401BC, 0x7C17E2A6, 0x900401C0, 0x9421FFF8,
 };
+// The system call vector: mfspr r9, HID0; ori r10, r9, 8; mtspr HID0, r10;
+// isync; sync; mtspr HID0, r9; rfi.
+constexpr uint32_t OS_SYNC_HANDLER[] = {
+    0x7D30FAA6, 0x612A0008, 0x7D50FBA6, 0x4C00012C, 0x7C0004AC, 0x7D30FBA6, 0x4C000064,
+};
 constexpr uint32_t OS_EXCEPTION_TABLE = 0x80003000;
 constexpr uint32_t OS_CURRENT_CONTEXT = 0x800000D4;
 constexpr uint32_t SPR_SPRG0 = 272;
@@ -408,10 +413,11 @@ bool CodeMatches(const uint8_t* code, const uint32_t* words, uint32_t count, uin
 
 void Cpu::EnterOsHandler(uint32_t number)
 {
-  // Does in one step what the vector stub and the save handler would do on
-  // the interpreter: the interrupted state (already in srr0/srr1) goes to the
-  // current OSContext, and the OS's handler starts at its first instruction.
-  // Anything unexpected leaves pc at the vector for the interpreter.
+  // Does in one step what the vector stub (and, for interrupts, the save
+  // handler) would do on the interpreter: the interrupted state (already in
+  // srr0/srr1) goes to the current OSContext, and the OS's handler starts at
+  // its first instruction. Anything unexpected leaves pc at the vector for the
+  // interpreter.
   const Memory& memory = m_machine.memory;
   const uint32_t vector = state.pc;
   const uint8_t* stub = memory.Physical(vector, sizeof(OS_VECTOR_STUB));  // real mode
@@ -420,22 +426,25 @@ void Cpu::EnterOsHandler(uint32_t number)
       Load32(stub + OS_VECTOR_NUMBER_WORD * 4) != (0x38600000u | number))
     return;
   const uint32_t handler = memory.Read32((OS_EXCEPTION_TABLE + number * 4) & 0x1FFFFFFF);
-  const uint8_t* code = memory.Effective(handler, sizeof(OS_SAVE_HANDLER) + 4);
-  if (!code || !CodeMatches(code, OS_SAVE_HANDLER, std::size(OS_SAVE_HANDLER)))
-    return;
-  const uint32_t branch = Load32(code + sizeof(OS_SAVE_HANDLER));
-  if ((branch & 0xFC000003u) != 0x48000000u)  // b, not linked, relative
-    return;
-  const uint32_t target = handler + sizeof(OS_SAVE_HANDLER) +
-                          static_cast<uint32_t>(static_cast<int32_t>(branch << 6) >> 6 & ~3);
   const uint32_t context_address = memory.Read32(OS_CURRENT_CONTEXT & 0x1FFFFFFF);
   uint8_t* context = memory.Effective(context_address, CONTEXT_SIZE);
-  const uint32_t sp = state.gpr[1] - 8;
-  uint8_t* frame = memory.Effective(sp, 4);
-  if (!context || !frame)
+  if (!context)
     return;
+  // An interrupt's handler saves the rest and branches on to the dispatcher.
+  const uint8_t* code = memory.Effective(handler, sizeof(OS_SAVE_HANDLER) + 4);
+  uint32_t target = handler;
+  uint8_t* frame = nullptr;
+  if (code && CodeMatches(code, OS_SAVE_HANDLER, std::size(OS_SAVE_HANDLER)))
+  {
+    const uint32_t branch = Load32(code + sizeof(OS_SAVE_HANDLER));
+    frame = memory.Effective(state.gpr[1] - 8, 4);
+    if ((branch & 0xFC000003u) != 0x48000000u || !frame)  // b, not linked, relative
+      return;
+    target = handler + sizeof(OS_SAVE_HANDLER) +
+             static_cast<uint32_t>(static_cast<int32_t>(branch << 6) >> 6 & ~3);
+  }
 
-  for (uint32_t i = 0; i < 32; ++i)
+  for (uint32_t i = 3; i < 6; ++i)
     Store32(context + i * 4, state.gpr[i]);
   Store32(context + CONTEXT_CR, state.cr);
   Store32(context + CONTEXT_LR, state.lr);
@@ -444,21 +453,56 @@ void Cpu::EnterOsHandler(uint32_t number)
   Store32(context + CONTEXT_SRR0, state.srr0);
   Store32(context + CONTEXT_SRR1, state.srr1);
   Store16(context + CONTEXT_STATE, Load16(context + CONTEXT_STATE) | CONTEXT_STATE_EXC);
-  for (uint32_t i = 1; i < 8; ++i)
-    Store32(context + CONTEXT_GQR + i * 4, state.gqr[i]);
-  Store32(frame, state.gpr[1]);  // stwu r1, -8(r1)
+  int64_t cycles = std::size(OS_VECTOR_STUB);
+  if (frame)
+  {
+    for (uint32_t i = 0; i < 32; ++i)
+      if (i < 3 || i > 5)
+        Store32(context + i * 4, state.gpr[i]);
+    for (uint32_t i = 1; i < 8; ++i)
+      Store32(context + CONTEXT_GQR + i * 4, state.gqr[i]);
+    Store32(frame, state.gpr[1]);  // stwu r1, -8(r1)
+    state.gpr[1] -= 8;
+    cycles += std::size(OS_SAVE_HANDLER) + 1;
+  }
 
-  // Registers as the stub and handler leave them.
+  // Registers as the stub (and handler) leave them.
   m_spr[SPR_SPRG0] = state.gpr[4];
-  state.gpr[1] = sp;
   state.gpr[3] = number;
   state.gpr[4] = context_address;
   state.gpr[5] = handler;
   state.cr = (state.cr & 0x0FFFFFFFu) | (0x4u | (state.xer >> 31)) << 28;  // rlwinm. r5, srr1 & RI
   state.msr |= 0x30;  // the stub's rfi turns translation on
   state.pc = target;
-  Charge(static_cast<int64_t>(std::size(OS_VECTOR_STUB) + std::size(OS_SAVE_HANDLER) + 1));
+  Charge(cycles);
   ++m_stats.native_exceptions;
+}
+
+void Cpu::EnterException()
+{
+  switch (state.pc)
+  {
+  case 0x800:  // floating point unavailable: OSSwitchFPUContext
+    EnterOsHandler(7);
+    return;
+  case 0xC00:
+  {
+    // The OS's system call handler only orders memory (HID0[ABE] around a
+    // sync); PPCSync and the cache range functions call it.
+    const uint8_t* code = m_machine.memory.Physical(0xC00, sizeof(OS_SYNC_HANDLER));
+    if (!code || !CodeMatches(code, OS_SYNC_HANDLER, std::size(OS_SYNC_HANDLER)))
+      return;
+    state.gpr[9] = m_spr[SPR_HID0];
+    state.gpr[10] = m_spr[SPR_HID0] | 8;
+    state.msr = (state.msr & ~SRR1_MASK) | (state.srr1 & SRR1_MASK);
+    state.pc = state.srr0;
+    Charge(std::size(OS_SYNC_HANDLER));
+    ++m_stats.native_exceptions;
+    return;
+  }
+  default:
+    return;
+  }
 }
 
 void Cpu::CheckInterrupts()
@@ -498,6 +542,7 @@ bool Cpu::RunNative(int function)
       // The runtime already moved pc/msr/srr to the vector.
       state.exception = 0;
       state.program_exception = 0;
+      EnterException();
     }
     if ((m_external || m_decrementer) && (state.msr & MSR_EE))
       CheckInterrupts();

@@ -120,9 +120,12 @@ private:
   // Ends the slice early if an interrupt is pending and unmasked.
   void RequestInterruptCheck();
   void TakeInterrupt(uint32_t vector);
-  // Enters the OS handler of exception `number` (4 external, 8 decrementer)
-  // natively when its vector holds the OS's stub; else pc stays at the vector.
+  // Enters the OS handler of exception `number` (4 external, 7 FP
+  // unavailable, 8 decrementer) natively when its vector holds the OS's stub;
+  // else pc stays at the vector.
   void EnterOsHandler(uint32_t number);
+  // The same for an exception the code just raised (pc at its vector).
+  void EnterException();
 
   // The function holding pc, verified first if it never was, or NO_FUNCTION
   // if none does or it does not match guest RAM.
