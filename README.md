@@ -272,7 +272,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 
-What phase 7 still has to do, in order (then phase 6's registers as locals; the stage RSO modules of phase 3 come last):
+What phase 7 still has to do, in order (then phase 6's registers as locals, the API-level steps below, and the stage RSO modules of phase 3 last):
 
 | Step | What changes | Status |
 |---|---|---|
@@ -289,6 +289,15 @@ What phase 7 still has to do, in order (then phase 6's registers as locals; the 
 | AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | ⏳ |
 | SI and EXI at the SDK | Pads and the RTC/SRAM through the SDK's SI and EXI functions; no serial or expansion interface models | ⏳ |
 | DVD and NAND at the SDK | `DVD*` and `NAND*` served by host functions instead of IOS requests; IOS keeps only what the SDK can't skip | ⏳ |
+
+After phase 6, before the stage modules:
+
+| Step | What changes | Status |
+|---|---|---|
+| GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | ⏳ |
+| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | ⏳ |
+| Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
+| Interpolation wobble | Trees and shadows hold still between game ticks | ⏳ |
 
 ## Working on the forks
 
