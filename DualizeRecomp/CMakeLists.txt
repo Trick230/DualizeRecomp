@@ -2,6 +2,7 @@ add_executable(DualizeRecomp
     main.cpp
     machine.cpp
     boot.cpp
+    profiler.cpp
     cpu/cpu.cpp
     cpu/interpreter.cpp
     kernel/memory.cpp
@@ -27,7 +28,7 @@ target_include_directories(DualizeRecomp PRIVATE
 target_link_libraries(DualizeRecomp PRIVATE
     DualizeRecompLib aurora::core aurora::gx aurora::vi SDL3::SDL3)
 if(WIN32)
-    target_link_libraries(DualizeRecomp PRIVATE winmm shell32 ole32 uuid)
+    target_link_libraries(DualizeRecomp PRIVATE winmm shell32 ole32 uuid psapi)
     # Guest calls nest as host calls on the main thread (up to
     # DOLRECOMP_C_MAX_CALL_DEPTH of them).
     target_link_options(DualizeRecomp PRIVATE "LINKER:--stack,33554432")

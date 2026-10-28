@@ -12,6 +12,7 @@
 // command=clear_pad; command=stop.
 
 #include "machine.hpp"
+#include "profiler.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -299,7 +300,9 @@ int main(int argc, char** argv)
   std::thread watcher;
   if (!automation.empty())
     watcher = std::thread(WatchAutomation, std::ref(*machine), automation, std::cref(done));
+  dualize::profiler::RegisterThisThread("cpu");
   machine->Run();
+  dualize::profiler::Shutdown();
   done = true;
   if (watcher.joinable())
     watcher.join();
