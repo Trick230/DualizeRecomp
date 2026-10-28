@@ -28,6 +28,8 @@ typedef struct NativeGxHost {
 typedef struct NativeGxConfig {
   const char* title;
   const char* cache_path;  // existing directory for Aurora's pipeline cache and settings
+  // HD texture packs: DDS/PNG files named like Dolphin's dumps (tex1_...).
+  const char* texture_path;
   uint32_t width;
   uint32_t height;
   bool vsync;

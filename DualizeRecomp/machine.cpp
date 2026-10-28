@@ -215,9 +215,11 @@ bool Machine::Start(std::string* error)
   std::error_code ec;
   std::filesystem::create_directories(cache, ec);
   const std::string cache_path = cache.string();
+  const std::string texture_path = (config.user / "Load" / "Textures").string();
   const NativeGxConfig gx_config{
       .title = "NiGHTS: Journey of Dreams",
       .cache_path = cache_path.c_str(),
+      .texture_path = texture_path.c_str(),
       .width = config.width,
       .height = config.height,
       .vsync = config.vsync,

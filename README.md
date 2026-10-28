@@ -39,9 +39,12 @@ between are **interpolated** at the display's refresh rate.
   of the native port.
 - **Modern host stack.** Aurora on Dawn (D3D12 / Vulkan / Metal) for video,
   SDL3 for audio and gamepads. The fork keeps only what the game runs: its
-  Dolphin SDK layer, input, card/DVD, rmlui and the D3D11/OpenGL backends are
-  gone (34k lines). ImGui stays for in-game menus and costs nothing while none
-  is open.
+  Dolphin SDK layer, input, card/DVD, rmlui, Tracy, the D3D11/OpenGL backends
+  and every path the GX stream never reaches are gone (39k lines). ImGui stays
+  for in-game menus and costs nothing while none is open.
+- **HD textures.** DDS or PNG packs named like Dolphin's dumps (`tex1_...`)
+  go in `Load/Textures` in the user folder; `DUALIZE_DUMP_TEXTURES=1` writes
+  the textures no pack replaces, to make one.
 
 ## Status
 
@@ -124,6 +127,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
 | `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
 | `DUALIZE_AUDIO_STATS=1` | Log the audio queue once per second |
+| `DUALIZE_DUMP_TEXTURES=1` | Write each texture no HD pack replaces to `Cache/NativeGX/texture_dumps` in the user folder |
 | `AURORA_INTERP_NOBLEND=1` | Debug: replay frames without blending, to compare |
 | `AURORA_INTERP_CHECK=<dir>` | Debug: write PPM pairs that must match (older frame at t = 1, newer frame at t = 0) |
 
