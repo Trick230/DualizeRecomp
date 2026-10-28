@@ -69,6 +69,10 @@ between are **interpolated** at the display's refresh rate.
 - Clang with lld (ThinLTO links the game's code); on Windows, MSYS2 UCRT64
   with `mingw-w64-ucrt-x86_64-clang`, `-lld`, `-cmake` and `-ninja`
 - A 64-bit host and your own NiGHTS: Journey of Dreams (USA) disc image
+- An x86-64-v3 CPU (AVX2, FMA: Intel Haswell or AMD Zen and later, ~96% of
+  Steam's survey) to run the build. `-DDUALIZE_CPU_TARGET=x86-64-v2` reaches
+  older CPUs, with the guest's fused multiply-adds done in software; `native`
+  tunes for the build machine only
 
 ### Steps
 
