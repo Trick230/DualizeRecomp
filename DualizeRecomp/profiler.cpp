@@ -25,8 +25,11 @@ struct Target
 {
   std::string name;
   HANDLE thread;
-  ULONG_PTR stack_low, stack_high;  // the thread's stack, which bounds the walk
-  std::vector<uint64_t> samples;    // per sample: frame count, then the frames
+  // The thread's information block: the stack it runs on now (a fiber's,
+  // after a switch), which bounds the walk.
+  const NT_TIB* tib;
+  ULONG_PTR stack_low, stack_high;
+  std::vector<uint64_t> samples;  // per sample: frame count, then the frames
 };
 
 std::mutex s_mutex;
@@ -105,6 +108,8 @@ void Sample()
       {
         if (SuspendThread(target.thread) == static_cast<DWORD>(-1))
           continue;
+        target.stack_low = reinterpret_cast<ULONG_PTR>(target.tib->StackLimit);
+        target.stack_high = reinterpret_cast<ULONG_PTR>(target.tib->StackBase);
         CONTEXT context{};
         context.ContextFlags = CONTEXT_FULL;
         uint64_t frames[MAX_FRAMES];
@@ -132,10 +137,8 @@ void RegisterThisThread(const char* name)
   if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
                        THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0))
     return;
-  ULONG_PTR low = 0, high = 0;
-  GetCurrentThreadStackLimits(&low, &high);
   std::lock_guard lock(s_mutex);
-  s_targets.push_back({name, thread, low, high, {}});
+  s_targets.push_back({name, thread, reinterpret_cast<const NT_TIB*>(NtCurrentTeb()), 0, 0, {}});
   if (!s_running.exchange(true))
   {
     s_path = path;
