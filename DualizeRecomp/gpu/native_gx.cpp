@@ -132,20 +132,23 @@ struct Stats
     const uint32_t interp_draws = totals ? totals->interpDraws - seen.interpDraws : 0;
     const uint32_t blended = totals ? totals->interpBlendedDraws - seen.interpBlendedDraws : 0;
     const uint32_t replay_us = totals ? totals->interpMicros - seen.interpMicros : 0;
+    const uint32_t starved = totals ? totals->interpStarved - seen.interpStarved : 0;
+    const uint32_t late = totals ? totals->interpLatePresents - seen.interpLatePresents : 0;
     if (totals)
       seen = *totals;
     std::fprintf(stderr,
                  "[native-gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
                  "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
                  "ms decode %lld / begin frame %lld / end frame %lld / idle %lld, cpu waits %lld ms, "
-                 "frame ms %.2f sd %.2f max %.2f, %u interpolated presents (%.0f%% of draws blended, %.2f ms each)\n",
+                 "frame ms %.2f sd %.2f max %.2f, %u interpolated presents (%.0f%% of draws blended, %.2f ms each, "
+                 "%u starved, %u late)\n",
                  frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
                  peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
                  Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle),
                  static_cast<long long>(s_cpu_wait_ns.exchange(0, std::memory_order_relaxed) / 1000000), mean, sd,
                  std::chrono::duration<double, std::milli>(frame_max).count(), presents,
                  interp_draws ? 100.0 * blended / interp_draws : 0.0,
-                 presents ? replay_us / 1000.0 / presents : 0.0);
+                 presents ? replay_us / 1000.0 / presents : 0.0, starved, late);
     std::fflush(stderr);
     *this = Stats{.enabled = true, .last_frame = last_frame};
     last = now;
