@@ -64,6 +64,7 @@ public:
     uint64_t fallbacks = 0;
     uint64_t verifications = 0;
     uint64_t safepoints = 0;
+    uint64_t native_exceptions = 0;
   };
   const Stats& GetStats() const { return m_stats; }
 
@@ -107,6 +108,9 @@ private:
   // Ends the slice early if an interrupt is pending and unmasked.
   void RequestInterruptCheck();
   void TakeInterrupt(uint32_t vector);
+  // Enters the OS handler of exception `number` (4 external, 8 decrementer)
+  // natively when its vector holds the OS's stub; else pc stays at the vector.
+  void EnterOsHandler(uint32_t number);
 
   // The function holding pc, verified first if it never was, or NO_FUNCTION
   // if none does or it does not match guest RAM.

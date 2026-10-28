@@ -308,11 +308,12 @@ int main(int argc, char** argv)
     watcher.join();
   const auto& stats = machine->cpu.GetStats();
   std::fprintf(stderr,
-               "[native] dispatches %llu, safepoints %llu, interpreted %llu, entry misses %llu, fallbacks %llu\n",
+               "[native] dispatches %llu, safepoints %llu, interpreted %llu, entry misses %llu, fallbacks %llu, native exceptions %llu\n",
                static_cast<unsigned long long>(stats.dispatches),
                static_cast<unsigned long long>(stats.safepoints),
                static_cast<unsigned long long>(stats.interpreted),
                static_cast<unsigned long long>(stats.entry_misses),
-               static_cast<unsigned long long>(stats.fallbacks));
+               static_cast<unsigned long long>(stats.fallbacks),
+               static_cast<unsigned long long>(stats.native_exceptions));
   return 0;
 }
