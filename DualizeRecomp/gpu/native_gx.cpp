@@ -1,5 +1,7 @@
 #include "gpu/native_gx.h"
 
+#include "profiler.hpp"
+
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
@@ -285,6 +287,7 @@ void RenderThread(std::atomic<int>* started)
     return;
   }
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
+  dualize::profiler::RegisterThisThread("gx");
   started->store(1, std::memory_order_release);
   started->notify_one();
 
