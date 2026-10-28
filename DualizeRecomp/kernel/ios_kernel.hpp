@@ -50,7 +50,6 @@ private:
   std::optional<ios::Reply> Open(ios::OpenRequest& request);
   void EnqueueReply(uint32_t address, uint32_t command, int32_t value, int64_t delay);
   int DeviceId(std::string_view name) const;
-  bool Traced(uint32_t address) const;
   void TraceRequest(uint32_t address) const;
 
   static void QueueEvent(void* user, uint64_t userdata, int64_t late);
@@ -75,7 +74,7 @@ private:
   std::array<int8_t, MAX_FDS> m_fds;  // device id, -1 free
   std::deque<uint32_t> m_replies;  // physical request addresses, in order
   uint64_t m_last_reply_time = 0;
-  int m_trace = 0;
+  bool m_trace = false;
   std::unordered_set<uint32_t> m_traced;  // replies traced, until delivered
 };
 }  // namespace dualize

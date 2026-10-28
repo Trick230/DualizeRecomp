@@ -8,7 +8,6 @@ add_executable(DualizeRecomp
     kernel/memory.cpp
     kernel/scheduler.cpp
     kernel/ios_kernel.cpp
-    kernel/ios/bluetooth.cpp
     kernel/ios/devices.cpp
     kernel/ios/di.cpp
     kernel/ios/directory_disc.cpp
@@ -16,12 +15,14 @@ add_executable(DualizeRecomp
     kernel/ios/fs.cpp
     kernel/ios/stm_kd.cpp
     kernel/ios/wiimote.cpp
+    kernel/ios/wiimote_pairing.cpp
     hw/hw.cpp
     apu/native_dsp.cpp
     apu/audio_out.cpp
     hid/gamepads.cpp
     gpu/native_gx.cpp
-    sdk/rvl_ipc.cpp)
+    sdk/rvl_ipc.cpp
+    sdk/rvl_wud.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

@@ -14,6 +14,7 @@
 #include "kernel/ios_kernel.hpp"
 #include "kernel/memory.hpp"
 #include "kernel/scheduler.hpp"
+#include "sdk/wud.hpp"
 
 #include <array>
 #include <atomic>
@@ -102,6 +103,7 @@ public:
   GraphicsRegisters gfx;
   Hollywood hollywood;
   IosKernel ios;
+  Wud wud;
   std::unique_ptr<apu::DspCore> dsp;
   std::shared_ptr<const ios::Disc> disc;
 
