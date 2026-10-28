@@ -195,6 +195,7 @@ void Cpu::BuildFunctionTables()
     for (uint32_t line = first >> 3; line << 3 < last; ++line)
       m_code_lines[line >> 6] |= uint64_t{1} << (line & 63);
   }
+  FlushDispatchCache();
   m_idle_pc = m_machine.config.idle_pc;
   PublishDirectCalls(true);
 }
@@ -247,20 +248,38 @@ void Cpu::VerifyFunction(uint32_t index)
   SetFunctionState(index, hash == m_module->function_hashes[index] ? FUNCTION_VERIFIED : FUNCTION_FAILED);
 }
 
-int Cpu::Dispatchable(uint32_t pc)
+void Cpu::FlushDispatchCache()
 {
+  // No instruction lives at an odd pc.
+  m_dispatch_cache.fill({1, NO_FUNCTION, nullptr});
+}
+
+const Cpu::DispatchEntry* Cpu::Dispatch(uint32_t pc)
+{
+  DispatchEntry& entry = m_dispatch_cache[(pc >> 2) & (DISPATCH_CACHE_SIZE - 1)];
+  if (entry.pc == pc)
+    return &entry;
   const int function = FunctionAt(pc);
   if (function < 0)
-    return NO_FUNCTION;
+    return nullptr;
   if (m_function_state[function] == FUNCTION_UNVERIFIED)
     VerifyFunction(static_cast<uint32_t>(function));
-  return m_function_state[function] == FUNCTION_VERIFIED ? function : NO_FUNCTION;
+  if (m_function_state[function] != FUNCTION_VERIFIED)
+    return nullptr;
+  entry = {pc, function, m_module->functions[function]};
+  return &entry;
+}
+
+int Cpu::Dispatchable(uint32_t pc)
+{
+  const DispatchEntry* entry = Dispatch(pc);
+  return entry ? entry->function : NO_FUNCTION;
 }
 
 GuestCode Cpu::Lookup(uint32_t pc)
 {
-  const int function = Dispatchable(pc);
-  return function < 0 ? nullptr : m_module->functions[function];
+  const DispatchEntry* entry = Dispatch(pc);
+  return entry ? entry->code : nullptr;
 }
 
 bool Cpu::LineMayHoldCode(uint32_t ea) const
@@ -287,9 +306,15 @@ void Cpu::InvalidateICache(uint32_t address, uint32_t length)
     else
       hi = mid;
   }
+  bool flush = false;
   for (uint32_t i = lo; i < m_module->num_functions && m_module->function_ranges[i].start <= last; ++i)
     if (m_function_state[i] != FUNCTION_UNVERIFIED)
+    {
+      flush |= m_function_state[i] == FUNCTION_VERIFIED;
       SetFunctionState(i, FUNCTION_UNVERIFIED);
+    }
+  if (flush)
+    FlushDispatchCache();
 }
 
 void Cpu::ResetCodeState()
@@ -298,6 +323,7 @@ void Cpu::ResetCodeState()
     return;
   for (uint32_t i = 0; i < m_module->num_functions; ++i)
     SetFunctionState(i, FUNCTION_UNVERIFIED);
+  FlushDispatchCache();
 }
 
 // --- Time ---------------------------------------------------------------------

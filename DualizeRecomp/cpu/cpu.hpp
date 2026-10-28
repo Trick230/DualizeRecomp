@@ -11,6 +11,7 @@
 #include "kernel/scheduler.hpp"
 #include "state.hpp"
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -130,9 +131,18 @@ private:
   // The function holding pc, verified first if it never was, or NO_FUNCTION
   // if none does or it does not match guest RAM.
   int Dispatchable(uint32_t pc);
+  // The same with the function's code, from the dispatch cache.
+  struct DispatchEntry
+  {
+    uint32_t pc;
+    int32_t function;
+    GuestCode code;
+  };
+  const DispatchEntry* Dispatch(uint32_t pc);
   int FunctionAt(uint32_t pc) const;
   void VerifyFunction(uint32_t index);
   void SetFunctionState(uint32_t index, FunctionState function_state);
+  void FlushDispatchCache();
   bool LineMayHoldCode(uint32_t ea) const;
   void BuildFunctionTables();
   void PublishDirectCalls(bool enable);
@@ -191,6 +201,10 @@ private:
   static constexpr uint32_t FUNCTION_LINE_SHIFT = 5;
   static constexpr int NO_FUNCTION = -1;
   std::vector<int32_t> m_line_function;
+  // Direct-mapped by pc, ahead of the line table. Entries only name verified
+  // functions, so it empties whenever one stops being verified.
+  static constexpr uint32_t DISPATCH_CACHE_SIZE = 4096;
+  std::array<DispatchEntry, DISPATCH_CACHE_SIZE> m_dispatch_cache;
   // One bit per 32-byte line: set where the line overlaps module code.
   std::vector<uint64_t> m_code_lines;
   uint32_t m_idle_pc = 0;
