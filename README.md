@@ -124,7 +124,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 |---|---|
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
 | `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
-| `DUALIZE_IOS_TRACE=1` | Log each IOS request (open path, ioctl number, sizes), its reply and when the PPC receives it; `all` includes Bluetooth |
+| `DUALIZE_IOS_TRACE=1` | Log each IOS request (open path, ioctl number, sizes), its reply and when the PPC receives it |
 | `DUALIZE_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
 | `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
 | `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
@@ -165,7 +165,7 @@ Switch pads work the same way (Xbox names below).
  │   ├ native SDK functions (OS scheduler, mutexes, PSMTX, memcpy, cache, MWCC)    │
  │   ├ flat guest memory: one load or store per access                             │
  │   ├ scheduler · VI · PI · SI · EXI · AI · DSP · GPIO                            │
- │   └ IOS: /dev/di · fs · es · stm · net/kd · Bluetooth + Wii Remotes             │
+ │   └ IOS: /dev/di · fs · es · stm · net/kd · WUD: Wii Remotes at the SDK         │
  │       │ gather pipe                         │ DSP DMA          ▲ pads            │
  │       ▼ SPSC ring                           ▼                  │                 │
  │  render thread                         SDL3 audio        SDL3 gamepads (1 kHz) │
@@ -198,12 +198,12 @@ game loads them to, so they recompile with the DOL.
 | Part | What it does |
 |---|---|
 | `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
-| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, Bluetooth with emulated Wii Remotes |
+| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
 | `hw/` | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Hollywood GPIO |
 | `apu/` | The AX DSP microcode in host code, mixed out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
 | `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
-| `sdk/` | Native replacements for SDK functions, including the IPC client's transport and reply handler (`rvl_ipc.cpp`) |
+| `sdk/` | Native replacements for SDK functions, including the IPC client's transport and reply handler (`rvl_ipc.cpp`) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
 | `boot.cpp` | The system menu's disc launch, then the apploader |
 
 ### Frame interpolation
@@ -270,7 +270,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
-| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | 🟡 Native interrupt entry, guest calls from the host, IOS at the SDK; the rest below |
+| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK; the rest below |
 
 What phase 7 still has to do, in order:
 
@@ -281,7 +281,7 @@ What phase 7 still has to do, in order:
 | IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ✅ |
 | Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏳ |
 | Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏳ |
-| WPAD/KPAD | Wii Remote reads answered from the SDL gamepads at the SDK; the Bluetooth stack (HCI, L2CAP, emulated remotes) goes | ⏳ |
+| WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Threads as fibers | Each guest thread on its own host stack, if measurements say it pays | ❔ |
 
 ## Working on the forks

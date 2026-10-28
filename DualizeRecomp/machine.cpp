@@ -157,7 +157,7 @@ float DisplayAspect(ios::Nand& nand)
 
 Machine::Machine(MachineConfig config_)
     : config(std::move(config_)), cpu(*this), pi(*this), vi(*this), si(*this), exi(*this), ai(*this),
-      gfx(*this), hollywood(*this), ios(*this)
+      gfx(*this), hollywood(*this), ios(*this), wud(*this)
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
   m_dsp_interrupt_event = scheduler.Register(DspInterruptEvent, this);
@@ -194,7 +194,7 @@ bool Machine::Start(std::string* error)
   ios_config.nand_root = config.user / "Wii";
   ios_config.disc = disc;
   // Wii Remote 1, with a Classic Controller.
-  ios_config.wiimotes = ios::WiimoteHost{
+  const ios::WiimoteHost wiimotes{
       .user = this,
       .slots = 1,
       .read = ReadWiimote,
@@ -205,6 +205,8 @@ bool Machine::Start(std::string* error)
       .speaker = SpeakerEnabled() ? WiimoteSpeaker : nullptr,
   };
   ios.Start(ios_config);
+  ios::PairWiimotes(ios.Nand());
+  wud.Start(wiimotes, ios_config.nand_root);
   exi.LoadSram((config.user / "GC" / "SRAM.raw").string().c_str());
 
   StartDsp();
@@ -757,6 +759,7 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
     return false;
   }
   native_gx_load_state(gx_state.data(), gx_state.size());
+  wud.AfterLoad(cpu);
   m_throttle_host = Clock::now();
   m_throttle_ticks = scheduler.Now();
   return true;

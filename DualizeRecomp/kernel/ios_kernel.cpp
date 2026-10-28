@@ -10,6 +10,8 @@ namespace dualize
 namespace
 {
 // A device's id is its index here.
+// The last is Bluetooth's, which only the SDK's WUD would open (sdk/wud.hpp
+// answers WUD instead); its slot keeps the saved state's layout.
 constexpr std::string_view DEVICES[] = {
     "/dev/di",           "/dev/stm/eventhook",
     "/dev/stm/immediate", "/dev/net/kd/request",
@@ -21,12 +23,11 @@ constexpr int ES = 6;
 constexpr int BLUETOOTH = 7;
 constexpr uint32_t IPC_REPLY = 8;
 
-// DUALIZE_IOS_TRACE=1 logs every request but Bluetooth's and each reply;
-// =all includes Bluetooth.
-int TraceLevel()
+// DUALIZE_IOS_TRACE=1 logs every request and its reply.
+bool TraceEnabled()
 {
   const char* v = std::getenv("DUALIZE_IOS_TRACE");
-  return !v || !*v || *v == '0' ? 0 : std::string_view(v) == "all" ? 2 : 1;
+  return v && *v && *v != '0';
 }
 
 // The devices' state streams over the machine's.
@@ -38,7 +39,7 @@ ios::StateIO DeviceStream(StateIO& io)
 }
 }  // namespace
 
-IosKernel::IosKernel(Machine& machine) : m_machine(machine), m_memory(m_host), m_trace(TraceLevel())
+IosKernel::IosKernel(Machine& machine) : m_machine(machine), m_memory(m_host), m_trace(TraceEnabled())
 {
   m_fds.fill(-1);
   Scheduler& scheduler = machine.scheduler;
@@ -77,7 +78,6 @@ void IosKernel::Start(const ios::Config& config)
   m_es = es.get();
   m_devices[FS] = std::move(nand);
   m_devices[ES] = std::move(es);
-  m_devices[BLUETOOTH] = ios::CreateBluetooth(m_host, m_config, *m_nand);
   for (uint32_t id = 0; id < std::size(DEVICES); ++id)
   {
     if (!m_devices[id])
@@ -117,7 +117,7 @@ bool IosKernel::PopReply(uint32_t* address)
 void IosKernel::ExecuteCommand(uint32_t address)
 {
   const uint32_t command = m_memory.Read32(address);
-  const bool trace = m_trace && Traced(address);
+  const bool trace = m_trace;
   if (trace)
     TraceRequest(address);
   std::optional<ios::Reply> reply = HandleCommand(address);
@@ -202,7 +202,7 @@ std::optional<ios::Reply> IosKernel::Open(ios::OpenRequest& request)
 void IosKernel::EnqueueReply(uint32_t address, uint32_t command, int32_t value, int64_t delay)
 {
   const ios::Memory& memory = m_memory;
-  if (m_trace && Traced(address))
+  if (m_trace)
   {
     m_traced.insert(address);
     std::fprintf(stderr, "[ios] %08x reply %d in %lld\n", address, value, static_cast<long long>(delay));
@@ -265,16 +265,6 @@ void IosKernel::HostSchedule(void* user, int64_t cycles, uint32_t device, uint32
       cycles, kernel.m_device_event, uint64_t{device} << 40 | uint64_t{event & 0xFF} << 32 | data);
 }
 
-bool IosKernel::Traced(uint32_t address) const
-{
-  // Before the reply overwrites the block: its command and fd.
-  if (m_trace > 1)
-    return true;
-  const uint32_t command = m_memory.Read32(address);
-  const uint32_t fd = m_memory.Read32(address + 8);
-  return command == ios::IPC_CMD_OPEN || fd >= MAX_FDS || m_fds[fd] != BLUETOOTH;
-}
-
 void IosKernel::TraceRequest(uint32_t address) const
 {
   const ios::Memory& memory = m_memory;
@@ -326,10 +316,12 @@ void IosKernel::DoState(StateIO& io)
   if (io.Reading())
     m_replies.assign(replies.begin(), replies.end());
   ios::StateIO device_io = DeviceStream(io);
-  for (const auto& device : m_devices)
+  for (size_t id = 0; id < m_devices.size(); ++id)
   {
-    if (device)
-      device->DoState(device_io);
+    if (id == BLUETOOTH)
+      m_machine.wud.DoState(device_io);
+    else if (m_devices[id])
+      m_devices[id]->DoState(device_io);
   }
   io.Marker(0x105C0DE);
   if (io.Reading())

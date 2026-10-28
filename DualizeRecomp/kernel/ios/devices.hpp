@@ -2,7 +2,6 @@
 
 #include "kernel/ios/ios.hpp"
 #include "kernel/ios/disc.hpp"
-#include "kernel/ios/wiimote.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -25,8 +24,6 @@ struct Config
   // DVDLowOpenPartition: copies the partition's TMD to tmd_address and returns
   // ES's verdict on it. Null rejects the command.
   int32_t (*open_partition)(void* user, uint64_t partition, uint32_t tmd_address) = nullptr;
-  // The Wii Remotes paired with /dev/usb/oh1/57e/305.
-  WiimoteHost wiimotes;
 };
 
 // NAND access modes per owner, group and others: bit 0 read, bit 1 write.
@@ -77,9 +74,9 @@ public:
 };
 std::unique_ptr<Es> CreateEs(const Host& host, Nand& nand);
 
-// /dev/usb/oh1/57e/305, the Bluetooth controller with config.wiimotes paired
-// (it lists them in SYSCONF's BT.DINF).
-std::unique_ptr<Device> CreateBluetooth(const Host& host, const Config& config, Nand& nand);
+// Lists the four Wii Remote slots and the Balance Board's as paired in
+// SYSCONF's BT.DINF, which WPAD assigns channels by.
+void PairWiimotes(Nand& nand);
 
 // The native device of that name, or null when the game's IPC stays on the
 // host's own implementation. `id` is what the device passes to Host::schedule.
