@@ -203,7 +203,7 @@ game loads them to, so they recompile with the DOL.
 | `apu/` | The AX DSP microcode in host code, mixed out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
 | `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
-| `sdk/` | Native replacements for SDK functions, including the IPC client's transport and reply handler (`rvl_ipc.cpp`) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
+| `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
 | `boot.cpp` | The system menu's disc launch, then the apploader |
 
 ### Frame interpolation
@@ -279,7 +279,7 @@ What phase 7 still has to do, in order (then phase 6's registers as locals, the 
 | Native interrupt entry | External and decrementer interrupts and FP-unavailable save the OSContext in host code and start in the recompiled OS handler; the system call (a memory sync) runs in host code. No interpreter in play | ✅ |
 | Guest calls from the host | Run a guest function to its return from host code, inside an interrupt handler (scheduler off, so no thread switch) | ✅ |
 | IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ✅ |
-| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm`, `OSCancelAlarm` and the decrementer handler keep the alarm queue in host code; the timer is a scheduler event | 🟡 Written, testing |
+| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm`, `OSCancelAlarm` and the decrementer handler keep the alarm queue in host code; the timer is a scheduler event | ✅ |
 | Interrupt causes | `__OSDispatchInterrupt` takes the causes straight from the host's devices and picks the handler by the SDK's priorities | 🟡 Written |
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |

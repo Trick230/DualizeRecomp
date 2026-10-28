@@ -62,6 +62,9 @@ public:
   uint64_t Timebase() const;
   void SetTimebase(uint64_t value);
   uint32_t& Spr(uint32_t index) { return m_spr[index & 1023]; }
+  // mtdec from host code (the OS's alarm timer): the decrementer interrupt
+  // comes after value timebase ticks.
+  void SetDecrementer(uint32_t value);
 
   void DoState(StateIO& io);
   // After loading a state: function verification starts over.

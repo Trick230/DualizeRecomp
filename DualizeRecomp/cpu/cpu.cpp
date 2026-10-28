@@ -369,6 +369,12 @@ void Cpu::DecrementerSet()
   m_scheduler.Schedule(static_cast<int64_t>(value) * Scheduler::TIMER_RATIO, m_dec_event);
 }
 
+void Cpu::SetDecrementer(uint32_t value)
+{
+  m_spr[SPR_DEC] = value;
+  DecrementerSet();
+}
+
 void Cpu::SetExternalInterrupt(bool asserted)
 {
   m_external = asserted;

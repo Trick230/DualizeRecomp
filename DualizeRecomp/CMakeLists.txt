@@ -21,6 +21,7 @@ add_executable(DualizeRecomp
     apu/audio_out.cpp
     hid/gamepads.cpp
     gpu/native_gx.cpp
+    sdk/rvl_alarm.cpp
     sdk/rvl_ipc.cpp
     sdk/rvl_wud.cpp)
 
