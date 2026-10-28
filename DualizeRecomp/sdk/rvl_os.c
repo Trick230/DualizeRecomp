@@ -275,6 +275,9 @@ static inline void store16(u8* base, u32 offset, u16 value) {
     base[offset + 1] = (u8)value;
 }
 
+// The runtime's note that a context was loaded (cpu/cpu.cpp).
+void dualize_context_loaded(CPUState* ctx);
+
 // Resumes `context` the way OSLoadContext's closing rfi does: at its SRR0
 // with its SRR1, never at the caller.
 static void resume_context(CPUState* ctx, u8* context) {
@@ -309,6 +312,7 @@ static void resume_context(CPUState* ctx, u8* context) {
     const u32 msr = ctx->msr & ~(PPC_MSR_EE | PPC_MSR_RI);
     ctx->msr = ((msr & ~PPC_MSR_RFI_MASK) | (ctx->srr1 & PPC_MSR_RFI_MASK)) & ~PPC_MSR_POW;
     ctx->pc = srr0 & ~3u;
+    dualize_context_loaded(ctx);
 }
 
 // void OSLoadContext(OSContext* context)

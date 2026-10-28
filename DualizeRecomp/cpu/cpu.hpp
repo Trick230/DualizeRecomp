@@ -96,9 +96,12 @@ public:
   // NULL if none does or its guest text changed.
   GuestCode Lookup(uint32_t pc);
   // Generated code ran its slice out at a loop about to go to pc: runs the
-  // events due there; true if it must return to the run loop instead of
-  // going on (an interrupt to take, the idle loop, a stop or other request).
+  // events due there, and an interrupt in place when it can; true if it must
+  // return to the run loop at state.pc instead of going on (a handler that
+  // switched threads, the idle loop, a stop or other request).
   bool Safepoint(uint32_t pc);
+  // A native loaded an OSContext (OSLoadContext or a thread switch).
+  void ContextLoaded() { ++m_context_loads; }
 
 private:
   enum FunctionState : uint8_t
@@ -124,6 +127,11 @@ private:
   // Ends the slice early if an interrupt is pending and unmasked.
   void RequestInterruptCheck();
   void TakeInterrupt(uint32_t vector);
+  // At a safepoint with an interrupt to take: runs its handler nested there,
+  // up to the context load that ends it. True if that resumed the code at the
+  // safepoint, which then goes on in place; false leaves for the run loop,
+  // which goes on wherever the handler left the CPU.
+  bool InterruptInPlace(uint32_t pc);
   // Enters the OS handler of exception `number` (4 external, 7 FP
   // unavailable, 8 decrementer) natively when its vector holds the OS's stub;
   // else pc stays at the vector.
@@ -211,6 +219,11 @@ private:
   // One bit per 32-byte line: set where the line overlaps module code.
   std::vector<uint64_t> m_code_lines;
   uint32_t m_idle_pc = 0;
+  uint64_t m_context_loads = 0;
+  // Inside InterruptInPlace: the handler's run ends at its context load.
+  bool m_in_handler = false;
+  uint64_t m_handler_loads = 0;
+  uint32_t m_guest_calls = 0;  // CallGuest depth
 
   Stats m_stats;
 };

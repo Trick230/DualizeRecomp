@@ -111,6 +111,11 @@ extern "C" int dolrecomp_safepoint(CPUState* ctx, u32 pc)
   return CpuOf(ctx).Safepoint(pc);
 }
 
+extern "C" void dualize_context_loaded(CPUState* ctx)
+{
+  CpuOf(ctx).ContextLoaded();
+}
+
 Cpu::Cpu(Machine& machine) : m_machine(machine), m_scheduler(machine.scheduler)
 {
   state.external_read = HookRead;
@@ -576,6 +581,8 @@ bool Cpu::RunNative(int function)
       state.program_exception = 0;
       EnterException();
     }
+    if (m_in_handler && m_context_loads != m_handler_loads)
+      break;
     if ((m_external || m_decrementer) && (state.msr & MSR_EE))
       CheckInterrupts();
     if (state.pc == m_idle_pc && m_idle_pc)
@@ -594,8 +601,8 @@ bool Cpu::Safepoint(uint32_t pc)
   if (m_running && !(m_idle_pc && pc == m_idle_pc))
   {
     m_scheduler.Advance();
-    // Delivered by the run loop: the handler runs from an empty host stack.
-    if (m_machine.AfterEventsInPlace() && m_running && !((state.msr & MSR_EE) && (m_external || m_decrementer)))
+    if (m_machine.AfterEventsInPlace() && m_running &&
+        (!((state.msr & MSR_EE) && (m_external || m_decrementer)) || InterruptInPlace(pc)))
       return false;
   }
   // Leaving: keep the slice ended. A safepoint at a function's return names
@@ -603,6 +610,31 @@ bool Cpu::Safepoint(uint32_t pc)
   // return, so it runs on until its own next safepoint, which must leave too.
   m_scheduler.ForceCheck(0);
   return true;
+}
+
+bool Cpu::InterruptInPlace(uint32_t pc)
+{
+  // Inside a guest call the interrupt waits for the call's end, as it would
+  // from the run loop.
+  if (m_in_handler || m_guest_calls)
+    return false;
+  const uint32_t sp = state.gpr[1];
+  CheckInterrupts();
+  m_in_handler = true;
+  m_handler_loads = m_context_loads;
+  // A handler that turns interrupts back on before its end is left to the
+  // run loop too.
+  while (m_context_loads == m_handler_loads && !(state.msr & MSR_EE))
+  {
+    if (state.downcount <= 0)
+      m_scheduler.Advance();
+    const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
+    if (function >= 0 && RunNative(function))
+      continue;
+    Charge(Step());
+  }
+  m_in_handler = false;
+  return state.pc == pc && state.gpr[1] == sp && m_running;
 }
 
 void Cpu::Run()
@@ -670,6 +702,7 @@ uint32_t Cpu::CallGuest(uint32_t address, std::initializer_list<uint32_t> args)
     state.gpr[reg++] = arg;
   state.lr = CALL_RETURN;
   state.pc = address;
+  ++m_guest_calls;
   while (state.pc != CALL_RETURN)
   {
     if (state.downcount <= 0)
@@ -680,6 +713,7 @@ uint32_t Cpu::CallGuest(uint32_t address, std::initializer_list<uint32_t> args)
     Charge(Step());
   }
 
+  --m_guest_calls;
   const uint32_t result = state.gpr[3];
   std::memcpy(registers, saved, sizeof(saved));
   state.reserve_valid = reserve_valid;
