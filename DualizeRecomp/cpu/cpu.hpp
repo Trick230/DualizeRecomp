@@ -154,12 +154,8 @@ private:
   // if none does or it does not match guest RAM.
   int Dispatchable(uint32_t pc);
   // The same with the function's code, from the dispatch cache.
-  struct DispatchEntry
-  {
-    uint32_t pc;
-    int32_t function;
-    GuestCode code;
-  };
+  // Published to generated code as dolrecomp_lookup_cache.
+  using DispatchEntry = DolRecompLookupEntry;
   const DispatchEntry* Dispatch(uint32_t pc);
   int FunctionAt(uint32_t pc) const;
   void VerifyFunction(uint32_t index);
