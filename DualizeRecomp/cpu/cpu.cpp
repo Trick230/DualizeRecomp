@@ -829,6 +829,7 @@ void Cpu::Run()
 
 void Cpu::RunLoop()
 {
+  bool idled = false;
   while (m_running)
   {
     m_scheduler.Advance();
@@ -837,11 +838,18 @@ void Cpu::RunLoop()
     if (m_idle_pc && state.pc == m_idle_pc)
     {
       // The idle thread only wakes sleeping threads to poll, and nothing they
-      // poll changes before the next event.
-      m_machine.BeforeIdle();
-      m_scheduler.Idle();
-      continue;
+      // poll changes before the next event: it waits for that event, then
+      // goes round its loop once, so its wakeup lets them poll again.
+      idled = !idled;
+      if (idled)
+      {
+        m_machine.BeforeIdle();
+        m_scheduler.Idle();
+        continue;
+      }
     }
+    else
+      idled = false;
     while (state.downcount > 0 && m_running)
     {
       const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
