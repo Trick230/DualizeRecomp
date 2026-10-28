@@ -270,20 +270,20 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
-| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | ✅ Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache |
+| 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 
-What phase 7 did, in order:
+What phase 7 still has to do, in order:
 
 | Step | What changes | Status |
 |---|---|---|
 | Native interrupt entry | External and decrementer interrupts and FP-unavailable save the OSContext in host code and start in the recompiled OS handler; the system call (a memory sync) runs in host code. No interpreter in play | ✅ |
 | Guest calls from the host | Run a guest function to its return from host code, inside an interrupt handler (scheduler off, so no thread switch) | ✅ |
 | IOS at the SDK | `ios_Ipc2` hands requests straight to the IOS devices; the IPC interrupt handler delivers replies as `IpcReplyHandler` does (callback or wakeup). No mailbox, doorbell or acks | ✅ |
-| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏭️ Skipped: the whole decrementer path is 0.8% of the CPU thread in play |
-| Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏭️ Skipped: `__OSDispatchInterrupt` is 4.1% inclusive, nearly all of it the handlers' own work |
+| Alarms | `OSSetAlarm`, `OSSetPeriodicAlarm` and `OSCancelAlarm` as scheduler events instead of the decrementer | ⏳ |
+| Interrupt causes | VI, PE, DSP/AI and SI call their handlers from the OS table directly | ⏳ |
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |
-| Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ⏭️ Skipped: ~1K switches and ~3K interrupts a second leave at most ~2.5% to win, and host stacks can't go in savestates |
+| Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ⏳ |
 
 ## Working on the forks
 
