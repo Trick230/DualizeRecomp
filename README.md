@@ -112,6 +112,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | Variable | Effect |
 |---|---|
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
+| `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
 | `DUALIZE_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
 | `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
 | `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
@@ -235,9 +236,13 @@ Uncapped gameplay in Will's first stage, i5-9600KF + RTX 4060.
 | Cache-range and MWCC helper natives, gather-pipe fast path | 96 |
 | Sparse entry switches | 101 |
 | Native runtime with flat guest memory | 113 |
-| **One C function per guest function** | **122** |
+| One C function per guest function | 122 |
+| GX decoder: leaner merge path for the ~16K small draws a frame | 143 |
+| **GX decoder: vertex array uploads grow geometrically** | **158** |
 
-At 30 FPS that leaves the CPU thread idle about 70% of the time. How each
+The render thread's GX decode, not guest code, sets the uncapped rate: the
+CPU thread waits on it at each frame's draw-done. At 30 FPS that leaves the
+CPU thread idle about 70% of the time. How each
 step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 
 ## Roadmap
@@ -249,7 +254,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator | ✅ · ⏳ stage RSO modules |
 | 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
-| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter; safepoints and registers as locals left |
+| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | OS threads, alarms, IOS and WPAD at the SDK boundary instead of the hardware | ⏳ |
 
 ## Working on the forks
