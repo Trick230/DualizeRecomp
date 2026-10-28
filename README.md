@@ -123,6 +123,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 |---|---|
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
 | `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
+| `DUALIZE_IOS_TRACE=1` | Log each IOS request (open path, ioctl number, sizes), its reply and when the PPC receives it; `all` includes Bluetooth |
 | `DUALIZE_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
 | `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
 | `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |

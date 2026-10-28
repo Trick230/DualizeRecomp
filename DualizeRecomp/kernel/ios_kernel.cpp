@@ -3,6 +3,7 @@
 #include "machine.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace dualize
 {
@@ -20,6 +21,14 @@ constexpr int ES = 6;
 constexpr int BLUETOOTH = 7;
 constexpr uint32_t IPC_REPLY = 8;
 
+// DUALIZE_IOS_TRACE=1 logs every request but Bluetooth's and each reply;
+// =all includes Bluetooth.
+int TraceLevel()
+{
+  const char* v = std::getenv("DUALIZE_IOS_TRACE");
+  return !v || !*v || *v == '0' ? 0 : std::string_view(v) == "all" ? 2 : 1;
+}
+
 // The devices' state streams over the machine's.
 ios::StateIO DeviceStream(StateIO& io)
 {
@@ -29,7 +38,7 @@ ios::StateIO DeviceStream(StateIO& io)
 }
 }  // namespace
 
-IosKernel::IosKernel(Machine& machine) : m_machine(machine), m_memory(m_host)
+IosKernel::IosKernel(Machine& machine) : m_machine(machine), m_memory(m_host), m_trace(TraceLevel())
 {
   m_fds.fill(-1);
   Scheduler& scheduler = machine.scheduler;
@@ -114,6 +123,8 @@ void IosKernel::UpdateIpc()
   }
   if (!m_replies.empty())
   {
+    if (m_trace && m_traced.erase(m_replies.front()))
+      std::fprintf(stderr, "[ios] %08x delivered\n", m_replies.front());
     hollywood.GenerateReply(m_replies.front());
     m_replies.pop_front();
   }
@@ -122,9 +133,16 @@ void IosKernel::UpdateIpc()
 void IosKernel::ExecuteCommand(uint32_t address)
 {
   const uint32_t command = m_memory.Read32(address);
+  const bool trace = m_trace && Traced(address);
+  if (trace)
+    TraceRequest(address);
   std::optional<ios::Reply> reply = HandleCommand(address);
   if (!reply)
+  {
+    if (trace)
+      std::fprintf(stderr, "[ios] %08x pending\n", address);
     return;
+  }
   // Replies go out in order.
   const uint64_t now = m_machine.scheduler.Now();
   if (m_last_reply_time > now)
@@ -200,6 +218,11 @@ std::optional<ios::Reply> IosKernel::Open(ios::OpenRequest& request)
 void IosKernel::EnqueueReply(uint32_t address, uint32_t command, int32_t value, int64_t delay)
 {
   const ios::Memory& memory = m_memory;
+  if (m_trace && Traced(address))
+  {
+    m_traced.insert(address);
+    std::fprintf(stderr, "[ios] %08x reply %d in %lld\n", address, value, static_cast<long long>(delay));
+  }
   memory.Write32(address + 4, static_cast<uint32_t>(value));
   // IOS writes the command it answers into the fd field and marks the block
   // a reply.
@@ -252,6 +275,49 @@ void IosKernel::HostSchedule(void* user, int64_t cycles, uint32_t device, uint32
   IosKernel& kernel = *static_cast<IosKernel*>(user);
   kernel.m_machine.scheduler.Schedule(
       cycles, kernel.m_device_event, uint64_t{device} << 40 | uint64_t{event & 0xFF} << 32 | data);
+}
+
+bool IosKernel::Traced(uint32_t address) const
+{
+  // Before the reply overwrites the block: its command and fd.
+  if (m_trace > 1)
+    return true;
+  const uint32_t command = m_memory.Read32(address);
+  const uint32_t fd = m_memory.Read32(address + 8);
+  return command == ios::IPC_CMD_OPEN || fd >= MAX_FDS || m_fds[fd] != BLUETOOTH;
+}
+
+void IosKernel::TraceRequest(uint32_t address) const
+{
+  const ios::Memory& memory = m_memory;
+  const ios::Request request(memory, address);
+  const double ms = m_machine.scheduler.Now() * 1000.0 / Scheduler::CPU_CLOCK;
+  switch (request.command)
+  {
+  case ios::IPC_CMD_OPEN:
+  {
+    const ios::OpenRequest open(memory, address);
+    std::fprintf(stderr, "[ios] %08x %.3f open %s mode %u\n", address, ms, open.path.c_str(), open.flags);
+    break;
+  }
+  case ios::IPC_CMD_IOCTL:
+  {
+    const ios::IOCtlRequest ioctl(memory, address);
+    std::fprintf(stderr, "[ios] %08x %.3f fd %d ioctl %x in %u out %u\n", address, ms, request.fd,
+                 ioctl.request, ioctl.buffer_in_size, ioctl.buffer_out_size);
+    break;
+  }
+  case ios::IPC_CMD_IOCTLV:
+  {
+    const ios::IOCtlVRequest ioctlv(memory, address);
+    std::fprintf(stderr, "[ios] %08x %.3f fd %d ioctlv %x in %zu io %zu\n", address, ms, request.fd,
+                 ioctlv.request, ioctlv.in.size(), ioctlv.io.size());
+    break;
+  }
+  default:
+    std::fprintf(stderr, "[ios] %08x %.3f fd %d command %u size %u\n", address, ms, request.fd,
+                 request.command, memory.Read32(address + 16));
+  }
 }
 
 uint64_t IosKernel::HostNow(void* user)

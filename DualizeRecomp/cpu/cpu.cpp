@@ -416,14 +416,19 @@ bool Cpu::Safepoint(uint32_t pc)
 {
   // As far as events can tell, the CPU is at the loop target.
   state.pc = pc;
-  if (!m_running || (m_idle_pc && pc == m_idle_pc))
-    return true;
   ++m_stats.safepoints;
-  m_scheduler.Advance();
-  if (!m_machine.AfterEventsInPlace() || !m_running)
-    return true;
-  // Delivered by the run loop: the handler runs from an empty host stack.
-  return (state.msr & MSR_EE) && (m_external || m_decrementer);
+  if (m_running && !(m_idle_pc && pc == m_idle_pc))
+  {
+    m_scheduler.Advance();
+    // Delivered by the run loop: the handler runs from an empty host stack.
+    if (m_machine.AfterEventsInPlace() && m_running && !((state.msr & MSR_EE) && (m_external || m_decrementer)))
+      return false;
+  }
+  // Leaving: keep the slice ended. A safepoint at a function's return names
+  // its caller's continuation, which the caller can't tell from a plain
+  // return, so it runs on until its own next safepoint, which must leave too.
+  m_scheduler.ForceCheck(0);
+  return true;
 }
 
 void Cpu::Run()

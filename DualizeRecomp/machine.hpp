@@ -138,6 +138,7 @@ private:
   Clock::time_point m_report_host{};
   uint64_t m_report_ticks = 0;
   uint64_t m_report_fields = 0;
+  Cpu::Stats m_report_stats;
   uint64_t m_gx_bytes = 0, m_report_gx_bytes = 0;
 
   bool ReadAutomationPad(int port, AutomationPad* pad);

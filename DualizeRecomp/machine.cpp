@@ -655,9 +655,16 @@ void Machine::OnFieldEnd(uint64_t ticks)
     return;
   const uint64_t fields = vi.Fields();
   const double guest = static_cast<double>(ticks - m_report_ticks) / Scheduler::CPU_CLOCK;
-  std::fprintf(stderr, "[native] %.1f VPS, speed %.0f%%, GX %.1f KB/s, pc %08x\n",
+  const Cpu::Stats& stats = cpu.GetStats();
+  std::fprintf(stderr,
+               "[native] %.1f VPS, speed %.0f%%, GX %.1f KB/s, pc %08x, dispatches %llu, "
+               "safepoints %llu, interpreted %llu\n",
                (fields - m_report_fields) / seconds, 100.0 * guest / seconds,
-               (m_gx_bytes - m_report_gx_bytes) / seconds / 1024.0, cpu.state.pc);
+               (m_gx_bytes - m_report_gx_bytes) / seconds / 1024.0, cpu.state.pc,
+               static_cast<unsigned long long>(stats.dispatches - m_report_stats.dispatches),
+               static_cast<unsigned long long>(stats.safepoints - m_report_stats.safepoints),
+               static_cast<unsigned long long>(stats.interpreted - m_report_stats.interpreted));
+  m_report_stats = stats;
   m_report_gx_bytes = m_gx_bytes;
   m_report_host = now;
   m_report_ticks = ticks;
