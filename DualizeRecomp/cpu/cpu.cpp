@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -362,6 +363,101 @@ void Cpu::TakeInterrupt(uint32_t vector)
   state.srr1 = state.msr & SRR1_MASK;
   state.msr = (state.msr & ~(EXCEPTION_MSR_CLEAR | 1u)) | ((state.msr & MSR_ILE) ? 1u : 0u);
   state.pc = vector;
+  if (vector == 0x500 || vector == 0x900)
+    EnterOsHandler(vector == 0x500 ? 4 : 8);
+}
+
+// The OS's external and decrementer vectors (OSExceptionInit copies one stub
+// to each, patching the exception number) and the handler each enters through
+// __OSExceptionTable (the same 20 instructions before a branch to
+// OSDispatchInterrupt or DecrementerExceptionCallback).
+namespace
+{
+constexpr uint32_t OS_VECTOR_STUB[] = {
+    0x7C9043A6, 0x808000C0, 0x9064000C, 0x7C7042A6, 0x90640010, 0x90A40014, 0xA06401A2, 0x60630002,
+    0xB06401A2, 0x7C600026, 0x90640080, 0x7C6802A6, 0x90640084, 0x7C6902A6, 0x90640088, 0x7C6102A6,
+    0x9064008C, 0x7C7A02A6, 0x90640198, 0x7C7B02A6, 0x9064019C, 0x7C651B78, 0x60000000, 0x7C6000A6,
+    0x60630030, 0x7C7B03A6, 0x38600000, 0x808000D4, 0x54A507BD, 0x40820014, 0x3CA08045, 0x38A5DA74,
+    0x7CBA03A6, 0x4C000064, 0x546515BA, 0x80A53000, 0x7CBA03A6, 0x4C000064,
+};
+constexpr uint32_t OS_VECTOR_NUMBER_WORD = 26;  // li r3, <exception number>
+constexpr uint32_t OS_SAVE_HANDLER[] = {
+    0x90040000, 0x90240004, 0x90440008, 0xBCC40018, 0x7C11E2A6, 0x900401A8, 0x7C12E2A6,
+    0x900401AC, 0x7C13E2A6, 0x900401B0, 0x7C14E2A6, 0x900401B4, 0x7C15E2A6, 0x900401B8,
+    0x7C16E2A6, 0x900401BC, 0x7C17E2A6, 0x900401C0, 0x9421FFF8,
+};
+constexpr uint32_t OS_EXCEPTION_TABLE = 0x80003000;
+constexpr uint32_t OS_CURRENT_CONTEXT = 0x800000D4;
+constexpr uint32_t SPR_SPRG0 = 272;
+
+// OSContext
+constexpr uint32_t CONTEXT_CR = 0x80, CONTEXT_LR = 0x84, CONTEXT_CTR = 0x88, CONTEXT_XER = 0x8C;
+constexpr uint32_t CONTEXT_SRR0 = 0x198, CONTEXT_SRR1 = 0x19C, CONTEXT_STATE = 0x1A2;
+constexpr uint32_t CONTEXT_GQR = 0x1A4, CONTEXT_SIZE = 0x2C8;
+constexpr uint16_t CONTEXT_STATE_EXC = 2;
+
+bool CodeMatches(const uint8_t* code, const uint32_t* words, uint32_t count, uint32_t skip = ~0u)
+{
+  for (uint32_t i = 0; i < count; ++i)
+    if (i != skip && Load32(code + i * 4) != words[i])
+      return false;
+  return true;
+}
+}  // namespace
+
+void Cpu::EnterOsHandler(uint32_t number)
+{
+  // Does in one step what the vector stub and the save handler would do on
+  // the interpreter: the interrupted state (already in srr0/srr1) goes to the
+  // current OSContext, and the OS's handler starts at its first instruction.
+  // Anything unexpected leaves pc at the vector for the interpreter.
+  const Memory& memory = m_machine.memory;
+  const uint32_t vector = state.pc;
+  const uint8_t* stub = memory.Physical(vector, sizeof(OS_VECTOR_STUB));  // real mode
+  if (!stub || !(state.srr1 & 2) ||  // RI clear: the stub takes the unrecoverable path
+      !CodeMatches(stub, OS_VECTOR_STUB, std::size(OS_VECTOR_STUB), OS_VECTOR_NUMBER_WORD) ||
+      Load32(stub + OS_VECTOR_NUMBER_WORD * 4) != (0x38600000u | number))
+    return;
+  const uint32_t handler = memory.Read32((OS_EXCEPTION_TABLE + number * 4) & 0x1FFFFFFF);
+  const uint8_t* code = memory.Effective(handler, sizeof(OS_SAVE_HANDLER) + 4);
+  if (!code || !CodeMatches(code, OS_SAVE_HANDLER, std::size(OS_SAVE_HANDLER)))
+    return;
+  const uint32_t branch = Load32(code + sizeof(OS_SAVE_HANDLER));
+  if ((branch & 0xFC000003u) != 0x48000000u)  // b, not linked, relative
+    return;
+  const uint32_t target = handler + sizeof(OS_SAVE_HANDLER) +
+                          static_cast<uint32_t>(static_cast<int32_t>(branch << 6) >> 6 & ~3);
+  const uint32_t context_address = memory.Read32(OS_CURRENT_CONTEXT & 0x1FFFFFFF);
+  uint8_t* context = memory.Effective(context_address, CONTEXT_SIZE);
+  const uint32_t sp = state.gpr[1] - 8;
+  uint8_t* frame = memory.Effective(sp, 4);
+  if (!context || !frame)
+    return;
+
+  for (uint32_t i = 0; i < 32; ++i)
+    Store32(context + i * 4, state.gpr[i]);
+  Store32(context + CONTEXT_CR, state.cr);
+  Store32(context + CONTEXT_LR, state.lr);
+  Store32(context + CONTEXT_CTR, state.ctr);
+  Store32(context + CONTEXT_XER, state.xer);
+  Store32(context + CONTEXT_SRR0, state.srr0);
+  Store32(context + CONTEXT_SRR1, state.srr1);
+  Store16(context + CONTEXT_STATE, Load16(context + CONTEXT_STATE) | CONTEXT_STATE_EXC);
+  for (uint32_t i = 1; i < 8; ++i)
+    Store32(context + CONTEXT_GQR + i * 4, state.gqr[i]);
+  Store32(frame, state.gpr[1]);  // stwu r1, -8(r1)
+
+  // Registers as the stub and handler leave them.
+  m_spr[SPR_SPRG0] = state.gpr[4];
+  state.gpr[1] = sp;
+  state.gpr[3] = number;
+  state.gpr[4] = context_address;
+  state.gpr[5] = handler;
+  state.cr = (state.cr & 0x0FFFFFFFu) | (0x4u | (state.xer >> 31)) << 28;  // rlwinm. r5, srr1 & RI
+  state.msr |= 0x30;  // the stub's rfi turns translation on
+  state.pc = target;
+  Charge(static_cast<int64_t>(std::size(OS_VECTOR_STUB) + std::size(OS_SAVE_HANDLER) + 1));
+  ++m_stats.native_exceptions;
 }
 
 void Cpu::CheckInterrupts()
