@@ -283,7 +283,7 @@ What phase 7 still has to do, in order (then phase 6's registers as locals, the 
 | Interrupt causes | `__OSDispatchInterrupt` takes the causes straight from the host's devices and picks the handler by the SDK's priorities | ✅ |
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |
-| Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ⏳ |
+| Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | 🟡 Interrupts run in place at the safepoint and resume there; thread switches left |
 | VI at the SDK | The retrace interrupt, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API in host code; no video interface register model | ⏳ |
 | GX registers at the SDK | The token, finish and CP interrupts and GX's FIFO setup in host code; no CP/PE/MI register files | ⏳ |
 | AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | ⏳ |
