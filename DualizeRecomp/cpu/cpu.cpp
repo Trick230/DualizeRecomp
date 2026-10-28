@@ -1140,11 +1140,32 @@ void Cpu::HookCacheControl(CPUState* state, uint8_t operation, uint32_t ea, uint
 void Cpu::HookCacheRange(CPUState* state, uint8_t operation, uint32_t ea, uint32_t lines)
 {
   Cpu& cpu = CpuOf(state);
-  for (uint32_t i = 0; i < lines; ++i)
+  if (operation == PPC_CACHE_ICBI)
   {
-    const uint32_t line = ea + i * 32u;
-    if (operation == PPC_CACHE_ICBI || cpu.LineMayHoldCode(line))
-      cpu.InvalidateICache(line & ~31u, 32);
+    cpu.InvalidateICache(ea & ~31u, lines * 32u);
+    return;
+  }
+  // A data-cache op only matters on lines that hold code: the code bitmap
+  // passes over a word of 64 clear lines (2 KB) at a time.
+  for (uint32_t i = 0; i < lines;)
+  {
+    const uint32_t line = (ea & ~31u) + i * 32u;
+    const int index = LookupIndex(line);
+    const size_t bit = static_cast<size_t>(index) >> 3;
+    if (index < 0 || (bit >> 6) >= cpu.m_code_lines.size())
+    {
+      ++i;
+      continue;
+    }
+    const uint64_t code = cpu.m_code_lines[bit >> 6] >> (bit & 63);
+    if (!code)
+    {
+      i += 64 - static_cast<uint32_t>(bit & 63);
+      continue;
+    }
+    if (code & 1)
+      cpu.InvalidateICache(line, 32);
+    ++i;
   }
 }
 
