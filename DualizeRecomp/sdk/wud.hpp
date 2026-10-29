@@ -7,6 +7,7 @@
 // receive callback, and connections reach WPAD's connection callback. The
 // Bluetooth stack never starts. sdk/rvl_wud.cpp has the natives.
 
+#include "dolrecomp.hpp"
 #include "kernel/ios/wiimote.hpp"
 
 #include <array>
@@ -17,7 +18,6 @@
 
 namespace dualize
 {
-class Cpu;
 class Machine;
 
 class Wud

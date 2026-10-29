@@ -206,8 +206,8 @@ they recompile with the DOL.
 
 | Part | What it does |
 |---|---|
-| `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
-| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
+| DolRecomp `runtime/host` | The CPU layer, shared with any GameCube or Wii port: the recompiled code wherever it covers the pc and an interpreter with the same semantics elsewhere; timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), guest calls, guest threads on fibers, locked L1 cache and its DMA. Guest memory (the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section), the event scheduler (one tick per CPU cycle; the idle loop leaves for it) and the savestate stream. `machine.cpp` is its `CpuHost` |
+| `kernel/` | IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
 | `hw/` | PI, AI, DSP, CP/PE registers, Hollywood GPIO; the video clock behind the VI natives and the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
@@ -355,10 +355,10 @@ what DolRecomp and Aurora upstream have that the forks don't.
 ## Repository layout
 
 ```
-tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler and the guest CPU core
+tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler, the guest CPU core and the host CPU layer
 thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3
 DualizeRecompLib/     the game's code: recompiler config, natives list, generated sources
-DualizeRecomp/        the runtime and the executable (cpu, kernel, hw, apu, gpu, hid, sdk)
+DualizeRecomp/        the runtime and the executable (kernel, hw, apu, gpu, hid, sdk)
 scripts/              fork sync, SDK symbol finder, natives hashes, automation client, window capture
 docs/                 the history of the port
 iso/ extracted/ build/ extern/   your disc, its extraction, builds, downloads (gitignored)

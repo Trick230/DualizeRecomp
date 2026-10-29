@@ -11,12 +11,13 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 namespace
 {
 using dualize::Cpu;
+using dualize::GetMachine;
 using dualize::Load32;
 using dualize::Store32;
 
@@ -84,7 +85,7 @@ void Store(uint8_t* block, uint32_t offset, uint32_t value)
 void Complete(Cpu& cpu, uint32_t request, uint32_t interrupted_context)
 {
   CPUState& s = cpu.state;
-  const dualize::Memory& memory = cpu.GetMachine().memory;
+  const dualize::Memory& memory = GetMachine(cpu).memory;
   uint8_t* block = memory.Effective(request, REQUEST_SIZE);
   if (!block)
     return;
@@ -139,7 +140,7 @@ void Complete(Cpu& cpu, uint32_t request, uint32_t interrupted_context)
 extern "C" bool rvl_ios_Ipc2(CPUState* ctx)
 {
   Cpu& cpu = CpuOf(ctx);
-  dualize::Machine& machine = cpu.GetMachine();
+  dualize::Machine& machine = GetMachine(cpu);
   const uint32_t request = ctx->gpr[3];
   const uint32_t callback = ctx->gpr[4];
   uint8_t* block = request ? machine.memory.Effective(request, REQUEST_SIZE) : nullptr;
@@ -185,7 +186,7 @@ extern "C" bool rvl_IPCInterruptHandler(CPUState* ctx)
   Cpu& cpu = CpuOf(ctx);
   const uint32_t context = ctx->gpr[4];
   uint32_t reply;
-  while (cpu.GetMachine().ios.PopReply(&reply))
+  while (GetMachine(cpu).ios.PopReply(&reply))
     Complete(cpu, Virtual(reply), context);
   ctx->downcount -= 20;
   return true;

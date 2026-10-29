@@ -7,7 +7,7 @@
 // is no mailbox: sdk/rvl_ipc.cpp replaces the SDK code that drove it.
 
 #include "kernel/ios/devices.hpp"
-#include "state.hpp"
+#include "dolrecomp.hpp"
 
 #include <array>
 #include <deque>

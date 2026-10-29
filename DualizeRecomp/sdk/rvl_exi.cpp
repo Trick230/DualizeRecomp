@@ -11,7 +11,7 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 #include <algorithm>
@@ -20,6 +20,7 @@ namespace
 {
 using dualize::Cpu;
 using dualize::ExpansionBus;
+using dualize::GetMachine;
 using dualize::Machine;
 
 // EXIInit clears the OS globals that cache the channels' device IDs.
@@ -27,7 +28,7 @@ constexpr uint32_t OS_EXI_ID_CACHE = 0x800030C0;
 
 Machine& MachineOf(CPUState* ctx)
 {
-  return static_cast<Cpu*>(ctx->external_user_data)->GetMachine();
+  return GetMachine(*static_cast<Cpu*>(ctx->external_user_data));
 }
 
 ExpansionBus::Channel* ChannelOf(CPUState* ctx)

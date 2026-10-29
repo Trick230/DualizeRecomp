@@ -12,7 +12,7 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 #include <algorithm>
@@ -21,6 +21,7 @@ namespace
 {
 using dualize::Cpu;
 using dualize::GcPadInput;
+using dualize::GetMachine;
 using dualize::Load16;
 using dualize::Load32;
 using dualize::Machine;
@@ -54,7 +55,7 @@ Cpu& CpuOf(CPUState* ctx)
 
 uint8_t* Sda(CPUState* ctx, int32_t offset)
 {
-  return CpuOf(ctx).GetMachine().memory.Effective(ctx->gpr[13] + offset, 4);
+  return GetMachine(CpuOf(ctx)).memory.Effective(ctx->gpr[13] + offset, 4);
 }
 
 // The controller's report: buttons and main stick, then the rest in the
@@ -140,7 +141,7 @@ extern "C" bool rvl_PADRecalibrate(CPUState* ctx)
 extern "C" bool rvl_PADRead(CPUState* ctx)
 {
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   const uint32_t status = ctx->gpr[3];
   uint8_t* statuses = machine.memory.Effective(status, 4 * PAD_STATUS_SIZE);
   const uint8_t* mode = Sda(ctx, PAD_ANALOG_MODE_SDA);
@@ -184,7 +185,7 @@ extern "C" bool rvl_PADRead(CPUState* ctx)
 extern "C" bool rvl_PADControlMotor(CPUState* ctx)
 {
   if (ctx->gpr[3] < 4)
-    CpuOf(ctx).GetMachine().SetGcRumble(static_cast<int>(ctx->gpr[3]), ctx->gpr[4] == 1);
+    GetMachine(CpuOf(ctx)).SetGcRumble(static_cast<int>(ctx->gpr[3]), ctx->gpr[4] == 1);
   ctx->downcount -= 40;
   return true;
 }

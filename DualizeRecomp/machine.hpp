@@ -1,19 +1,18 @@
 #pragma once
 
 // The whole Wii as NiGHTS uses it, without Dolphin: guest memory, the event
-// scheduler, the Broadway CPU (recompiled code plus interpreter), the
+// scheduler, the Broadway CPU (recompiled code plus interpreter: DolRecomp's
+// host runtime, which calls back through CpuHost), the
 // Hollywood blocks, the DSP, IOS, and the host ends they feed (native GX,
 // SDL audio and gamepads). One thread runs it; native GX renders on its own.
 
 #include "apu/audio_out.hpp"
 #include "apu/native_dsp.hpp"
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "hw/hw.hpp"
 #include "hid/gamepads.hpp"
 #include "kernel/ios/disc.hpp"
 #include "kernel/ios_kernel.hpp"
-#include "kernel/memory.hpp"
-#include "kernel/scheduler.hpp"
 #include "sdk/wud.hpp"
 
 #include <array>
@@ -41,7 +40,7 @@ struct MachineConfig
   float render_scale = 1.0f;  // frame buffer over window; above 1 reduced by an area filter
 };
 
-class Machine
+class Machine : public CpuHost
 {
 public:
   explicit Machine(MachineConfig config);
@@ -159,4 +158,10 @@ private:
   std::mutex m_request_mutex;
   std::filesystem::path m_save_path, m_load_path;
 };
+
+// The machine a CPU runs in, for natives that reach its hardware.
+inline Machine& GetMachine(Cpu& cpu)
+{
+  return static_cast<Machine&>(cpu.Host());
+}
 }  // namespace dualize
