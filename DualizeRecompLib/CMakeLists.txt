@@ -28,6 +28,7 @@ endforeach()
 
 add_custom_command(
     OUTPUT ${PPC_SOURCES} "${PPC_DIR}/ppc_recomp.h" "${PPC_DIR}/ppc_tables.inc"
+        "${PPC_DIR}/ppc_natives.h"
     COMMAND $<TARGET_FILE:dolrecomp> "${CONFIG}" "${DUALIZE_GAME_DIR}" "${PPC_DIR}"
     DEPENDS dolrecomp "${CONFIG}" "${CMAKE_CURRENT_SOURCE_DIR}/config/${GAME_ID}.natives" ${GAME_INPUTS}
     COMMENT "Recompiling ${GAME_ID}"
@@ -36,15 +37,11 @@ add_custom_command(
 set(RUNTIME_DIR "${CMAKE_SOURCE_DIR}/DualizeRecomp")
 add_library(DualizeRecompLib STATIC
     ${PPC_SOURCES}
-    "${RUNTIME_DIR}/cpu/guest_module.c"
-    "${RUNTIME_DIR}/sdk/msl_string.c"
-    "${RUNTIME_DIR}/sdk/mwcc_runtime.c"
-    "${RUNTIME_DIR}/sdk/nw4r_g3d.c"
-    "${RUNTIME_DIR}/sdk/rvl_cache.c"
-    "${RUNTIME_DIR}/sdk/rvl_mtx.c"
-    "${RUNTIME_DIR}/sdk/rvl_os.c")
+    "${RUNTIME_DIR}/sdk/nw4r_g3d.c")
 target_include_directories(DualizeRecompLib PRIVATE "${PPC_DIR}" "${RUNTIME_DIR}")
 target_link_libraries(DualizeRecompLib PUBLIC dr_runtime)
+# DolRecomp's glue and shared natives, compiled here with the game's flags.
+target_link_libraries(DualizeRecompLib PRIVATE dr_guest dr_natives_mwcc dr_natives_rvl)
 # Guest memory through CPUState::flat_base, one host load or store per access.
 target_compile_definitions(DualizeRecompLib PRIVATE GXRUNTIME_FLAT_MEMORY=1)
 

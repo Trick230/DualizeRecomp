@@ -4,7 +4,7 @@
 [main]
 dol = "sys/main.dol"
 # Revolution SDK and runtime functions with host implementations
-# (DualizeRecomp/sdk), each pinned to the SDK bytes it replaces.
+# (DualizeRecomp/sdk and DolRecomp's runtime/sdk), each pinned to the SDK bytes it replaces.
 natives = "R7EE8P.natives"
 # Fixed number of generated sources, so the build can list them up front.
 shards = 64

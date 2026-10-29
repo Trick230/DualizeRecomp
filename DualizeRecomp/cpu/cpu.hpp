@@ -7,7 +7,7 @@
 // one CPUState; this class owns the SPRs the module reaches through hooks,
 // the timebase and decrementer, and exception delivery.
 
-#include "cpu/guest_module.h"
+#include "core/guest_module.h"
 #include "kernel/scheduler.hpp"
 #include "state.hpp"
 
