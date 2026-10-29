@@ -52,7 +52,7 @@ between are **interpolated** at the display's refresh rate.
 
 | | |
 |---|---|
-| **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) only |
+| **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
 | **Playable** | Cold boot, intro, Story Select and gameplay |
 | **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.4 ms); shown at the display's refresh rate |
 | **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
