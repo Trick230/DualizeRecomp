@@ -19,7 +19,25 @@ set(GAME_INPUTS
     "${DUALIZE_GAME_DIR}/files/rso/global.rso"
     "${DUALIZE_GAME_DIR}/files/rso/play.rso"
     "${DUALIZE_GAME_DIR}/files/rso/select.rso"
-    "${DUALIZE_GAME_DIR}/files/rso/title.rso")
+    "${DUALIZE_GAME_DIR}/files/rso/title.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1000.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1010.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1100.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1110.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1200.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage1210.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2000.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2010.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2100.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2110.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2200.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage2210.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage3000.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage3010.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/stage4000.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/myDream.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/staffRoll.rso"
+    "${DUALIZE_GAME_DIR}/files/rso/loading2P.rso")
 foreach(input IN LISTS GAME_INPUTS)
     if(NOT EXISTS "${input}")
         message(FATAL_ERROR "${input} is missing: set DUALIZE_GAME_DIR to the extracted disc")
