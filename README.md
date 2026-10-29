@@ -310,8 +310,10 @@ render scale):
 |---|---|---|
 | MSAA 4× | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. On by default (`--msaa 1` turns it off). WebGPU allows 1 or 4 samples | ✅ Forest at 1080p: as fast as without (530–585 presents/s, GPU-bound) |
 | Render scale | `--render-scale <x>` renders at x times the window (EFB copies, so shadows and bloom, follow) and reduces with an area (box) filter, so every rendered pixel counts; at 1× the frame goes straight to the present | ✅ Interpolation renders every present, so the cost scales with the present rate: forest at 1080p ×2 with MSAA ~120 presents/s, without ~270, ×1.5 ~210 |
-| Alpha-to-coverage | Alpha-tested foliage smoothed by MSAA's samples | ⏳ |
+| Alpha-to-coverage | Unblended alpha-test cutouts (the forest's ferns and leaves) become coverage under MSAA: the edge spreads over about a pixel's samples instead of a hard discard. Only where the EFB keeps no alpha, as in all of NiGHTS | ✅ No measurable cost (forest ~450 presents/s either way) |
 | Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ✅ |
+| Color depth | 8 bits a channel with no dithering, where the console has 6-bit RGBA6 or dithered RGB8 | ✅ Aurora's behaviour |
+| Texture LOD | Mip selection follows the render resolution, so higher render scales pick sharper mips with no bias; HD replacement textures keep their own bias | ✅ Aurora's behaviour |
 | Maximum preset | Render scale 2× with MSAA 4× and 16× anisotropic: 16 samples a pixel, above MSAA 8× | ⏳ |
 
 Phase 9, the native renderer, comes after GX at the API, when the whole
@@ -319,7 +321,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: alpha-to-coverage, cheaper guest time, the stage RSO
+Next, in order: cheaper guest time, the stage RSO
 modules, booting without the interpreter, dropping the interpreter, then the
 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, VI, AX at the SDK), phase 6,
 GX at the API and phase 9.
