@@ -216,11 +216,17 @@ with its matrices blended from the frame before:
    by the address its matrices were loaded from (each model instance has its
    own) and a hash of its state; instances drawn from a shared buffer fall
    back to the one nearest in space.
-2. **Camera.** The camera move between the two frames is the transform most
-   uniquely matched draws agree on. It is applied as a screw motion, so an
-   orbiting camera follows the arc instead of cutting the chord.
-3. **Classify.** Each draw is judged by what explains its move best: standing
-   in the world, following the camera, a billboard facing it, or a backdrop
+2. **Camera.** The game says which camera each pass of models was built
+   with: a hook in nw4r g3d's `ScnRoot::CalcView` (`sdk/nw4r_g3d.c`) writes
+   the view matrix into the GX stream ahead of the pass's draws, as a host
+   packet the decoder reads. The camera move between the two frames is then
+   exact, and applied as a screw motion, so an orbiting camera follows the
+   arc instead of cutting the chord. Estimating it from the draws instead
+   was wrong in ~30% of the moving frames, which shook the whole scene.
+3. **Classify.** A draw built with a known camera is blended in the world,
+   wherever its object goes. Any other draw is judged by what explains its
+   move best, against a camera move estimated from the draws: standing in
+   the world, following the camera, a billboard facing it, or a backdrop
    turning around the eye. Lights and projected-texture matrices (shadows,
    shading) get the same treatment.
 4. **Blend.** Position, normal and texture matrices, lights and post-transform
