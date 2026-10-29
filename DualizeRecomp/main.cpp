@@ -3,7 +3,7 @@
 //   DualizeRecomp --game <extracted disc>
 //       [--user <dir>] [--load-state <file>] [--automation-dir <dir>]
 //       [--unthrottled] [--no-vsync] [--no-interpolation] [--present-rate <hz>]
-//       [--window <width>x<height>] [--idle-pc <hex>]
+//       [--window <width>x<height>] [--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]
 //
 // Automation: each file dropped in <dir>/commands holds key=value lines, as
 // command=save_state|load_state with path=<file>;
@@ -239,7 +239,7 @@ int Usage()
   std::fprintf(stderr, "usage: DualizeRecomp --game <dir> [--user <dir>] "
                        "[--load-state <file>] [--automation-dir <dir>] [--unthrottled] "
                        "[--no-vsync] [--no-interpolation] [--present-rate <hz>] [--window <w>x<h>] "
-                       "[--idle-pc <hex>]\n");
+                       "[--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]\n");
   return 2;
 }
 }  // namespace
@@ -278,6 +278,11 @@ int main(int argc, char** argv)
       config.present_rate = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
     else if (arg == "--window" && (v = value()) && std::sscanf(v, "%ux%u", &config.width, &config.height) == 2)
       continue;
+    else if (arg == "--msaa" && (v = value()) && (std::string_view(v) == "1" || std::string_view(v) == "4"))
+      config.msaa = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+    else if (arg == "--render-scale" && (v = value()) && std::strtof(v, nullptr) >= 0.25f &&
+             std::strtof(v, nullptr) <= 4.0f)
+      config.render_scale = std::strtof(v, nullptr);
     else
       return Usage();
   }

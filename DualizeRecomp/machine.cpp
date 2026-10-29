@@ -215,7 +215,7 @@ bool Machine::Start(std::string* error)
   ios::Config ios_config;
   ios_config.nand_root = config.user / "Wii";
   ios_config.disc = disc;
-  // Wii Remote 1, with a Classic Controller unless the GameCube pad is played.
+  // Wii Remote 1, with a Classic Controller.
   const ios::WiimoteHost wiimotes{
       .user = this,
       .slots = 1,
@@ -250,6 +250,8 @@ bool Machine::Start(std::string* error)
       .interpolate = config.interpolate && config.throttle,
       .present_rate = config.present_rate,
       .aspect = DisplayAspect(ios.Nand()),
+      .msaa = config.msaa,
+      .render_scale = config.render_scale,
   };
   const NativeGxHost gx_host{
       .user = this,
@@ -372,9 +374,7 @@ float Merge(float a, float b)
 void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
 {
   Machine& m = MachineOf(user);
-  // The Classic Controller stays plugged in unless the GameCube pad is the
-  // one played, so the game doesn't prefer it.
-  input->classic = !PadDrivesGc();
+  input->classic = true;
   hid::PadState pad;
   if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad))
   {

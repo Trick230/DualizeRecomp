@@ -40,6 +40,10 @@ typedef struct NativeGxConfig {
   uint32_t present_rate;
   // The aspect the guest's frames are shown at; the window keeps it.
   float aspect;
+  // Multisampling (1 or 4 samples) and the frame buffer's size over the
+  // window's; above 1 the frame is reduced to the window by an area filter.
+  uint32_t msaa;
+  float render_scale;
 } NativeGxConfig;
 
 // Starts the render thread and waits until Aurora is up. False on failure.

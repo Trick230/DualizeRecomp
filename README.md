@@ -115,6 +115,8 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--no-interpolation` | Show the game's own 30 FPS |
 | `--no-vsync` | Present without vsync, paced by a timer |
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
+| `--msaa <1\|4>` | Multisample anti-aliasing (default 4) |
+| `--render-scale <x>` | Render at x times the window (0.25–4, default 1), reduced by an area filter |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
 | `--window <w>x<h>` | Initial window size |
 | `--idle-pc <hex>` | The idle thread's loop the CPU skips to the next event from (default NiGHTS' `8036623C`) |
@@ -142,9 +144,9 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 ### Controls
 
 Each gamepad drives a GameCube pad, read through SDL3 at 1 kHz, with
-hotplug and rumble; the game then shows the GameCube's button prompts, and
-its sticks and triggers have the full 8-bit range (the Classic Controller's
-are 5 and 6 bits). Buttons map by position, so PlayStation and Switch pads
+hotplug and rumble; the game shows the GameCube's button prompts once it is
+played, and its sticks and triggers have the full 8-bit range (the Classic
+Controller's are 5 and 6 bits). Buttons map by position, so PlayStation and Switch pads
 work the same way (Xbox names below).
 
 | Gamepad | GameCube pad | Classic Controller (`DUALIZE_PAD_TARGET=classic`) |
@@ -270,7 +272,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
-| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | ⏳ MSAA 4× and render scale next |
+| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 4×, render scale with an area filter, 16× anisotropic |
 | 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | ⏳ After GX at the API |
 
 What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
@@ -306,10 +308,10 @@ render scale):
 
 | Step | What changes | Status |
 |---|---|---|
-| MSAA 4× | Multisampled render targets, resolved for EFB copies and the present; on by default. WebGPU allows 1 or 4 samples | ⏳ Next |
-| Render scale | Render at 1× (default), 1.5×, 2× or 3× the window and reduce with an area (box) filter, so every rendered pixel counts | ⏳ Next |
+| MSAA 4× | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. On by default (`--msaa 1` turns it off). WebGPU allows 1 or 4 samples | ✅ Forest at 1080p: as fast as without (530–585 presents/s, GPU-bound) |
+| Render scale | `--render-scale <x>` renders at x times the window (EFB copies, so shadows and bloom, follow) and reduces with an area (box) filter, so every rendered pixel counts; at 1× the frame goes straight to the present | ✅ Interpolation renders every present, so the cost scales with the present rate: forest at 1080p ×2 with MSAA ~120 presents/s, without ~270, ×1.5 ~210 |
 | Alpha-to-coverage | Alpha-tested foliage smoothed by MSAA's samples | ⏳ |
-| Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ⏳ |
+| Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ✅ |
 | Maximum preset | Render scale 2× with MSAA 4× and 16× anisotropic: 16 samples a pixel, above MSAA 8× | ⏳ |
 
 Phase 9, the native renderer, comes after GX at the API, when the whole
@@ -317,8 +319,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: SI and EXI at the SDK (done), MSAA 4× and render scale,
-alpha-to-coverage, anisotropic filtering, cheaper guest time, the stage RSO
+Next, in order: alpha-to-coverage, cheaper guest time, the stage RSO
 modules, booting without the interpreter, dropping the interpreter, then the
 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, VI, AX at the SDK), phase 6,
 GX at the API and phase 9.
