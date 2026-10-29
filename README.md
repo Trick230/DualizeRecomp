@@ -300,7 +300,6 @@ After phase 6, before the stage modules:
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
 | AX mixing off the CPU thread | Each AX command list is mixed on a thread of its own while the game runs on; the DSP's mails arrive half a millisecond of DSP time later | ✅ Mixing from ~1.3% of the CPU thread to ~0.6% (the mailbox and the hand-off) |
 | AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: what is left of the DSP on the CPU thread is ~0.6% |
-| Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ❌ Dropped after measuring (below) |
 
 Phase 8, image quality, in order (Aurora renders at the window's size and
 scales EFB copies with it, so shadows, bloom and reflections follow the
