@@ -8,7 +8,7 @@
 #include "core/cpu.h"
 
 #include "apu/native_dsp.hpp"
-#include "dolrecomp.hpp"
+#include "cpu/cpu.hpp"
 #include "machine.hpp"
 
 #include <bit>

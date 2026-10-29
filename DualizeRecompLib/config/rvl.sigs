@@ -1,0 +1,53 @@
+# The Revolution SDK functions DualizeRecomp/sdk/rvl_os.c, rvl_cache.c and
+# rvl_mtx.c implement.
+# <symbol> <size> <masked first word> <masked hash> [at <expression>] [jump]
+# (format in DolRecomp's src/app/natives.h; `dolrecomp sign` prints the middle three)
+
+# rvl_os.c: __OSRunQueueHint (small data) and OSDisableInterrupts' mtmsr window.
+define RUN_QUEUE_HINT_SDA_OFFSET imm(rvl_SelectThread+E8)
+define OS_DISABLE_INTERRUPTS rvl_OSDisableInterrupts
+define OS_DISABLE_INTERRUPTS_END rvl_OSDisableInterrupts+C
+# rvl_cache.c: the sc in DCFlushRange and DCStoreRange.
+define DC_FLUSH_RANGE_SC rvl_DCFlushRange+28
+define DC_STORE_RANGE_SC rvl_DCStoreRange+28
+# rvl_mtx.c: MTXConcat's {0, 1} pair, and .sdata2's 0.0f, 1.0f, 0.5f, 3.0f off r2.
+define MTX_UNIT_PAIR addr(rvl_PSMTXConcat+10,1C)
+define SDA2_ZERO imm(rvl_PSMTXIdentity)
+define SDA2_ONE imm(rvl_PSMTXIdentity+4)
+define SDA2_HALF imm(rvl_PSVECNormalize+C)
+define SDA2_THREE imm(rvl_PSVECNormalize+10)
+
+rvl_DCInvalidateRange 2C 28040000 C83B7AB390AC84EE
+rvl_DCFlushRange 30 28040000 DF013C66D975DD2F
+rvl_DCStoreRange 30 28040000 90DE41BC337E52EF
+rvl_DCFlushRangeNoSync 2C 28040000 436C87CD24625EE1
+rvl_DCStoreRangeNoSync 2C 28040000 CDAFD67FAD955821
+rvl_ICInvalidateRange 34 28040000 9200294D16054A27
+rvl_OSSaveContext 80 BDA30034 A3372C43D7CB29E1
+rvl_OSLoadContext D8 3C800000 EF47860E7CF06EA0 jump
+rvl_OSDisableInterrupts 14 7C6000A6 048E9E3D231E7B0A
+rvl_OSEnableInterrupts 14 7C6000A6 E8E5E8E3873637F0
+rvl_OSRestoreInterrupts 24 2C030000 8C558AAEA8697424
+rvl_OSLockMutex DC 9421FFE0 E1725072E0641108
+rvl_OSUnlockMutex C8 9421FFE0 870393DB6DC4641A
+rvl_OSTryLockMutex BC 9421FFE0 4238A3F7ED9DD260
+rvl_OSGetCurrentThread C 3C600000 7CCDB2E82040C0B6 at call(rvl_OSLockMutex+28)
+rvl_SelectThread 228 9421FFF0 3DAF0F99B257D67A jump
+rvl_OSSleepThread EC 9421FFF0 D47477A15342A085 jump
+rvl_OSWakeupThread F4 9421FFF0 C4F2C58EDE43846B
+rvl_PSMTXIdentity 2C C0020000 83A4971E8D64FFA4
+rvl_PSMTXCopy 34 E0030000 077D9E23E845819B
+rvl_PSMTXConcat CC 9421FFC0 BEFB285C37F6638A
+rvl_PSMTXTrans 34 C0020000 6D56794D5C525A4F
+rvl_PSMTXTransApply 4C E0830000 D83FC18D9D9B47EE
+rvl_PSMTXScale 28 C0020000 13105F183A255831
+rvl_PSMTXScaleApply 58 FC200818 0ACEE4E8A3484BFC
+rvl_PSMTXMultVec 54 E0040000 F0DFCD313EB3BFF9
+rvl_PSMTXMultVecSR 54 E0030000 0B718A29E6A3301E
+rvl_PSVECAdd 24 E0430000 DFE4D899B1DC49C4
+rvl_PSVECSubtract 24 E0430000 4DD0A78B94B91954
+rvl_PSVECScale 1C E0030000 AF503594AD46F101
+rvl_PSVECNormalize 44 E0430000 6DA6530A98F43E75
+rvl_PSVECMag 44 E0030000 18D78CA18E467B71
+rvl_PSVECDotProduct 20 E0430004 D3D5048A15A88E46
+rvl_PSVECCrossProduct 3C E0240000 BCA37A343B54F3A7

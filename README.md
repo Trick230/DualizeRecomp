@@ -198,10 +198,12 @@ the common FPU and paired-single paths and loads the guest memory base once
 per function. Hot SDK functions (thread switching,
 mutexes, interrupts, matrix math, memcpy, cache ranges, MWCC's register
 save/restore helpers) are replaced by host code in
-[`DualizeRecomp/sdk`](DualizeRecomp/sdk) and DolRecomp's `runtime/sdk`. The
-recompiler finds them by signature: their code with the linker's bits masked
-([`sdk.sigs`](DualizeRecompLib/config/sdk.sigs) and DolRecomp's built-in
-sets), so each replaces only the SDK build it was written for.
+[`DualizeRecomp/sdk`](DualizeRecomp/sdk). The recompiler finds them by
+signature: their code with the linker's bits masked (`mwcc.sigs`, `rvl.sigs`
+and `sdk.sigs` in [`DualizeRecompLib/config`](DualizeRecompLib/config)), so
+each replaces only the SDK build it was written for. DolRecomp is only the
+recompiler and what its output compiles with (CPU state, the instructions'
+semantics); everything that runs the game is this repository's.
 The RSO modules the game always loads (`global`, `play`, `select`, `title`)
 are linked inside the recompiler at the addresses the game loads them to, so
 they recompile with the DOL. The stage modules load one at a time into the
@@ -213,13 +215,13 @@ the runtime runs whichever matches guest RAM.
 
 | Part | What it does |
 |---|---|
-| DolRecomp `runtime/host` | The CPU layer, shared with any GameCube or Wii port: the recompiled code wherever it covers the pc and an interpreter with the same semantics elsewhere; timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), guest calls, guest threads on fibers, locked L1 cache and its DMA. Guest memory (the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section), the event scheduler (one tick per CPU cycle; the idle loop leaves for it) and the savestate stream. `machine.cpp` is its `CpuHost` |
-| `kernel/` | IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
+| `cpu/` | The CPU: the recompiled code wherever it covers the pc and an interpreter with the same semantics elsewhere; timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), guest calls, guest threads on fibers, locked L1 cache and its DMA. `machine.cpp` is its `CpuHost`, `state.hpp` the savestate stream |
+| `kernel/` | Guest memory (the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section) and the event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
 | `hw/` | PI, AI, DSP, CP/PE registers, Hollywood GPIO; the video clock behind the VI natives and the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | Aurora `lib/gx/fifo.cpp` | The GX FIFO's render thread (`aurora/fifo.h`): the ring the gather pipe fills, decoding into Aurora, draw-done and token markers back to the CPU, frame pacing and interpolation. `machine.cpp` is its host |
 | `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
-| `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts, and the VI's retrace handler and beam (`rvl_vi.cpp`). The natives any game can list (OS context, interrupts and mutexes, cache, matrices, the Metrowerks runtime) live in DolRecomp's `runtime/sdk`, placed by `define`s their signatures read off the code |
+| `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts, and the VI's retrace handler and beam (`rvl_vi.cpp`). The OS's context, interrupt and mutex functions, cache ranges, matrices and the Metrowerks runtime are C (`rvl_os.c`, `rvl_cache.c`, `rvl_mtx.c`, `mwcc_runtime.c`, `msl_string.c`), compiled with the generated code so they inline into it, placed by `define`s their signatures read off the code |
 | `boot.cpp` | The system menu's disc launch, then the apploader's work in host code (DOL, FST, bi2, low-memory globals) |
 
 ### Frame interpolation
@@ -362,10 +364,11 @@ what DolRecomp and Aurora upstream have that the forks don't.
 ## Repository layout
 
 ```
-tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler, the guest CPU core and the host CPU layer
+tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler and the CPU core its output compiles with
 thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3, the GX FIFO's render thread
 DualizeRecompLib/     the game's code: recompiler config, natives' signatures, generated sources
-DualizeRecomp/        the runtime and the executable (kernel, hw, apu, hid, sdk)
+DualizeRecomp/        the runtime and the executable (cpu, kernel, hw, apu, hid, sdk)
+tests/                the runtime's unit tests (-DDUALIZE_BUILD_TESTS=ON)
 scripts/              fork sync, pipeline seed, automation client, profiler, window capture
 docs/                 the history of the port
 iso/ extracted/ build/ extern/   your disc, its extraction, builds, downloads (gitignored)
