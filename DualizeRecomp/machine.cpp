@@ -78,17 +78,37 @@ Machine& MachineOf(void* user)
   return *static_cast<Machine*>(user);
 }
 
-// A physical gamepad drives the Classic Controller on Wii Remote 1, or the
-// GameCube pad on port 1 with DUALIZE_PAD_TARGET=gc; never both, so a
-// game reading both doesn't see each press twice.
+// What a physical gamepad drives: the GameCube pad on port 1 (the default;
+// the game then shows the GameCube's button prompts), the Classic Controller
+// on Wii Remote 1 with DUALIZE_PAD_TARGET=classic, or nothing with =none.
+// Never two at once, so a game reading both doesn't see each press twice.
+enum class PadTarget
+{
+  Gc,
+  Classic,
+  None,
+};
+
+PadTarget Target()
+{
+  static const PadTarget target = [] {
+    const char* v = std::getenv("DUALIZE_PAD_TARGET");
+    const std::string_view name = v ? v : "";
+    return name == "classic" ? PadTarget::Classic : name == "none" ? PadTarget::None : PadTarget::Gc;
+  }();
+  return target;
+}
+
 bool PadDrivesGc()
 {
-  static const bool gc = [] {
-    const char* v = std::getenv("DUALIZE_PAD_TARGET");
-    return v && std::string_view(v) == "gc";
-  }();
-  return gc;
+  return Target() == PadTarget::Gc;
 }
+
+bool PadDrivesClassic()
+{
+  return Target() == PadTarget::Classic;
+}
+
 // Positional: the bottom face button is the Classic Controller's B.
 constexpr std::pair<uint32_t, uint16_t> CLASSIC_MAP[] = {
     {hid::PAD_EAST, ios::CLASSIC_A},          {hid::PAD_SOUTH, ios::CLASSIC_B},
@@ -195,13 +215,13 @@ bool Machine::Start(std::string* error)
   ios::Config ios_config;
   ios_config.nand_root = config.user / "Wii";
   ios_config.disc = disc;
-  // Wii Remote 1, with a Classic Controller.
+  // Wii Remote 1, with a Classic Controller unless the GameCube pad is played.
   const ios::WiimoteHost wiimotes{
       .user = this,
       .slots = 1,
       .read = ReadWiimote,
       .rumble = [](void* user, int index, bool on) {
-        if (!PadDrivesGc())
+        if (PadDrivesClassic())
           MachineOf(user).m_gamepads.SetRumble(index, on ? 1.0f : 0.0f);
       },
       .speaker = SpeakerEnabled() ? WiimoteSpeaker : nullptr,
@@ -352,9 +372,11 @@ float Merge(float a, float b)
 void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
 {
   Machine& m = MachineOf(user);
-  input->classic = true;
+  // The Classic Controller stays plugged in unless the GameCube pad is the
+  // one played, so the game doesn't prefer it.
+  input->classic = !PadDrivesGc();
   hid::PadState pad;
-  if (!PadDrivesGc() && m.m_gamepads.Read(index, &pad))
+  if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad))
   {
     for (const auto& [from, to] : CLASSIC_MAP)
     {
