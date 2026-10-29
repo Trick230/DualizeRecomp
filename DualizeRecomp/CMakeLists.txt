@@ -15,6 +15,7 @@ add_executable(DualizeRecomp
     kernel/ios/fs.cpp
     kernel/ios/stm_kd.cpp
     kernel/ios/wiimote.cpp
+    kernel/ios/sysconf.cpp
     kernel/ios/wiimote_pairing.cpp
     hw/hw.cpp
     apu/native_dsp.cpp
