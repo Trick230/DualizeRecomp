@@ -5,8 +5,8 @@
 // raises the decrementer interrupt, and the handler due runs as the game's
 // code.
 //
-// The natives are pinned to their SDK bytes (R7EE8P.natives); the addresses
-// and offsets below belong to that build.
+// The natives are found by their SDK code (config/sdk.sigs); the addresses
+// and offsets below are NiGHTS' (defines, were it shared).
 
 #include "core/cpu.h"
 

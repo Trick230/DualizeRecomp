@@ -2,8 +2,8 @@
 // causes come straight from the host's devices instead of the guest reading
 // their registers, and the handler the OS picks runs as the game's code.
 //
-// The native is pinned to its SDK bytes (R7EE8P.natives); the addresses and
-// offsets below belong to that build.
+// The native is found by its SDK code (config/sdk.sigs); the addresses and
+// offsets below are NiGHTS' (defines, were it shared).
 
 #include "core/cpu.h"
 

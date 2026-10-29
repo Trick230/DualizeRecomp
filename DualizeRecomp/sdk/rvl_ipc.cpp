@@ -6,8 +6,8 @@
 // (the waiting thread's queue, pointer fix-ups, callbacks, freeing) is kept,
 // partly by running the SDK's own code.
 //
-// Both natives are pinned to their SDK bytes (R7EE8P.natives); the addresses
-// and offsets below belong to that build.
+// Both natives are found by their SDK code (config/sdk.sigs); the addresses
+// and offsets below are NiGHTS' (defines, were it shared).
 
 #include "core/cpu.h"
 
