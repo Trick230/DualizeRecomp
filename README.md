@@ -242,30 +242,12 @@ them pixel by pixel with the frames the game produced.
 
 ## Performance
 
-Uncapped gameplay in Will's first stage, i5-9600KF + RTX 4060.
-
-| Step | FPS |
-|---|---:|
-| Native renderer, recompiled DOL (start of phase 3) | 32 |
-| Direct cross-chunk calls, inline cache ops | 41 |
-| One-load RAM access through slice tables | 48 |
-| RSO modules recompiled | 57 |
-| Native SDK: mutexes, interrupts, scheduler, memcpy | 65 |
-| Idle until interrupt | 82 |
-| Direct indirect calls, PSMTX natives, builtin byte swaps | 88 |
-| Cache-range and MWCC helper natives, gather-pipe fast path | 96 |
-| Sparse entry switches | 101 |
-| Native runtime with flat guest memory | 113 |
-| One C function per guest function | 122 |
-| GX decoder: leaner merge path for the ~16K small draws a frame | 143 |
-| GX decoder: vertex array uploads grow geometrically | 158 |
-| **Built for x86-64-v3 (AVX2, FMA, MOVBE) instead of the build machine** | **162** |
-
-The guest CPU thread sets the uncapped rate again: GX decode takes ~4.2 ms a
-frame and the render thread idles a third of the time, with the CPU waiting
-on it ~3 ms a second. At 30 FPS that leaves the CPU thread idle about 70% of
-the time. How each
-step was done is in [docs/HISTORY.md](docs/HISTORY.md).
+Uncapped gameplay (`--unthrottled --no-vsync --no-interpolation`) in a
+forest stage runs at 550–600% of the Wii's speed, about
+165–180 game frames a second, on an i5-9600KF + RTX 4060. The guest CPU
+thread sets that rate; at the game's 30 FPS it idles most of the time, and
+240 Hz interpolation costs ~0.5 ms of CPU a present. How it got there, step
+by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 
 ## Roadmap
 
