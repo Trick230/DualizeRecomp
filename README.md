@@ -210,7 +210,7 @@ they recompile with the DOL.
 | `kernel/` | IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
 | `hw/` | PI, AI, DSP, CP/PE registers, Hollywood GPIO; the video clock behind the VI natives and the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
-| `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
+| Aurora `lib/gx/fifo.cpp` | The GX FIFO's render thread (`aurora/fifo.h`): the ring the gather pipe fills, decoding into Aurora, draw-done and token markers back to the CPU, frame pacing and interpolation. `machine.cpp` is its host |
 | `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
 | `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts, and the VI's retrace handler and beam (`rvl_vi.cpp`). The natives any game can list (OS context, interrupts and mutexes, cache, matrices, the Metrowerks runtime) live in DolRecomp's `runtime/sdk`, placed by `define`s in the natives list |
 | `boot.cpp` | The system menu's disc launch, then the apploader |
@@ -356,9 +356,9 @@ what DolRecomp and Aurora upstream have that the forks don't.
 
 ```
 tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler, the guest CPU core and the host CPU layer
-thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3
+thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3, the GX FIFO's render thread
 DualizeRecompLib/     the game's code: recompiler config, natives list, generated sources
-DualizeRecomp/        the runtime and the executable (kernel, hw, apu, gpu, hid, sdk)
+DualizeRecomp/        the runtime and the executable (kernel, hw, apu, hid, sdk)
 scripts/              fork sync, SDK symbol finder, natives hashes, automation client, window capture
 docs/                 the history of the port
 iso/ extracted/ build/ extern/   your disc, its extraction, builds, downloads (gitignored)
