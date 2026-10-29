@@ -66,6 +66,9 @@ struct Host
   void (*schedule)(void* user, int64_t cycles, uint32_t device, uint32_t event,
                    uint32_t data) = nullptr;
   uint64_t (*now)(void* user) = nullptr;  // CPU ticks
+  // A device wrote size bytes at a physical address the way a DMA does: code
+  // there must be fetched anew (the CPU's caches never see a DMA).
+  void (*dma_written)(void* user, uint32_t address, uint32_t size) = nullptr;
 };
 
 // Guest memory as IOS sees it: physical addresses (virtual ones are masked).
@@ -73,6 +76,13 @@ class Memory
 {
 public:
   explicit Memory(const Host& host) : m_host(host) {}
+
+  // After a device's DMA wrote [address, address + size).
+  void DmaWritten(uint32_t address, uint32_t size) const
+  {
+    if (m_host.dma_written && size)
+      m_host.dma_written(m_host.user, address & 0x1FFFFFFF, size);
+  }
 
   // Host pointer to size bytes at address, or null if they leave MEM1/MEM2.
   uint8_t* Pointer(uint32_t address, uint32_t size) const
