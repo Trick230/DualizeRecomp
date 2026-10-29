@@ -7,8 +7,8 @@
 // only their globals. NiGHTS itself plays with the Wii Remote; PAD reads a
 // GameCube pad when one drives a port.
 //
-// The natives are pinned to their SDK bytes (R7EE8P.natives); the addresses
-// and offsets below belong to that build.
+// The natives are found by their SDK code (config/sdk.sigs); the addresses
+// and offsets below are NiGHTS' (defines, were it shared).
 
 #include "core/cpu.h"
 

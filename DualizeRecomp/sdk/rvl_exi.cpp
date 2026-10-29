@@ -6,8 +6,9 @@
 // left. NiGHTS reaches one device through it, the IPL chip on channel 0
 // (the RTC, the SRAM and the debug UART behind OSReport).
 //
-// The natives are pinned to their SDK bytes (R7EE8P.natives); the addresses
-// below belong to that build. No caller in it passes a transfer callback.
+// The natives are found by their SDK code (config/sdk.sigs); the addresses
+// below are NiGHTS' (defines, were it shared). No caller in it passes a
+// transfer callback.
 
 #include "core/cpu.h"
 

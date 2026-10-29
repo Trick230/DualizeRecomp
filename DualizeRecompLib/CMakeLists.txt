@@ -30,7 +30,7 @@ add_custom_command(
     OUTPUT ${PPC_SOURCES} "${PPC_DIR}/ppc_recomp.h" "${PPC_DIR}/ppc_tables.inc"
         "${PPC_DIR}/ppc_natives.h"
     COMMAND $<TARGET_FILE:dolrecomp> "${CONFIG}" "${DUALIZE_GAME_DIR}" "${PPC_DIR}"
-    DEPENDS dolrecomp "${CONFIG}" "${CMAKE_CURRENT_SOURCE_DIR}/config/${GAME_ID}.natives" ${GAME_INPUTS}
+    DEPENDS dolrecomp "${CONFIG}" "${CMAKE_CURRENT_SOURCE_DIR}/config/sdk.sigs" ${GAME_INPUTS}
     COMMENT "Recompiling ${GAME_ID}"
     USES_TERMINAL)
 

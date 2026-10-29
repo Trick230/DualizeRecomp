@@ -3,9 +3,10 @@
 
 [main]
 dol = "sys/main.dol"
-# Revolution SDK and runtime functions with host implementations
-# (DualizeRecomp/sdk and DolRecomp's runtime/sdk), each pinned to the SDK bytes it replaces.
-natives = "R7EE8P.natives"
+# Functions with host implementations, found by signature: DolRecomp's own
+# (runtime/sdk) and DualizeRecomp/sdk's. Each matches only the SDK build it was
+# written for; the recompiler writes what it found to natives.txt.
+natives = ["@mwcc", "@rvl", "sdk.sigs"]
 # Fixed number of generated sources, so the build can list them up front.
 shards = 64
 

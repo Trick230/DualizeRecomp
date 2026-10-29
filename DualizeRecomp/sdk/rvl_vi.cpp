@@ -7,8 +7,8 @@
 // runs as the game's code. There are no VI registers: what of the SDK still
 // touches them (VIInit, OSFatal's video setup) reads them idle.
 //
-// The natives are pinned to their SDK bytes (R7EE8P.natives); the addresses
-// and offsets below belong to that build.
+// The natives are found by their SDK code (config/sdk.sigs); the addresses
+// and offsets below are NiGHTS' (defines, were it shared).
 
 #include "core/cpu.h"
 
