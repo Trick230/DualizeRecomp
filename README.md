@@ -62,10 +62,8 @@ between are **interpolated** at the display's refresh rate.
 
 **Known issues**
 
-- Interpolation: some trees close by can briefly jitter as you walk up to
-  them. Being worked on.
-- The intro FMV runs at ~19 FPS, bound by the game's own video decoder. FMVs
-  aren't interpolated.
+- FMVs (Sofdec) play at their 30 FPS but aren't interpolated, and their
+  frames arrive unevenly (σ ~6 ms against ~0.3 ms in play).
 - The stage RSO modules aren't recompiled yet and run on the interpreter.
 
 ## Building
@@ -223,7 +221,8 @@ with its matrices blended from the frame before:
    the view matrix into the GX stream ahead of the pass's draws, as a host
    packet the decoder reads. The camera move between the two frames is then
    exact, and applied as a screw motion, so an orbiting camera follows the
-   arc instead of cutting the chord. Estimating it from the draws instead
+   arc instead of cutting the chord. A draw projected differently from the
+   first of its pass was built with a camera of its own and isn't given it. Estimating it from the draws instead
    was wrong in ~30% of the moving frames, which shook the whole scene.
 3. **Classify.** A draw built with a known camera is blended in the world,
    wherever its object goes. Any other draw is judged by what explains its
@@ -275,7 +274,7 @@ step was done is in [docs/HISTORY.md](docs/HISTORY.md).
 | 1. SDK symbol map | Name the SDK functions in `main.dol` from Dolphin's signature database | ✅ 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the GX stream with Aurora | ✅ Native renderer |
 | 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator | ✅ · ⏳ stage RSO modules |
-| 4. Interpolation | Render between game ticks at the display's rate | 🟡 Running at 240 Hz; tree and shadow wobble left |
+| 4. Interpolation | Render between game ticks at the display's rate | ✅ 240 Hz; the game names its cameras, skinned draws pair by their bones |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
@@ -305,7 +304,6 @@ After phase 6, before the stage modules:
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
 | AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: the DSP's AX mixing is already host code (~1.3% of the CPU thread) |
 | Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
-| Interpolation wobble | Trees and shadows hold still between game ticks | ⏳ |
 
 ## Working on the forks
 
