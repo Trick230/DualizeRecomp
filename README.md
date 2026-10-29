@@ -13,7 +13,7 @@ Native CPU · native Wii runtime · WebGPU renderer · interpolated up to your r
 
 </div>
 
-The game's `main.dol` and the RSO modules it always loads are translated from
+The game's `main.dol` and all of its RSO modules are translated from
 PowerPC to C at build time by our fork of [DolRecomp](https://github.com/Trick230/DolRecomp/tree/dualize)
 and compiled into the executable, together with a runtime written for this
 game: its own Wii hardware, IOS, DSP, audio and input, and a GX renderer on
@@ -30,8 +30,8 @@ between are **interpolated** at the display's refresh rate.
 
 - **Every game instruction is native code.** No JIT. Interrupts and the
   exceptions the OS handles (FPU switch, system call) enter its handlers
-  directly; from cold boot through play the interpreter runs nothing (the
-  apploader's work is host code).
+  directly; from cold boot through play, stage loads included, the
+  interpreter runs nothing (the apploader's work is host code).
 - **One program.** The recompiled game, the runtime and the renderer build
   into one executable from one CMake project, the way
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
@@ -68,9 +68,10 @@ between are **interpolated** at the display's refresh rate.
   each video frame when its decoder finishes, not on the retrace, so frames
   arrive unevenly (σ ~6 ms against ~0.3 ms in play); the present pacer
   absorbs that, short of about one late refresh every second or two.
-- The stage RSO modules (`stage*`, `myDream`, `staffRoll`, `loading2P`)
-  aren't recompiled yet; what code of theirs runs goes through the
-  interpreter (none of it per frame in the forest stage measured).
+- The stage RSO modules (`stage*`, `myDream`, `staffRoll`, `loading2P`) are
+  recompiled for the address each is predicted to load at; only stage1000's
+  is read back from the game. A module that lands elsewhere fails its hash
+  check and runs on the interpreter.
 
 ## Building
 
@@ -203,7 +204,10 @@ recompiler finds them by signature: their code with the linker's bits masked
 sets), so each replaces only the SDK build it was written for.
 The RSO modules the game always loads (`global`, `play`, `select`, `title`)
 are linked inside the recompiler at the addresses the game loads them to, so
-they recompile with the DOL.
+they recompile with the DOL. The stage modules load one at a time into the
+memory `title` used, at an address that follows from their size; each is
+linked there as an overlay, its functions next to the ones it overlaps, and
+the runtime runs whichever matches guest RAM.
 
 ### Runtime
 
@@ -270,7 +274,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 |---|---|---|
 | 1. SDK symbol map | Name the SDK functions in `main.dol` from Dolphin's signature database | ✅ 1,369 strong + 253 range matches |
 | 2. Native GPU | Draw the GX stream with Aurora | ✅ Native renderer |
-| 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator | ✅ · ⏳ stage RSO modules |
+| 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator, the stage RSO modules | ✅ |
 | 4. Interpolation | Render between game ticks at the display's rate | ✅ 240 Hz; the game names its cameras, skinned draws pair by their bones |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
@@ -325,7 +329,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: the stage RSO modules, dropping the interpreter, then the
+Next, in order: dropping the interpreter, then the
 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, AX at the SDK), phase 6,
 GX at the API and phase 9.
 
