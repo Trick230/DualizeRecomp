@@ -1,6 +1,22 @@
-# Revolution SDK, runtime and game library (nw4r) functions with host implementations or hooks (DualizeRecomp/sdk).
+# Revolution SDK, runtime and game library (nw4r) functions with host implementations or hooks (DualizeRecomp/sdk, and DolRecomp's runtime/sdk).
 # <address> <size> <fnv1a64 of the code bytes> <symbol> [jump]; regenerate hashes with
-# scripts/natives_hash.py. Hashes pin each entry to the SDK build the native was written for.
+# tools/DolRecomp/tools/natives_hash.py. Hashes pin each entry to the SDK build the native was written for.
+# The defines place what DolRecomp's shared natives (runtime/sdk) look up in this game's build.
+
+# rvl_os.c: __OSRunQueueHint (small data) and OSDisableInterrupts' mtmsr window.
+define RUN_QUEUE_HINT_SDA_OFFSET -27532
+define OS_DISABLE_INTERRUPTS 0x80453414
+define OS_DISABLE_INTERRUPTS_END 0x80453420
+# rvl_cache.c: the sc in DCFlushRange and DCStoreRange.
+define DC_FLUSH_RANGE_SC 0x8044EC48
+define DC_STORE_RANGE_SC 0x8044EC78
+# rvl_mtx.c: MTXConcat's {0, 1} pair, and .sdata2's 0.0f, 1.0f, 0.5f, 3.0f off r2.
+define MTX_UNIT_PAIR 0x806F61E0
+define SDA2_ZERO -32148
+define SDA2_ONE -32152
+define SDA2_HALF -32104
+define SDA2_THREE -32100
+
 8000626C 0050 48D07741FF0575B4 msl_memcpy
 800062BC 00B4 09D5BFD0A62A498D msl_fill_mem
 803AF104 0004 9265ABA010CF4111 g3d_CalcViewCamera
