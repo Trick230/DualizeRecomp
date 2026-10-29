@@ -573,9 +573,12 @@ void DiDevice::Event(uint32_t event, uint32_t data)
     if (!read)
       break;
     const auto [offset, length] = read->Block(data);
+    const uint32_t address = read->address + static_cast<uint32_t>(offset - read->offset);
     // A block bound for unmapped memory is read and dropped, like a DMA there.
-    uint8_t* out = m_memory.Pointer(read->address + static_cast<uint32_t>(offset - read->offset), length);
+    uint8_t* out = m_memory.Pointer(address, length);
     const bool ok = !out || m_config.disc->Read(offset, length, out, read->partition);
+    if (out)
+      m_memory.DmaWritten(address, length);
     if (!ok)
       m_error = ERROR_READ;
     if (data + 1 == read->Blocks())

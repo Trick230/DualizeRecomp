@@ -1009,6 +1009,7 @@ private:
     const uint32_t size = handle->file->Size();
     const uint32_t count = std::min(request.size, size > handle->offset ? size - handle->offset : 0);
     const uint32_t read = handle->file->Read(handle->offset, data, count);
+    m_memory.DmaWritten(request.buffer, read);
     handle->offset += read;
     return Reply{static_cast<int32_t>(read), ticks};
   }

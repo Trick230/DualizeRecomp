@@ -57,6 +57,10 @@ IosKernel::IosKernel(Machine& machine) : m_machine(machine), m_memory(m_host), m
       .reply = HostReply,
       .schedule = HostSchedule,
       .now = HostNow,
+      .dma_written =
+          [](void* user, uint32_t address, uint32_t size) {
+            static_cast<IosKernel*>(user)->m_machine.cpu.InvalidateICache(address, size);
+          },
   };
 }
 
