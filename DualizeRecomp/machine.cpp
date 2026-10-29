@@ -807,8 +807,10 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
   }
   native_gx_load_state(gx_state.data(), gx_state.size());
   wud.AfterLoad(cpu);
-  m_throttle_host = Clock::now();
-  m_throttle_ticks = scheduler.Now();
+  // The guest clock and field count jumped; report and throttle from here.
+  m_throttle_host = m_report_host = Clock::now();
+  m_throttle_ticks = m_report_ticks = scheduler.Now();
+  m_report_fields = vi.Fields();
   return true;
 }
 }  // namespace dualize
