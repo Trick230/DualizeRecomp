@@ -163,6 +163,7 @@ Machine::Machine(MachineConfig config_)
   m_dsp_interrupt_event = scheduler.Register(DspInterruptEvent, this);
   m_aram_event = scheduler.Register(AramEvent, this);
   m_audio_dma_event = scheduler.Register(AudioDmaEvent, this);
+  m_dsp_mix_event = scheduler.Register(DspMixEvent, this);
 }
 
 Machine::~Machine()
@@ -271,6 +272,10 @@ void Machine::StartDsp()
     Machine& m = MachineOf(user);
     m.scheduler.Schedule(cycles, m.m_aram_event);
   };
+  host.schedule_mix_done = [](void* user, int64_t cycles) {
+    Machine& m = MachineOf(user);
+    m.scheduler.Schedule(cycles, m.m_dsp_mix_event);
+  };
   host.timebase = [](void* user) { return MachineOf(user).cpu.Timebase(); };
   host.force_exception_check = [](void* user, int64_t cycles) { MachineOf(user).scheduler.ForceCheck(cycles); };
   host.push_samples = [](void* user, const int16_t* samples, uint32_t count) {
@@ -295,6 +300,10 @@ void Machine::DspInterruptEvent(void* user, uint64_t type, int64_t)
 void Machine::AramEvent(void* user, uint64_t, int64_t)
 {
   MachineOf(user).dsp->CompleteAramDma();
+}
+void Machine::DspMixEvent(void* user, uint64_t, int64_t)
+{
+  MachineOf(user).dsp->CompleteMix();
 }
 void Machine::AudioDmaEvent(void* user, uint64_t, int64_t late)
 {
