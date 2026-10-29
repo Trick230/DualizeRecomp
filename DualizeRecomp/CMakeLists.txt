@@ -27,6 +27,7 @@ add_executable(DualizeRecomp
     sdk/rvl_interrupt.cpp
     sdk/rvl_ipc.cpp
     sdk/rvl_pad.cpp
+    sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE

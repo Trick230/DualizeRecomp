@@ -208,7 +208,7 @@ they recompile with the DOL.
 |---|---|
 | `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
 | `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
-| `hw/` | PI, VI, AI, DSP, CP/PE registers, Hollywood GPIO; the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
+| `hw/` | PI, AI, DSP, CP/PE registers, Hollywood GPIO; the video clock behind the VI natives and the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
 | `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
@@ -287,7 +287,7 @@ What phase 7 did and what is left of it (🔸 steps are architecture only: measu
 | WUD at the SDK | WPAD and KPAD stay the game's code; WUD's device side is the host's: output reports go to the remote model, input reports to WPAD's receive callback, connections to its connection callback. No Bluetooth stack, HCI, L2CAP or IOS USB driver | ✅ |
 | Dispatch cache | A direct-mapped pc → function and code cache ahead of the function table, for the run loop and indirect calls | ✅ Dispatcher from 3.8% to 2.5% of the CPU thread |
 | Threads as fibers | Each guest thread on its own host stack, so a thread switch or interrupt resumes without unwinding through the dispatcher | ✅ Interrupts run in place at the safepoint; each guest thread runs on its own Windows fiber, parked where it switched away and resumed there. Cold boot dispatches −22%, forest 350 VPS |
-| VI at the SDK | The retrace interrupt, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API in host code; no video interface register model | 🔸 Optional: the VI model and the retrace handler are ~0.1% of the CPU thread |
+| VI at the SDK | The retrace handler flushes what `VIConfigure`, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API staged straight into the host's video clock, and the beam getters (`VIGetCurrentLine`, `VIGetNextField`, the scan mode and cable) and the VI's hardware init are host code. The staging API stays the game's code: it never touched the hardware. No video interface registers | ✅ |
 | GX registers at the SDK | The token, finish and CP interrupts and GX's FIFO setup in host code; no CP/PE/MI register files | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
 | AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
 | SI and EXI at the SDK | `PADRead` builds each report from the host pad and runs the SDK's own `MakeStatus`; PAD's init, reset and rumble and the SI's init are host code. `EXILock`, `EXISelect`, `EXIImm`, `EXIDma` and the rest finish each transfer in the call on the IPL chip (RTC, SRAM, the UART behind OSReport). No serial or expansion interface registers or interrupts | ✅ |
@@ -323,7 +323,7 @@ shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
 Next, in order: the stage RSO modules, booting without the interpreter, dropping the interpreter, then the
-🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, VI, AX at the SDK), phase 6,
+🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, AX at the SDK), phase 6,
 GX at the API and phase 9.
 
 Dropped after measuring: checking MSR[FP] once per function instead of per
