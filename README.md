@@ -215,7 +215,9 @@ with its matrices blended from the frame before:
 1. **Match.** Each draw is paired with its counterpart in the previous frame
    by the address its matrices were loaded from (each model instance has its
    own) and a hash of its state; instances drawn from a shared buffer fall
-   back to the one nearest in space.
+   back to the one nearest in space. A skinned draw is placed by the bones
+   its vertices actually use (read from their matrix indices), and its
+   instances are told apart by where those bones were loaded from.
 2. **Camera.** The game says which camera each pass of models was built
    with: a hook in nw4r g3d's `ScnRoot::CalcView` (`sdk/nw4r_g3d.c`) writes
    the view matrix into the GX stream ahead of the pass's draws, as a host
