@@ -5,7 +5,8 @@
 #                              pulls, and a push sends fork commits first
 #   scripts/sync.sh status     each fork against its GitHub branch and upstream
 #   scripts/sync.sh push       push the forks' dualize branches, then this repo
-#   scripts/sync.sh upstream   fetch the forks' upstreams and list what's new
+#   scripts/sync.sh upstream   fetch the forks' official upstreams, list what's
+#                              new and fast-forward each fork's main to it
 #
 # The forks live on their dualize branch; this repository pins the commit of
 # each. A change to a fork is a commit there, then a commit here that moves the
@@ -71,13 +72,16 @@ upstream)
         set -- $(upstream_of "$fork")
         git -C "$fork" remote get-url upstream >/dev/null 2>&1 ||
             git -C "$fork" remote add upstream "$1"
-        git -C "$fork" fetch -q upstream "$2"
+        # From the official URL, whatever the remote says.
+        git -C "$fork" fetch -q "$1" "+refs/heads/$2:refs/remotes/upstream/$2"
         echo "== $fork: upstream/$2 has $(git -C "$fork" rev-list --count "HEAD..upstream/$2") commits we don't"
         git -C "$fork" log --oneline -10 "HEAD..upstream/$2"
+        # The fork's own main mirrors upstream's (fast-forward only).
+        git -C "$fork" push -q origin "upstream/$2:refs/heads/$2"
     done
     ;;
 *)
-    sed -n '2,13p' "$0"
+    sed -n '2,14p' "$0"
     exit 2
     ;;
 esac
