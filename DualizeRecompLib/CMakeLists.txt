@@ -39,6 +39,7 @@ add_library(DualizeRecompLib STATIC
     "${RUNTIME_DIR}/cpu/guest_module.c"
     "${RUNTIME_DIR}/sdk/msl_string.c"
     "${RUNTIME_DIR}/sdk/mwcc_runtime.c"
+    "${RUNTIME_DIR}/sdk/nw4r_g3d.c"
     "${RUNTIME_DIR}/sdk/rvl_cache.c"
     "${RUNTIME_DIR}/sdk/rvl_mtx.c"
     "${RUNTIME_DIR}/sdk/rvl_os.c")

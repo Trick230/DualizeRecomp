@@ -1,8 +1,9 @@
-# Revolution SDK and runtime functions with host implementations (DualizeRecomp/sdk).
+# Revolution SDK, runtime and game library (nw4r) functions with host implementations or hooks (DualizeRecomp/sdk).
 # <address> <size> <fnv1a64 of the code bytes> <symbol> [jump]; regenerate hashes with
 # scripts/natives_hash.py. Hashes pin each entry to the SDK build the native was written for.
 8000626C 0050 48D07741FF0575B4 msl_memcpy
 800062BC 00B4 09D5BFD0A62A498D msl_fill_mem
+803AF104 0004 9265ABA010CF4111 g3d_CalcViewCamera
 8044DE64 0070 DA8011257164FD1A rvl_OSSetAlarm
 8044DED4 0084 02C34FDEC81FB023 rvl_OSSetPeriodicAlarm
 8044DF58 0118 EA9CD341752D0441 rvl_OSCancelAlarm
