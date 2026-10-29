@@ -99,8 +99,10 @@ void ProcessorInterface::DoState(StateIO& io)
 
 namespace
 {
-// Half lines from a field boundary to the first input poll of the field.
-constexpr uint32_t SI_POLL_HALF_LINES = 15;
+// The host throttle runs where the SI would poll the pads: 15 half lines into
+// each field and every 2 * 492 half lines on (SISetSamplingRate(0)).
+constexpr uint32_t THROTTLE_HALF_LINES = 15;
+constexpr uint32_t THROTTLE_INTERVAL_HALF_LINES = 2 * 492;
 constexpr uint32_t CLOCK_FREQUENCIES[2] = {27000000, 54000000};
 }  // namespace
 
@@ -141,7 +143,7 @@ void VideoInterface::Preset()
   m_unknown_aa = 0;
   m_line_start_ticks = 0;
   m_half_line = 0;
-  m_next_si_poll = SI_POLL_HALF_LINES;
+  m_next_throttle = THROTTLE_HALF_LINES;
   UpdateParameters();
 }
 
@@ -177,7 +179,7 @@ bool VideoInterface::HalfLineHasEffect(uint32_t half_line) const
 {
   if (half_line == 0 || half_line == HalfLinesPerOddField() || half_line == m_odd_first ||
       half_line == m_even_first || half_line == m_odd_last || half_line == m_even_last ||
-      half_line == m_next_si_poll)
+      half_line == m_next_throttle)
   {
     return true;
   }
@@ -236,14 +238,13 @@ void VideoInterface::Update(uint64_t ticks)
     m_machine.OnFieldEnd(ticks);
   }
 
-  if (m_half_line == m_next_si_poll)
+  if (m_half_line == m_next_throttle)
   {
     m_machine.Throttle(ticks);
-    m_machine.si.Poll();
-    m_next_si_poll += 2 * m_machine.si.PollLines();
+    m_next_throttle += THROTTLE_INTERVAL_HALF_LINES;
   }
   if (boundary)
-    m_next_si_poll = m_half_line + SI_POLL_HALF_LINES;
+    m_next_throttle = m_half_line + THROTTLE_HALF_LINES;
 
   if (++m_half_line == TotalHalfLines())
     m_half_line = 0;
@@ -407,7 +408,7 @@ void VideoInterface::DoState(StateIO& io)
   io.Do(m_regs);
   io.Do(m_unknown_aa);
   io.Do(m_half_line);
-  io.Do(m_next_si_poll);
+  io.Do(m_next_throttle);
   io.Do(m_line_start_ticks);
   io.Do(m_quiet);
   io.Do(m_last_update);
@@ -421,290 +422,10 @@ void VideoInterface::DoState(StateIO& io)
 }
 
 // ---------------------------------------------------------------------------
-// Serial interface
+// Expansion bus
 
 namespace
 {
-constexpr uint32_t SI_ERRSTAT = 0x80000000;
-constexpr uint32_t SI_ERRLATCH = 0x40000000;
-constexpr uint32_t COM_TSTART = 1u << 0;
-constexpr uint32_t COM_RDSTINTMSK = 1u << 27;
-constexpr uint32_t COM_RDSTINT = 1u << 28;
-constexpr uint32_t COM_COMERR = 1u << 29;
-constexpr uint32_t COM_TCINTMSK = 1u << 30;
-constexpr uint32_t COM_TCINT = 1u << 31;
-constexpr uint32_t PAD_USE_ORIGIN = 0x0080;
-
-constexpr uint32_t RdstBit(int channel)
-{
-  return 0x20000000u >> (channel * 8);
-}
-constexpr uint32_t NorepBit(int channel)
-{
-  return 0x08000000u >> (channel * 8);
-}
-
-uint32_t PadHi(const SerialInterface::PadInput& pad)
-{
-  return pad.stick_y | uint32_t{pad.stick_x} << 8 | uint32_t(pad.buttons | PAD_USE_ORIGIN) << 16;
-}
-
-// The low word in each of the analog report modes.
-uint32_t PadLo(const SerialInterface::PadInput& pad, uint8_t mode)
-{
-  switch (mode)
-  {
-  case 1:
-    return (pad.analog_b >> 4) | (pad.analog_a >> 4) << 4 | uint32_t{pad.trigger_r} << 8 |
-           uint32_t{pad.trigger_l} << 16 | uint32_t(pad.c_y >> 4) << 24 |
-           uint32_t(pad.c_x >> 4) << 28;
-  case 2:
-    return pad.analog_b | uint32_t{pad.analog_a} << 8 | uint32_t(pad.trigger_r >> 4) << 16 |
-           uint32_t(pad.trigger_l >> 4) << 20 | uint32_t(pad.c_y >> 4) << 24 |
-           uint32_t(pad.c_x >> 4) << 28;
-  case 3:
-    return pad.trigger_r | uint32_t{pad.trigger_l} << 8 | uint32_t{pad.c_y} << 16 |
-           uint32_t{pad.c_x} << 24;
-  case 4:
-    return pad.analog_b | uint32_t{pad.analog_a} << 8 | uint32_t{pad.c_y} << 16 |
-           uint32_t{pad.c_x} << 24;
-  default:
-    return (pad.analog_b >> 4) | (pad.analog_a >> 4) << 4 | uint32_t(pad.trigger_r >> 4) << 8 |
-           uint32_t(pad.trigger_l >> 4) << 12 | uint32_t{pad.c_y} << 16 | uint32_t{pad.c_x} << 24;
-  }
-}
-}  // namespace
-
-SerialInterface::SerialInterface(Machine& machine) : m_machine(machine)
-{
-}
-
-bool SerialInterface::ReadPort(int port, PadInput* input) const
-{
-  return m_read_pad && m_read_pad(m_read_user, port, input);
-}
-
-void SerialInterface::UpdateInterrupts()
-{
-  if (m_status & (RdstBit(0) | RdstBit(1) | RdstBit(2) | RdstBit(3)))
-    m_com_csr |= COM_RDSTINT;
-  else
-    m_com_csr &= ~COM_RDSTINT;
-  const bool interrupt = ((m_com_csr & COM_RDSTINT) && (m_com_csr & COM_RDSTINTMSK)) ||
-                         ((m_com_csr & COM_TCINT) && (m_com_csr & COM_TCINTMSK));
-  m_machine.pi.SetInterrupt(PI_INT_SI, interrupt);
-}
-
-void SerialInterface::Poll()
-{
-  for (int i = 0; i < 4; ++i)
-  {
-    Channel& channel = m_channels[i];
-    uint32_t errlatch = channel.in_hi & SI_ERRLATCH;
-    PadInput pad;
-    if (ReadPort(i, &pad))
-    {
-      channel.in_hi = PadHi(pad);
-      channel.in_lo = PadLo(pad, channel.mode);
-      m_status |= RdstBit(i);
-    }
-    else
-    {
-      m_status |= NorepBit(i);
-      errlatch = SI_ERRLATCH;
-      channel.in_hi |= SI_ERRSTAT;
-    }
-    channel.in_hi = (channel.in_hi & ~SI_ERRLATCH) | errlatch;
-  }
-  UpdateInterrupts();
-}
-
-int SerialInterface::RunBuffer(int index, uint8_t* buffer, int)
-{
-  PadInput pad;
-  if (!ReadPort(index, &pad))
-    return -1;
-  Channel& channel = m_channels[index];
-  switch (buffer[0])
-  {
-  case 0x00:  // status
-  case 0xFF:  // reset
-    buffer[0] = 0x09;  // standard controller
-    buffer[1] = 0x00;
-    buffer[2] = 0x00;
-    return 3;
-  case 0x40:  // direct read
-  {
-    const uint32_t hi = PadHi(pad);
-    const uint32_t lo = PadLo(pad, channel.mode);
-    for (int i = 0; i < 4; ++i)
-    {
-      buffer[i] = static_cast<uint8_t>(hi >> (24 - 8 * i));
-      buffer[i + 4] = static_cast<uint8_t>(lo >> (24 - 8 * i));
-    }
-    return 8;
-  }
-  case 0x41:  // origin
-  case 0x42:  // recalibrate
-    std::memcpy(buffer, channel.origin.data(), channel.origin.size());
-    return static_cast<int>(channel.origin.size());
-  default:
-    // SET_GAME_ID and anything else: accepted without a reply.
-    return 0;
-  }
-}
-
-uint32_t SerialInterface::Read32(uint32_t offset)
-{
-  if (offset >= 0x80)
-  {
-    const uint8_t* p = &m_buffer[(offset - 0x80) & 0x7C];
-    return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3];
-  }
-  if (offset < 0x30)
-  {
-    Channel& channel = m_channels[offset / 0xC];
-    switch (offset % 0xC)
-    {
-    case 0:
-      return channel.out;
-    case 4:
-    case 8:
-      m_status &= ~RdstBit(offset / 0xC);
-      UpdateInterrupts();
-      return offset % 0xC == 4 ? channel.in_hi : channel.in_lo;
-    default:
-      return 0;
-    }
-  }
-  switch (offset)
-  {
-  case 0x30:
-    return m_poll;
-  case 0x34:
-    return m_com_csr;
-  case 0x38:
-    return m_status;
-  case 0x3C:
-    return m_exi_clock;
-  default:
-    return 0;
-  }
-}
-
-void SerialInterface::Write32(uint32_t offset, uint32_t value)
-{
-  if (offset >= 0x80)
-  {
-    uint8_t* p = &m_buffer[(offset - 0x80) & 0x7C];
-    p[0] = static_cast<uint8_t>(value >> 24);
-    p[1] = static_cast<uint8_t>(value >> 16);
-    p[2] = static_cast<uint8_t>(value >> 8);
-    p[3] = static_cast<uint8_t>(value);
-    return;
-  }
-  if (offset < 0x30)
-  {
-    Channel& channel = m_channels[offset / 0xC];
-    switch (offset % 0xC)
-    {
-    case 0:
-      channel.out = value;
-      break;
-    case 4:
-      channel.in_hi = value;
-      break;
-    case 8:
-      channel.in_lo = value;
-      break;
-    }
-    return;
-  }
-  switch (offset)
-  {
-  case 0x30:
-    m_poll = value;
-    break;
-  case 0x34:
-  {
-    // CHANNEL, INLNGTH, OUTLNGTH and the two masks are plain fields.
-    constexpr uint32_t fields = 0x6 | 0x7F00 | 0x7F0000 | COM_RDSTINTMSK | COM_TCINTMSK;
-    m_com_csr = (m_com_csr & ~fields) | (value & fields);
-    if (value & COM_RDSTINT)
-      m_com_csr &= ~COM_RDSTINT;
-    if (value & COM_TCINT)
-      m_com_csr &= ~COM_TCINT;
-    if (value & COM_TSTART)
-    {
-      const int channel = (m_com_csr >> 1) & 3;
-      const int length = static_cast<int>((((m_com_csr >> 16) & 0x7F) - 1) & 0x7F) + 1;
-      const int response = RunBuffer(channel, m_buffer.data(), length);
-      m_com_csr &= ~(COM_TSTART | COM_COMERR);
-      if (response < 0)
-      {
-        m_com_csr |= COM_COMERR;
-        m_status |= NorepBit(channel);
-      }
-      m_com_csr |= COM_TCINT;
-    }
-    UpdateInterrupts();
-    break;
-  }
-  case 0x38:
-    m_status &= ~(value & 0x0F0F0F0F);
-    if (value & 0x80000000)
-    {
-      for (int i = 0; i < 4; ++i)
-      {
-        const uint32_t command = m_channels[i].out;
-        const bool polled = (m_poll >> (7 - i)) & 1;
-        // CMD_WRITE sets the analog mode (rumble is the low bits of the other byte).
-        if (((command >> 16) & 0xFF) == 0x40 && !polled)
-          m_channels[i].mode = static_cast<uint8_t>(command & 0xFF);
-      }
-      m_status &= ~(0x80000000u | 0x10101010u);
-    }
-    break;
-  case 0x3C:
-    m_exi_clock = value;
-    break;
-  }
-}
-
-void SerialInterface::DoState(StateIO& io)
-{
-  for (Channel& channel : m_channels)
-  {
-    io.Do(channel.out);
-    io.Do(channel.in_hi);
-    io.Do(channel.in_lo);
-    io.Do(channel.mode);
-    io.Do(channel.origin);
-  }
-  io.Do(m_poll);
-  io.Do(m_com_csr);
-  io.Do(m_status);
-  io.Do(m_exi_clock);
-  io.Do(m_buffer);
-  if (io.Reading())
-    UpdateInterrupts();
-}
-
-// ---------------------------------------------------------------------------
-// Expansion interface
-
-namespace
-{
-constexpr uint32_t EXI_EXIINTMASK = 1u << 0;
-constexpr uint32_t EXI_EXIINT = 1u << 1;
-constexpr uint32_t EXI_TCINTMASK = 1u << 2;
-constexpr uint32_t EXI_TCINT = 1u << 3;
-constexpr uint32_t EXI_CLK = 7u << 4;
-constexpr uint32_t EXI_CS = 7u << 7;
-constexpr uint32_t EXI_EXTINTMASK = 1u << 10;
-constexpr uint32_t EXI_EXTINT = 1u << 11;
-constexpr uint32_t EXI_ROMDIS = 1u << 13;
-
 constexpr uint32_t SRAM_BASE = 0x800000;
 constexpr uint32_t SRAM_SIZE = 0x44;
 constexpr uint32_t WII_RTC_BASE = 0x840000;
@@ -727,12 +448,12 @@ constexpr uint8_t DEFAULT_SRAM[0x44] = {
 static_assert(sizeof(DEFAULT_SRAM) == 0x44);
 }  // namespace
 
-ExpansionInterface::ExpansionInterface(Machine& machine) : m_machine(machine)
+ExpansionBus::ExpansionBus(Machine& machine) : m_machine(machine)
 {
   std::memcpy(m_sram.data(), DEFAULT_SRAM, sizeof(DEFAULT_SRAM));
 }
 
-void ExpansionInterface::LoadSram(const char* path)
+void ExpansionBus::LoadSram(const char* path)
 {
   if (FILE* file = std::fopen(path, "rb"))
   {
@@ -743,20 +464,31 @@ void ExpansionInterface::LoadSram(const char* path)
   }
 }
 
-void ExpansionInterface::UpdateInterrupts()
+void ExpansionBus::Select(int channel)
 {
-  bool interrupt = false;
-  for (const Channel& channel : m_channels)
+  if (channel == 0 && channels[0].device == 1)
   {
-    const uint32_t s = channel.status;
-    interrupt |= ((s & EXI_EXIINT) && (s & EXI_EXIINTMASK)) ||
-                 ((s & EXI_TCINT) && (s & EXI_TCINTMASK)) ||
-                 ((s & EXI_EXTINT) && (s & EXI_EXTINTMASK));
+    m_command_bytes = 0;
+    m_cursor = 0;
   }
-  m_machine.pi.SetInterrupt(PI_INT_EXI, interrupt);
 }
 
-void ExpansionInterface::IplTransfer(uint8_t& byte)
+void ExpansionBus::Transfer(int channel, uint8_t* data, uint32_t length, bool read, bool write)
+{
+  const bool ipl = channel == 0 && channels[0].device == 1;
+  for (uint32_t i = 0; i < length; ++i)
+  {
+    uint8_t byte = write ? data[i] : 0;
+    if (ipl)
+      IplTransfer(byte);
+    else
+      byte = 0;  // nothing else is plugged in
+    if (read)
+      data[i] = byte;
+  }
+}
+
+void ExpansionBus::IplTransfer(uint8_t& byte)
 {
   if (m_command_bytes < 4)
   {
@@ -797,148 +529,35 @@ void ExpansionInterface::IplTransfer(uint8_t& byte)
   }
 }
 
-uint32_t ExpansionInterface::Read32(uint32_t offset)
+void ExpansionBus::DoState(StateIO& io)
 {
-  const int index = static_cast<int>(offset / 0x14);
-  if (index >= 3)
-    return 0;
-  const Channel& channel = m_channels[index];
-  switch (offset % 0x14)
+  for (Channel& channel : channels)
   {
-  case 0x00:
-    return channel.status;  // EXT stays 0: no memory cards
-  case 0x04:
-    return channel.dma_address;
-  case 0x08:
-    return channel.dma_length;
-  case 0x0C:
-    return channel.control;
-  case 0x10:
-    return channel.data;
-  default:
-    return 0;
-  }
-}
-
-void ExpansionInterface::Write32(uint32_t offset, uint32_t value)
-{
-  const int index = static_cast<int>(offset / 0x14);
-  if (index >= 3)
-    return;
-  Channel& channel = m_channels[index];
-  switch (offset % 0x14)
-  {
-  case 0x00:
-  {
-    uint32_t status = channel.status;
-    status = (status & ~(EXI_EXIINTMASK | EXI_TCINTMASK | EXI_CLK)) |
-             (value & (EXI_EXIINTMASK | EXI_TCINTMASK | EXI_CLK));
-    if (value & EXI_EXIINT)
-      status &= ~EXI_EXIINT;
-    if (value & EXI_TCINT)
-      status &= ~EXI_TCINT;
-    if (index != 2)
-    {
-      status = (status & ~EXI_EXTINTMASK) | (value & EXI_EXTINTMASK);
-      if (value & EXI_EXTINT)
-        status &= ~EXI_EXTINT;
-    }
-    if (index == 0)
-      status = (status & ~EXI_ROMDIS) | (value & EXI_ROMDIS);
-    const uint32_t old_cs = (status >> 7) & 7;
-    const uint32_t new_cs = (value >> 7) & 7;
-    // Selecting the IPL starts a new command.
-    if (index == 0 && (old_cs ^ new_cs) == 2 && new_cs)
-    {
-      m_command_bytes = 0;
-      m_cursor = 0;
-    }
-    channel.status = (status & ~EXI_CS) | (value & EXI_CS);
-    UpdateInterrupts();
-    break;
-  }
-  case 0x04:
-    channel.dma_address = value;
-    break;
-  case 0x08:
-    channel.dma_length = value;
-    break;
-  case 0x0C:
-  {
-    channel.control = value;
-    if (!(value & 1))
-      break;
-    const uint32_t cs = (channel.status >> 7) & 7;
-    if (cs != 1 && cs != 2 && cs != 4)
-      break;
-    const bool ipl = IplSelected(index);
-    const uint32_t rw = (value >> 2) & 3;
-    if (!(value & 2))
-    {
-      const uint32_t length = ((value >> 4) & 3) + 1;
-      if (rw == 0)
-      {
-        uint32_t result = 0;
-        for (uint32_t i = 0; i < length; ++i)
-        {
-          uint8_t byte = 0;
-          if (ipl)
-            IplTransfer(byte);
-          result |= uint32_t{byte} << (24 - 8 * i);
-        }
-        channel.data = result;
-      }
-      else if (rw == 1)
-      {
-        uint32_t data = channel.data;
-        for (uint32_t i = 0; i < length; ++i, data <<= 8)
-        {
-          uint8_t byte = static_cast<uint8_t>(data >> 24);
-          if (ipl)
-            IplTransfer(byte);
-        }
-      }
-    }
-    else if (rw == 0 || rw == 1)
-    {
-      uint8_t* p = m_machine.memory.Physical(channel.dma_address & 0x1FFFFFFF, channel.dma_length);
-      for (uint32_t i = 0; p && i < channel.dma_length; ++i)
-      {
-        uint8_t byte = rw == 1 ? p[i] : 0;
-        if (ipl)
-          IplTransfer(byte);
-        if (rw == 0)
-          p[i] = byte;
-      }
-    }
-    channel.control &= ~1u;
-    channel.status |= EXI_TCINT;
-    UpdateInterrupts();
-    break;
-  }
-  case 0x10:
-    channel.data = value;
-    break;
-  }
-}
-
-void ExpansionInterface::DoState(StateIO& io)
-{
-  for (Channel& channel : m_channels)
-  {
-    io.Do(channel.status);
-    io.Do(channel.dma_address);
-    io.Do(channel.dma_length);
-    io.Do(channel.control);
-    io.Do(channel.data);
+    io.Do(channel.locked);
+    io.Do(channel.selected);
+    io.Do(channel.device);
+    io.Do(channel.waiting);
+    io.Do(channel.callbacks);
   }
   io.Do(m_sram);
   io.Do(m_command);
   io.Do(m_command_bytes);
   io.Do(m_cursor);
   io.Do(m_rtc_flags);
-  if (io.Reading())
-    UpdateInterrupts();
+}
+
+void ExpansionBus::DoLegacyState(StateIO& io)
+{
+  // SI: four channels' out/in words, mode and origin; poll, COMCSR, status,
+  // EXI clock; the 128-byte buffer. EXI: three channels of five registers.
+  std::array<uint8_t, 4 * 23 + 16 + 128 + 3 * 20> registers;
+  io.Bytes(registers.data(), registers.size());
+  io.Do(m_sram);
+  io.Do(m_command);
+  io.Do(m_command_bytes);
+  io.Do(m_cursor);
+  io.Do(m_rtc_flags);
+  channels = {};
 }
 
 // ---------------------------------------------------------------------------

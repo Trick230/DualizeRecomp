@@ -26,7 +26,9 @@ namespace
 constexpr uint32_t GC_EPOCH = 0x386D4380;  // 2000-01-01, Unix seconds
 constexpr int64_t DSP_UPDATE_PERIOD = Scheduler::CPU_CLOCK / 1000;
 constexpr uint32_t STATE_MAGIC = 0x5354474D;  // "MGTS"
-constexpr uint32_t STATE_VERSION = 1;
+constexpr uint32_t STATE_VERSION = 2;
+// Version 1 still kept the SI and EXI register files.
+constexpr uint32_t STATE_VERSION_REGISTER_SI_EXI = 1;
 
 // Seconds since 1970 on the local clock.
 int64_t LocalTimeNow()
@@ -87,7 +89,6 @@ bool PadDrivesGc()
   }();
   return gc;
 }
-
 // Positional: the bottom face button is the Classic Controller's B.
 constexpr std::pair<uint32_t, uint16_t> CLASSIC_MAP[] = {
     {hid::PAD_EAST, ios::CLASSIC_A},          {hid::PAD_SOUTH, ios::CLASSIC_B},
@@ -156,7 +157,7 @@ float DisplayAspect(ios::Nand& nand)
 }  // namespace
 
 Machine::Machine(MachineConfig config_)
-    : config(std::move(config_)), cpu(*this), pi(*this), vi(*this), si(*this), exi(*this), ai(*this),
+    : config(std::move(config_)), cpu(*this), pi(*this), vi(*this), exi(*this), ai(*this),
       gfx(*this), hollywood(*this), ios(*this), wud(*this)
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
@@ -213,7 +214,6 @@ bool Machine::Start(std::string* error)
 
   StartDsp();
   m_gamepads.Start();
-  si.SetInputSource(ReadGcPad, this);
 
   const std::filesystem::path cache = config.user / "Cache" / "NativeGX";
   std::error_code ec;
@@ -393,13 +393,12 @@ void Machine::WiimoteSpeaker(void* user, int index, const int16_t* samples, uint
   MachineOf(user).m_audio.PushSpeaker(index, samples, count, rate, left_volume, right_volume);
 }
 
-bool Machine::ReadGcPad(void* user, int port, SerialInterface::PadInput* input)
+bool Machine::ReadGcPad(int port, GcPadInput* input)
 {
-  Machine& m = MachineOf(user);
   hid::PadState pad;
-  const bool plugged = PadDrivesGc() && m.m_gamepads.Read(port, &pad);
+  const bool plugged = PadDrivesGc() && m_gamepads.Read(port, &pad);
   AutomationPad automation;
-  const bool automated = m.ReadAutomationPad(port, &automation) && automation.gc;
+  const bool automated = ReadAutomationPad(port, &automation) && automation.gc;
   if (!automated)
     automation = {};
   // Unplugged as long as nothing drives the port.
@@ -437,6 +436,12 @@ bool Machine::ReadGcPad(void* user, int port, SerialInterface::PadInput* input)
             0,
             0};
   return true;
+}
+
+void Machine::SetGcRumble(int port, bool on)
+{
+  if (PadDrivesGc())
+    m_gamepads.SetRumble(port, on ? 1.0f : 0.0f);
 }
 
 // --- MMIO ---------------------------------------------------------------------
@@ -477,10 +482,10 @@ uint32_t Machine::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
     const uint32_t offset = physical & 0xFFF;
     if (offset >= 0xC00)
       return read32([&](uint32_t a) { return ai.Read32(a & 0x3FF); });
-    if (offset >= 0x800)
-      return read32([&](uint32_t a) { return exi.Read32(a & 0x3FF); });
+    // The SI and EXI live at the SDK (sdk/rvl_pad.cpp, sdk/rvl_exi.cpp);
+    // what of the SDK still touches their registers reads them idle.
     if (offset >= 0x400)
-      return read32([&](uint32_t a) { return si.Read32(a & 0x3FF); });
+      return 0;
     // DI: only the config register is the PPC's; IOS drives the drive.
     return read32([&](uint32_t a) { return (a & 0x3FF) == 0x24 ? 1u : 0u; });
   }
@@ -537,11 +542,7 @@ void Machine::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32
     const uint32_t offset = physical & 0xFFF;
     if (offset >= 0xC00)
       return write32([&](uint32_t a, uint32_t v) { ai.Write32(a & 0x3FF, v); });
-    if (offset >= 0x800)
-      return write32([&](uint32_t a, uint32_t v) { exi.Write32(a & 0x3FF, v); });
-    if (offset >= 0x400)
-      return write32([&](uint32_t a, uint32_t v) { si.Write32(a & 0x3FF, v); });
-    return;  // DI registers belong to IOS
+    return;  // DI registers belong to IOS; SI and EXI live at the SDK
   }
   case 0x0D000:
   case 0x0D800:
@@ -690,7 +691,7 @@ int64_t Machine::EmulatedTime() const
 
 // --- Savestates -----------------------------------------------------------------
 
-void Machine::DoState(StateIO& io)
+void Machine::DoState(StateIO& io, uint32_t version)
 {
   io.Do(m_boot_time);
   io.Bytes(memory.mem1, Memory::MEM1_SIZE);
@@ -701,8 +702,15 @@ void Machine::DoState(StateIO& io)
   cpu.DoState(io);
   pi.DoState(io);
   vi.DoState(io);
-  si.DoState(io);
-  exi.DoState(io);
+  if (version == STATE_VERSION_REGISTER_SI_EXI)
+  {
+    exi.DoLegacyState(io);
+    pi.SetInterrupt(PI_INT_SI | PI_INT_EXI, false);
+  }
+  else
+  {
+    exi.DoState(io);
+  }
   ai.DoState(io);
   gfx.DoState(io);
   hollywood.DoState(io);
@@ -729,7 +737,7 @@ bool Machine::SaveState(const std::filesystem::path& path, std::string* error)
   uint32_t magic = STATE_MAGIC, version = STATE_VERSION;
   io.Do(magic);
   io.Do(version);
-  DoState(io);
+  DoState(io, version);
   size_t gx_size = 0;
   const uint8_t* gx = native_gx_save_state(&gx_size);
   std::vector<uint8_t> gx_state(gx, gx + gx_size);
@@ -752,13 +760,13 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
   uint32_t magic = 0, version = 0;
   io.Do(magic);
   io.Do(version);
-  if (magic != STATE_MAGIC || version != STATE_VERSION)
+  if (magic != STATE_MAGIC || (version != STATE_VERSION && version != STATE_VERSION_REGISTER_SI_EXI))
   {
     *error = path.string() + " is not a native state";
     return false;
   }
   native_gx_drain();
-  DoState(io);
+  DoState(io, version);
   std::vector<uint8_t> gx_state;
   io.Do(gx_state);
   if (!io.Ok())

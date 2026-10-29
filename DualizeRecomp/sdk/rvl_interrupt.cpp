@@ -52,7 +52,8 @@ uint32_t MapBits(uint32_t value, std::initializer_list<BitMap> bits)
   return os;
 }
 
-// The OS interrupts (__OS_INTERRUPT_*, bit 31 - n) behind the PI causes.
+// The OS interrupts (__OS_INTERRUPT_*, bit 31 - n) behind the PI causes. The
+// SI and EXI raise none: their SDK natives finish every transfer in the call.
 uint32_t OsInterrupts(Machine& machine, uint32_t cause)
 {
   uint32_t os = 0;
@@ -63,18 +64,11 @@ uint32_t OsInterrupts(Machine& machine, uint32_t cause)
     os |= MapBits(machine.dsp->Read(0x500A), {{0x08, 0x04000000}, {0x20, 0x02000000}, {0x80, 0x01000000}});
   if (cause & PI_INT_AI)  // AI_CR: the sample counter
     os |= MapBits(machine.ai.Read32(0x00), {{0x08, 0x00800000}});
-  if (cause & PI_INT_EXI)  // each channel's EXI, TC and EXT
-  {
-    os |= MapBits(machine.exi.Read32(0x00), {{0x2, 0x00400000}, {0x8, 0x00200000}, {0x800, 0x00100000}});
-    os |= MapBits(machine.exi.Read32(0x14), {{0x2, 0x00080000}, {0x8, 0x00040000}, {0x800, 0x00020000}});
-    os |= MapBits(machine.exi.Read32(0x28), {{0x2, 0x00010000}, {0x8, 0x00008000}});
-  }
   return os | MapBits(cause, {{PI_INT_HSP, 0x20},
                               {PI_INT_DEBUG, 0x40},
                               {PI_INT_PE_FINISH, 0x1000},
                               {PI_INT_PE_TOKEN, 0x2000},
                               {PI_INT_VI, 0x80},
-                              {PI_INT_SI, 0x800},
                               {PI_INT_DI, 0x400},
                               {PI_INT_RSW, 0x200},
                               {PI_INT_CP, 0x4000},

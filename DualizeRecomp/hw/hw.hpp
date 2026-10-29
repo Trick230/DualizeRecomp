@@ -2,8 +2,7 @@
 
 // The Hollywood/Flipper blocks NiGHTS drives over MMIO, as Dolphin models
 // them: the processor interface (interrupt routing), video interface (beam
-// timing and display interrupts), serial interface (GameCube pads), expansion
-// interface (the IPL's RTC and SRAM), audio interface (the sample counter),
+// timing and display interrupts), audio interface (the sample counter),
 // memory interface, command processor and pixel engine registers, and the
 // Starlet IPC/GPIO block. Each device works on its natural register width;
 // Machine splits or widens other accesses.
@@ -102,7 +101,7 @@ private:
   std::array<uint16_t, 0x40> m_regs{};
   uint32_t m_unknown_aa = 0;
   uint32_t m_half_line = 0;
-  uint32_t m_next_si_poll = 0;
+  uint32_t m_next_throttle = 0;
   uint64_t m_line_start_ticks = 0;
   uint32_t m_odd_first = 0, m_odd_last = 0, m_even_first = 0, m_even_last = 0;
   // Half lines known to change nothing, applied together at the next event.
@@ -112,78 +111,47 @@ private:
   uint64_t m_fields = 0;
 };
 
-// GameCube controller ports. A pad is plugged in while the host input reports
-// one on the port; NiGHTS itself reads the Wii Remote.
-class SerialInterface
+// One GameCube pad as the PAD natives (sdk/rvl_pad.cpp) read it from the
+// host, in the controller's report units (sticks centred on 0x80).
+struct GcPadInput
 {
-public:
-  explicit SerialInterface(Machine& machine);
-  uint32_t Read32(uint32_t offset);
-  void Write32(uint32_t offset, uint32_t value);
-  // The video interface's poll: latches every port's input.
-  void Poll();
-  uint32_t PollLines() const { return (m_poll >> 16) & 0x3FF; }
-  void DoState(StateIO& io);
-
-  // Host input for one port, already in GCPadStatus units; null = unplugged.
-  struct PadInput
-  {
-    uint16_t buttons;
-    uint8_t stick_x, stick_y, c_x, c_y, trigger_l, trigger_r, analog_a, analog_b;
-  };
-  using ReadPad = bool (*)(void* user, int port, PadInput* input);
-  void SetInputSource(ReadPad read, void* user)
-  {
-    m_read_pad = read;
-    m_read_user = user;
-  }
-
-private:
-  struct Channel
-  {
-    uint32_t out = 0, in_hi = 0, in_lo = 0;
-    uint8_t mode = 3;
-    std::array<uint8_t, 10> origin{0, 0, 0x80, 0x80, 0x80, 0x80, 0, 0, 0, 0};
-  };
-  bool ReadPort(int port, PadInput* input) const;
-  int RunBuffer(int channel, uint8_t* buffer, int length);
-  void UpdateInterrupts();
-
-  Machine& m_machine;
-  std::array<Channel, 4> m_channels;
-  uint32_t m_poll = 492u << 16;
-  uint32_t m_com_csr = 0;
-  uint32_t m_status = 0;
-  uint32_t m_exi_clock = 0;
-  std::array<uint8_t, 128> m_buffer{};
-  ReadPad m_read_pad = nullptr;
-  void* m_read_user = nullptr;
+  uint16_t buttons;
+  uint8_t stick_x, stick_y, c_x, c_y, trigger_l, trigger_r, analog_a, analog_b;
 };
 
-class ExpansionInterface
+// The expansion bus behind the SDK's EXI natives (sdk/rvl_exi.cpp): each
+// channel's lock, waiting unlock callbacks and selection, as EXILock and
+// EXISelect keep them, and the one device NiGHTS talks to, the IPL chip on
+// channel 0 device 1 (the RTC, the SRAM and the debug UART).
+class ExpansionBus
 {
 public:
-  explicit ExpansionInterface(Machine& machine);
-  uint32_t Read32(uint32_t offset);
-  void Write32(uint32_t offset, uint32_t value);
-  void DoState(StateIO& io);
-  void LoadSram(const char* path);
-
-private:
   struct Channel
   {
-    uint32_t status = 0, dma_address = 0, dma_length = 0, control = 0, data = 0;
+    bool locked = false;
+    bool selected = false;
+    uint32_t device = 0;
+    uint32_t waiting = 0;
+    std::array<uint32_t, 3> callbacks{};  // EXICallbacks waiting for the unlock
   };
-  // Only channel 0 chip select 2 (the IPL: RTC, SRAM, UART) answers.
-  bool IplSelected(int channel) const
-  {
-    return channel == 0 && ((m_channels[0].status >> 7) & 7) == 2;
-  }
+  std::array<Channel, 3> channels;
+
+  explicit ExpansionBus(Machine& machine);
+  void LoadSram(const char* path);
+  // Starts a command when the selection reaches the IPL.
+  void Select(int channel);
+  // Shifts bytes through the selected device: a read stores what comes
+  // back, a write sends data (both for a read-write).
+  void Transfer(int channel, uint8_t* data, uint32_t length, bool read, bool write);
+  void DoState(StateIO& io);
+  // A state from before the SDK natives kept the SI and EXI register files;
+  // this reads past them and keeps the IPL's part.
+  void DoLegacyState(StateIO& io);
+
+private:
   void IplTransfer(uint8_t& byte);
-  void UpdateInterrupts();
 
   Machine& m_machine;
-  std::array<Channel, 3> m_channels;
   std::array<uint8_t, 0x44> m_sram{};
   uint32_t m_command = 0;
   uint32_t m_command_bytes = 0;
