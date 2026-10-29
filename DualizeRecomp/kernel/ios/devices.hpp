@@ -74,6 +74,9 @@ public:
 };
 std::unique_ptr<Es> CreateEs(const Host& host, Nand& nand);
 
+// Writes the factory SYSCONF when the NAND has none (or a damaged one).
+void EnsureSysconf(Nand& nand);
+
 // Lists the four Wii Remote slots and the Balance Board's as paired in
 // SYSCONF's BT.DINF, which WPAD assigns channels by.
 void PairWiimotes(Nand& nand);

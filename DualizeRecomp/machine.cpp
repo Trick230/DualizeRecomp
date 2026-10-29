@@ -205,6 +205,7 @@ bool Machine::Start(std::string* error)
       .speaker = SpeakerEnabled() ? WiimoteSpeaker : nullptr,
   };
   ios.Start(ios_config);
+  ios::EnsureSysconf(ios.Nand());
   ios::PairWiimotes(ios.Nand());
   wud.Start(wiimotes, ios_config.nand_root);
   exi.LoadSram((config.user / "GC" / "SRAM.raw").string().c_str());

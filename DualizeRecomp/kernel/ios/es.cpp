@@ -64,10 +64,40 @@ std::string TitlePath(uint64_t title_id, const char* leaf)
   return path;
 }
 
+// The directories ES makes sure of at boot, so a fresh NAND has somewhere for
+// uid.sys and the titles' data.
+struct SystemDirectory
+{
+  const char* path;
+  NandModes modes;
+  uint32_t uid = 0;
+  uint16_t gid = 0;
+};
+constexpr NandModes PUBLIC_MODES{NAND_RW, NAND_RW, NAND_RW};
+constexpr NandModes PRIVATE_MODES{NAND_RW, NAND_RW, NAND_NONE};
+constexpr std::array<SystemDirectory, 9> SYSTEM_DIRECTORIES{{
+    {"/sys", PRIVATE_MODES},
+    {"/ticket", PRIVATE_MODES},
+    {"/title", {NAND_RW, NAND_RW, NAND_READ}},
+    {"/shared1", PRIVATE_MODES},
+    {"/shared2", PUBLIC_MODES},
+    {"/tmp", PUBLIC_MODES},
+    {"/import", PRIVATE_MODES},
+    {"/meta", PUBLIC_MODES, FIRST_PPC_UID, 1},
+    {"/wfs", {NAND_RW, NAND_NONE, NAND_NONE}, 19, 19},  // IOS's PID_UNKNOWN
+}};
+
 class EsDevice final : public Es
 {
 public:
-  EsDevice(const Host& host, Nand& nand) : Es(host, "/dev/es"), m_nand(nand) {}
+  EsDevice(const Host& host, Nand& nand) : Es(host, "/dev/es"), m_nand(nand)
+  {
+    for (const SystemDirectory& directory : SYSTEM_DIRECTORIES)
+    {
+      m_nand.CreateDirectory(0, 0, directory.path, 0, directory.modes);
+      m_nand.SetMetadata(0, directory.path, directory.uid, directory.gid, 0, directory.modes);
+    }
+  }
 
   std::optional<Reply> Open(const OpenRequest& request) override
   {
