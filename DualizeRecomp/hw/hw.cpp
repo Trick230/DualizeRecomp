@@ -95,7 +95,7 @@ void ProcessorInterface::DoState(StateIO& io)
 }
 
 // ---------------------------------------------------------------------------
-// Video interface
+// Video clock
 
 namespace
 {
@@ -113,34 +113,21 @@ VideoInterface::VideoInterface(Machine& machine) : m_machine(machine)
   m_machine.scheduler.Schedule(TicksPerHalfLine(), m_event);
 }
 
+// The timing the IPL leaves running until VIInit: NTSC 480p, the retrace
+// interrupts at the end of the frame and at its start.
 void VideoInterface::Preset()
 {
-  m_regs = {};
-  Reg(0x00) = 6;               // EQU 6, ACV 0
-  Reg(0x02) = 1;               // ENB, NTSC
-  Reg(0x04) = 105 | 71 << 8;   // HCE, HCS
-  Reg(0x06) = 429;             // HLW
-  const uint32_t h1 = 64 | 162 << 7 | 373u << 17;  // HSY, HBE640, HBS640
-  Reg(0x08) = static_cast<uint16_t>(h1 >> 16);
-  Reg(0x0A) = static_cast<uint16_t>(h1);
-  Reg(0x0C) = 5;    // odd PSB
-  Reg(0x0E) = 502;  // odd PRB
-  Reg(0x10) = 4;    // even PSB
-  Reg(0x12) = 503;  // even PRB
-  const uint32_t burst_odd = 12 | 520 << 5 | 12 << 16 | 520u << 21;
-  const uint32_t burst_even = 13 | 519 << 5 | 13 << 16 | 519u << 21;
-  Reg(0x14) = static_cast<uint16_t>(burst_odd >> 16);
-  Reg(0x16) = static_cast<uint16_t>(burst_odd);
-  Reg(0x18) = static_cast<uint16_t>(burst_even >> 16);
-  Reg(0x1A) = static_cast<uint16_t>(burst_even);
-  Reg(0x30) = 263 | 1 << 12;  // pre-retrace: VCT 263, masked in
-  Reg(0x32) = 430;
-  Reg(0x34) = 1 | 1 << 12;  // post-retrace: VCT 1
-  Reg(0x36) = 1;
-  Reg(0x48) = 40 | 40 << 8;  // STD, WPL
-  Reg(0x6C) = 1;             // 54 MHz clock (NTSC)
-  Reg(0x6E) = 1;             // component cable (progressive scan offered)
-  m_unknown_aa = 0;
+  m_timing = {};
+  m_timing.equ = 6;
+  m_timing.hlw = 429;
+  m_timing.psb[0] = 5;
+  m_timing.prb[0] = 502;
+  m_timing.psb[1] = 4;
+  m_timing.prb[1] = 503;
+  m_timing.clock54 = true;
+  m_timing.interrupts[0] = {263, 430, true};
+  m_timing.interrupts[1] = {1, 1, true};
+  m_pending = 0;
   m_line_start_ticks = 0;
   m_half_line = 0;
   m_next_throttle = THROTTLE_HALF_LINES;
@@ -149,30 +136,35 @@ void VideoInterface::Preset()
 
 uint32_t VideoInterface::TicksPerHalfLine() const
 {
-  return 2 * Scheduler::CPU_CLOCK / CLOCK_FREQUENCIES[Reg(0x6C) & 1] * Hlw();
+  return 2 * Scheduler::CPU_CLOCK / CLOCK_FREQUENCIES[m_timing.clock54] * m_timing.hlw;
 }
 
 void VideoInterface::UpdateParameters()
 {
-  const uint32_t equ = 3 * Equ();
-  const uint32_t acv = 2 * Acv();
-  m_odd_first = equ + Prb(false);
+  const uint32_t equ = 3 * m_timing.equ;
+  const uint32_t acv = 2 * m_timing.acv;
+  m_odd_first = equ + m_timing.prb[0];
   const uint32_t odd_end = m_odd_first + acv;
   m_odd_last = odd_end - 1;
-  const int32_t psb_diff = static_cast<int32_t>(Psb(false)) - static_cast<int32_t>(Psb(true));
-  m_even_first = odd_end + Psb(false) + equ + Prb(true) - psb_diff;
+  const int32_t psb_diff =
+      static_cast<int32_t>(m_timing.psb[0]) - static_cast<int32_t>(m_timing.psb[1]);
+  m_even_first = odd_end + m_timing.psb[0] + equ + m_timing.prb[1] - psb_diff;
   m_even_last = m_even_first + acv - 1;
 }
 
-void VideoInterface::UpdateInterrupts()
+void VideoInterface::UpdateInterrupt()
 {
   bool active = false;
   for (int i = 0; i < 4; ++i)
-  {
-    const uint16_t hi = Reg(0x30 + 4 * i);
-    active |= (hi & 0x8000) && (hi & 0x1000);
-  }
+    active |= (m_pending >> i & 1) && m_timing.interrupts[i].enabled;
   m_machine.pi.SetInterrupt(PI_INT_VI, active);
+}
+
+// An interrupt fires as the beam enters the half of its line it names.
+bool VideoInterface::InterruptAt(const VideoTiming::Interrupt& interrupt, uint32_t half_line) const
+{
+  const uint32_t target = interrupt.hct > m_timing.hlw ? 1 : 0;
+  return 1 + half_line / 2 == interrupt.vct && (half_line & 1) == target;
 }
 
 bool VideoInterface::HalfLineHasEffect(uint32_t half_line) const
@@ -186,13 +178,9 @@ bool VideoInterface::HalfLineHasEffect(uint32_t half_line) const
   uint32_t next = half_line + 1;
   if (next == TotalHalfLines())
     next = 0;
-  for (int i = 0; i < 4; ++i)
-  {
-    const uint32_t reg = Interrupt(i);
-    const uint32_t target = (reg & 0x7FF) > Hlw() ? 1 : 0;
-    if (1 + next / 2 == ((reg >> 16) & 0x7FF) && (next & 1) == target)
+  for (const VideoTiming::Interrupt& interrupt : m_timing.interrupts)
+    if (InterruptAt(interrupt, next))
       return true;
-  }
   return false;
 }
 
@@ -252,13 +240,9 @@ void VideoInterface::Update(uint64_t ticks)
     m_line_start_ticks = ticks;
 
   for (int i = 0; i < 4; ++i)
-  {
-    const uint32_t reg = Interrupt(i);
-    const uint32_t target = (reg & 0x7FF) > Hlw() ? 1 : 0;
-    if (1 + m_half_line / 2 == ((reg >> 16) & 0x7FF) && (m_half_line & 1) == target)
-      Reg(0x30 + 4 * i) |= 0x8000;
-  }
-  UpdateInterrupts();
+    if (InterruptAt(m_timing.interrupts[i], m_half_line))
+      m_pending |= 1u << i;
+  UpdateInterrupt();
 }
 
 void VideoInterface::Event(void* user, uint64_t, int64_t late)
@@ -279,14 +263,13 @@ void VideoInterface::Event(void* user, uint64_t, int64_t late)
   vi.m_machine.scheduler.Schedule(cycles - late, vi.m_event);
 }
 
-void VideoInterface::BeginTimingChange()
+void VideoInterface::Configure(const VideoTiming& timing)
 {
   CatchUpQuietHalfLines(m_machine.scheduler.Now());
-}
-
-// The batch was planned with the old timing; replan the rest of it.
-void VideoInterface::EndTimingChange()
-{
+  m_timing = timing;
+  UpdateParameters();
+  UpdateInterrupt();
+  // The batch was planned with the old timing; replan the rest of it.
   if (m_quiet == 0)
     return;
   const uint32_t ticks = TicksPerHalfLine();
@@ -302,111 +285,31 @@ void VideoInterface::EndTimingChange()
   scheduler.ScheduleAt(std::max(due, scheduler.Now()), m_event);
 }
 
-uint16_t VideoInterface::Read16(uint32_t offset)
+uint32_t VideoInterface::Vct()
 {
-  offset &= 0x7E;
-  switch (offset)
-  {
-  case 0x2C:
-    CatchUpQuietHalfLines(m_machine.scheduler.Now());
-    return static_cast<uint16_t>(1 + m_half_line / 2);
-  case 0x2E:
-  {
-    CatchUpQuietHalfLines(m_machine.scheduler.Now());
-    const uint64_t elapsed = m_machine.scheduler.Now() - m_line_start_ticks;
-    const uint32_t per_half_line = std::max<uint32_t>(TicksPerHalfLine(), 1);
-    const uint64_t value = 1 + Hlw() * elapsed / per_half_line;
-    return static_cast<uint16_t>(std::clamp<uint64_t>(value, 1, 2 * Hlw()));
-  }
-  case 0x68:
-    return static_cast<uint16_t>(m_unknown_aa >> 16);
-  case 0x6A:
-    return static_cast<uint16_t>(m_unknown_aa);
-  default:
-    return offset < 0x76 ? Reg(offset) : 0;
-  }
+  CatchUpQuietHalfLines(m_machine.scheduler.Now());
+  return 1 + m_half_line / 2;
 }
 
-void VideoInterface::Write16(uint32_t offset, uint16_t value)
+uint32_t VideoInterface::Hct()
 {
-  offset &= 0x7E;
-  switch (offset)
-  {
-  case 0x00:
-  case 0x04:
-  case 0x06:
-  case 0x0C:
-  case 0x0E:
-  case 0x10:
-  case 0x12:
-  case 0x6C:
-    BeginTimingChange();
-    Reg(offset) = value;
-    UpdateParameters();
-    EndTimingChange();
-    break;
-  case 0x02:
-  {
-    BeginTimingChange();
-    // ENB, NIN, DLR, LE0, LE1, FMT; RST resets the interrupts.
-    Reg(0x02) = (Reg(0x02) & ~0x03FDu) | (value & 0x03FD);
-    if (value & 0x2)
-    {
-      for (int i = 0; i < 4; ++i)
-      {
-        Reg(0x30 + 4 * i) = 0;
-        Reg(0x32 + 4 * i) = 0;
-      }
-      UpdateInterrupts();
-    }
-    UpdateParameters();
-    EndTimingChange();
-    break;
-  }
-  case 0x1C:
-  case 0x20:
-  case 0x24:
-  case 0x28:
-    // A write with CLRPOFF set clears POFF.
-    Reg(offset) = (value & 0xE000) ? value & ~0x1000 : value;
-    break;
-  case 0x2C:
-  case 0x2E:
-    break;
-  case 0x30:
-  case 0x34:
-  case 0x38:
-  case 0x3C:
-    BeginTimingChange();
-    Reg(offset) = value;
-    UpdateInterrupts();
-    EndTimingChange();
-    break;
-  case 0x32:
-  case 0x36:
-  case 0x3A:
-  case 0x3E:
-    BeginTimingChange();
-    Reg(offset) = value;
-    EndTimingChange();
-    break;
-  case 0x68:
-    m_unknown_aa = (m_unknown_aa & 0xFFFF) | uint32_t{value} << 16;
-    break;
-  case 0x6A:
-    m_unknown_aa = (m_unknown_aa & 0xFFFF0000) | value;
-    break;
-  default:
-    if (offset < 0x76)
-      Reg(offset) = value;
-    break;
-  }
+  CatchUpQuietHalfLines(m_machine.scheduler.Now());
+  const uint64_t elapsed = m_machine.scheduler.Now() - m_line_start_ticks;
+  const uint32_t per_half_line = std::max<uint32_t>(TicksPerHalfLine(), 1);
+  const uint64_t value = 1 + m_timing.hlw * elapsed / per_half_line;
+  return static_cast<uint32_t>(std::clamp<uint64_t>(value, 1, 2 * m_timing.hlw));
 }
 
-void VideoInterface::DoState(StateIO& io)
+uint32_t VideoInterface::TakeInterrupts()
 {
-  io.Do(m_regs);
-  io.Do(m_unknown_aa);
+  const uint32_t pending = m_pending;
+  m_pending = 0;
+  UpdateInterrupt();
+  return pending;
+}
+
+void VideoInterface::DoClockState(StateIO& io)
+{
   io.Do(m_half_line);
   io.Do(m_next_throttle);
   io.Do(m_line_start_ticks);
@@ -417,8 +320,53 @@ void VideoInterface::DoState(StateIO& io)
   if (io.Reading())
   {
     UpdateParameters();
-    UpdateInterrupts();
+    UpdateInterrupt();
   }
+}
+
+void VideoInterface::DoState(StateIO& io)
+{
+  io.Do(m_timing.equ);
+  io.Do(m_timing.acv);
+  io.Do(m_timing.hlw);
+  io.Do(m_timing.prb);
+  io.Do(m_timing.psb);
+  io.Do(m_timing.clock54);
+  io.Do(m_timing.non_interlaced);
+  for (VideoTiming::Interrupt& interrupt : m_timing.interrupts)
+  {
+    io.Do(interrupt.vct);
+    io.Do(interrupt.hct);
+    io.Do(interrupt.enabled);
+  }
+  io.Do(m_pending);
+  DoClockState(io);
+}
+
+void VideoInterface::DoLegacyState(StateIO& io)
+{
+  std::array<uint16_t, 0x40> regs{};
+  uint32_t unknown_aa = 0;
+  io.Do(regs);
+  io.Do(unknown_aa);
+  const auto reg = [&](uint32_t offset) -> uint32_t { return regs[offset >> 1]; };
+  m_timing.equ = reg(0x00) & 0xF;
+  m_timing.acv = (reg(0x00) >> 4) & 0x3FF;
+  m_timing.hlw = reg(0x06) & 0x3FF;
+  m_timing.psb[0] = reg(0x0C) & 0x3FF;
+  m_timing.prb[0] = reg(0x0E) & 0x3FF;
+  m_timing.psb[1] = reg(0x10) & 0x3FF;
+  m_timing.prb[1] = reg(0x12) & 0x3FF;
+  m_timing.clock54 = (reg(0x6C) & 1) != 0;
+  m_timing.non_interlaced = (reg(0x02) & 4) != 0;
+  m_pending = 0;
+  for (int i = 0; i < 4; ++i)
+  {
+    const uint32_t hi = reg(0x30 + 4 * i);
+    m_timing.interrupts[i] = {hi & 0x7FF, reg(0x32 + 4 * i) & 0x7FF, (hi & 0x1000) != 0};
+    m_pending |= (hi >> 15 & 1) << i;
+  }
+  DoClockState(io);
 }
 
 // ---------------------------------------------------------------------------

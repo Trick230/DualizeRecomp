@@ -1,11 +1,11 @@
 #pragma once
 
 // The Hollywood/Flipper blocks NiGHTS drives over MMIO, as Dolphin models
-// them: the processor interface (interrupt routing), video interface (beam
-// timing and display interrupts), audio interface (the sample counter),
-// memory interface, command processor and pixel engine registers, and the
-// Starlet IPC/GPIO block. Each device works on its natural register width;
-// Machine splits or widens other accesses.
+// them: the processor interface (interrupt routing), audio interface (the
+// sample counter), memory interface, command processor and pixel engine
+// registers, and the Starlet IPC/GPIO block. Each device works on its
+// natural register width; Machine splits or widens other accesses. The video
+// clock and the expansion bus have no registers: SDK natives drive them.
 
 #include "state.hpp"
 
@@ -56,50 +56,71 @@ private:
   uint32_t m_reset_code = 0;
 };
 
+// The video clock behind the SDK's VI natives (sdk/rvl_vi.cpp): the beam
+// position, field ends and the four display interrupts, timed by what the
+// SDK's retrace handler last flushed from its register shadows. The guest
+// sees none of it as registers.
+struct VideoTiming
+{
+  struct Interrupt
+  {
+    uint32_t vct = 0, hct = 0;
+    bool enabled = false;
+  };
+  uint32_t equ = 0, acv = 0, hlw = 0;
+  uint32_t prb[2]{}, psb[2]{};  // odd, even field
+  bool clock54 = false;         // the 54 MHz clock of progressive scan
+  bool non_interlaced = false;
+  std::array<Interrupt, 4> interrupts{};
+};
+
 class VideoInterface
 {
 public:
   explicit VideoInterface(Machine& machine);
-  uint16_t Read16(uint32_t offset);
-  void Write16(uint32_t offset, uint16_t value);
-  void DoState(StateIO& io);
+  const VideoTiming& Timing() const { return m_timing; }
+  void Configure(const VideoTiming& timing);
+  // The beam's line and position in it, as the SDK reads them.
+  uint32_t Vct();
+  uint32_t Hct();
+  // The display interrupts that fired since the last call (bit i for
+  // interrupt i); taking them acknowledges them.
+  uint32_t TakeInterrupts();
   // Video clock ticks per half line (the scheduler's event period).
   uint32_t TicksPerHalfLine() const;
   uint64_t Fields() const { return m_fields; }
+  void DoState(StateIO& io);
+  // A state from before the VI natives kept the VI register file; this reads
+  // it into the timing it set.
+  void DoLegacyState(StateIO& io);
 
 private:
-  // Registers as the guest sees them, one u16 per halfword offset.
-  uint16_t& Reg(uint32_t offset) { return m_regs[offset >> 1]; }
-  uint16_t Reg(uint32_t offset) const { return m_regs[offset >> 1]; }
-  uint32_t Equ() const { return Reg(0x00) & 0xF; }
-  uint32_t Acv() const { return (Reg(0x00) >> 4) & 0x3FF; }
-  uint32_t Hlw() const { return Reg(0x06) & 0x3FF; }
-  uint32_t Prb(bool even) const { return Reg(even ? 0x12 : 0x0E) & 0x3FF; }
-  uint32_t Psb(bool even) const { return Reg(even ? 0x10 : 0x0C) & 0x3FF; }
-  uint32_t Interrupt(int i) const
+  uint32_t HalfLinesPerOddField() const
   {
-    return uint32_t{Reg(0x30 + 4 * i)} << 16 | Reg(0x32 + 4 * i);
+    return 3 * m_timing.equ + m_timing.prb[0] + 2 * m_timing.acv + m_timing.psb[0];
   }
-  uint32_t HalfLinesPerOddField() const { return 3 * Equ() + Prb(false) + 2 * Acv() + Psb(false); }
-  uint32_t HalfLinesPerEvenField() const { return 3 * Equ() + Prb(true) + 2 * Acv() + Psb(true); }
+  uint32_t HalfLinesPerEvenField() const
+  {
+    return 3 * m_timing.equ + m_timing.prb[1] + 2 * m_timing.acv + m_timing.psb[1];
+  }
   uint32_t TotalHalfLines() const { return HalfLinesPerOddField() + HalfLinesPerEvenField(); }
 
   void Preset();
   void UpdateParameters();
-  void UpdateInterrupts();
+  void UpdateInterrupt();
+  bool InterruptAt(const VideoTiming::Interrupt& interrupt, uint32_t half_line) const;
   bool HalfLineHasEffect(uint32_t half_line) const;
   uint32_t QuietHalfLinesAhead() const;
   void ApplyQuietHalfLine(uint64_t ticks);
   void CatchUpQuietHalfLines(uint64_t ticks);
   void Update(uint64_t ticks);
-  void BeginTimingChange();
-  void EndTimingChange();
+  void DoClockState(StateIO& io);
   static void Event(void* user, uint64_t, int64_t late);
 
   Machine& m_machine;
   int m_event = -1;
-  std::array<uint16_t, 0x40> m_regs{};
-  uint32_t m_unknown_aa = 0;
+  VideoTiming m_timing;
+  uint32_t m_pending = 0;
   uint32_t m_half_line = 0;
   uint32_t m_next_throttle = 0;
   uint64_t m_line_start_ticks = 0;

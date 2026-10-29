@@ -26,9 +26,11 @@ namespace
 constexpr uint32_t GC_EPOCH = 0x386D4380;  // 2000-01-01, Unix seconds
 constexpr int64_t DSP_UPDATE_PERIOD = Scheduler::CPU_CLOCK / 1000;
 constexpr uint32_t STATE_MAGIC = 0x5354474D;  // "MGTS"
-constexpr uint32_t STATE_VERSION = 2;
-// Version 1 still kept the SI and EXI register files.
+constexpr uint32_t STATE_VERSION = 3;
+// Version 1 still kept the SI and EXI register files, versions 1 and 2 the
+// VI's.
 constexpr uint32_t STATE_VERSION_REGISTER_SI_EXI = 1;
+constexpr uint32_t STATE_VERSION_REGISTER_VI = 2;
 
 // Seconds since 1970 on the local clock.
 int64_t LocalTimeNow()
@@ -491,7 +493,9 @@ uint32_t Machine::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
   case 0x0C001:
     return read16([&](uint32_t a) { return uint32_t{gfx.ReadPe(a & 0xFFF)}; });
   case 0x0C002:
-    return read16([&](uint32_t a) { return uint32_t{vi.Read16(a & 0xFFF)}; });
+    // The VI lives at the SDK (sdk/rvl_vi.cpp); what of it still touches the
+    // registers (VIInit, OSFatal's video setup) reads them idle.
+    return 0;
   case 0x0C003:
     return read32([&](uint32_t a) { return pi.Read32(a & 0xFFF); });
   case 0x0C004:
@@ -551,7 +555,7 @@ void Machine::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32
   case 0x0C001:
     return write16([&](uint32_t a, uint16_t v) { gfx.WritePe(a & 0xFFF, v); });
   case 0x0C002:
-    return write16([&](uint32_t a, uint16_t v) { vi.Write16(a & 0xFFF, v); });
+    return;  // the VI lives at the SDK
   case 0x0C003:
     return write32([&](uint32_t a, uint32_t v) { pi.Write32(a & 0xFFF, v); });
   case 0x0C004:
@@ -723,7 +727,10 @@ void Machine::DoState(StateIO& io, uint32_t version)
   scheduler.DoState(io);
   cpu.DoState(io);
   pi.DoState(io);
-  vi.DoState(io);
+  if (version <= STATE_VERSION_REGISTER_VI)
+    vi.DoLegacyState(io);
+  else
+    vi.DoState(io);
   if (version == STATE_VERSION_REGISTER_SI_EXI)
   {
     exi.DoLegacyState(io);
@@ -782,7 +789,7 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
   uint32_t magic = 0, version = 0;
   io.Do(magic);
   io.Do(version);
-  if (magic != STATE_MAGIC || (version != STATE_VERSION && version != STATE_VERSION_REGISTER_SI_EXI))
+  if (magic != STATE_MAGIC || version < STATE_VERSION_REGISTER_SI_EXI || version > STATE_VERSION)
   {
     *error = path.string() + " is not a native state";
     return false;
