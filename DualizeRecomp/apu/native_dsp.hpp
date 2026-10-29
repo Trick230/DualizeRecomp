@@ -34,6 +34,8 @@ struct DspHost
   void (*schedule_interrupt)(void* user, int64_t cycles, uint32_t type) = nullptr;
   // Calls DspCore::CompleteAramDma() after cycles CPU ticks.
   void (*schedule_aram_done)(void* user, int64_t cycles) = nullptr;
+  // Calls DspCore::CompleteMix() after cycles CPU ticks.
+  void (*schedule_mix_done)(void* user, int64_t cycles) = nullptr;
   uint64_t (*timebase)(void* user) = nullptr;
   // Makes the CPU leave its slice within cycles ticks to look at events again.
   void (*force_exception_check)(void* user, int64_t cycles) = nullptr;
@@ -63,6 +65,8 @@ public:
   void Write(uint32_t offset, uint16_t value);
 
   void RaiseInterrupt(uint32_t type);
+  // The AX command list being mixed is due: its mails reach the CPU.
+  void CompleteMix();
   void CompleteAramDma();
   // The DSP's time slice (once per millisecond of guest time).
   void Update();

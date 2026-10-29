@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -9,11 +10,14 @@
 #include <deque>
 #include <fstream>
 #include <optional>
+#include <thread>
 #include <utility>
 
 // Bit-for-bit the behaviour of Dolphin's DSP interface and DSP HLE (DSP.cpp,
 // DSPHLE, MailHandler, the ROM, INIT and AXWii ucodes, the accelerator), so
-// emulated audio and savestates stay identical with either one running.
+// emulated audio and savestates stay identical with either one running. One
+// difference: AX mixes each command list on a thread of its own, and its
+// mails reach the CPU a fixed DSP time later (DspHost::schedule_mix_done).
 
 namespace dualize::apu
 {
@@ -26,6 +30,10 @@ using u64 = uint64_t;
 using s16 = int16_t;
 using s32 = int32_t;
 using s64 = int64_t;
+
+// How long an AX command list takes the DSP, in 729 MHz CPU ticks (half a
+// millisecond, a busy DSP on hardware): its mails arrive then.
+constexpr int64_t AX_MIX_CYCLES = 729000000 / 2000;
 
 constexpr u32 UCODE_ROM = 0x00000000;
 constexpr u32 UCODE_INIT_AUDIO_SYSTEM = 0x00000001;
@@ -772,6 +780,22 @@ struct DspCore::Impl
   u32 last_mail = 0;
   bool halted = false;
 
+  // The AX mixer thread. A command list runs there from the moment its
+  // address arrives, and the mails it sends are held until the mix is due.
+  // What touches the ucode's state (a mail, a new ucode, an ARAM DMA, a
+  // savestate) waits for it first; the audio DMA plays the other of AX's two
+  // output buffers, so it never does.
+  enum MixState : u32
+  {
+    MIX_IDLE,
+    MIX_QUEUED,
+    MIX_QUIT,
+  };
+  std::atomic<u32> mix_state{MIX_IDLE};
+  bool mixing = false;  // set on the mixer thread while it runs a list
+  std::vector<std::pair<u32, bool>> held_mails;
+  std::thread mixer;
+
   static u32 MaskFor(u32 size)
   {
     return size ? std::bit_ceil(size) - 1 : 0;
@@ -783,6 +807,48 @@ struct DspCore::Impl
   {
     SetUCode(UCODE_ROM);
     halted = (hle_control & CTRL_HALT) != 0;
+    mixer = std::thread([this] { MixLoop(); });
+  }
+
+  ~Impl()
+  {
+    JoinMix();
+    mix_state.store(MIX_QUIT, std::memory_order_release);
+    mix_state.notify_one();
+    mixer.join();
+  }
+
+  // ------------------------------------------------------------- mixer
+
+  void MixLoop()
+  {
+    for (;;)
+    {
+      mix_state.wait(MIX_IDLE, std::memory_order_acquire);
+      if (mix_state.load(std::memory_order_acquire) == MIX_QUIT)
+        return;
+      mixing = true;
+      HandleCommandList(*ucode);
+      PushMail(DSP_YIELD, true);
+      mixing = false;
+      mix_state.store(MIX_IDLE, std::memory_order_release);
+      mix_state.notify_one();
+    }
+  }
+
+  void JoinMix()
+  {
+    while (mix_state.load(std::memory_order_acquire) == MIX_QUEUED)
+      mix_state.wait(MIX_QUEUED, std::memory_order_acquire);
+  }
+
+  // The mix is due: what it mailed reaches the CPU.
+  void ReleaseMix()
+  {
+    JoinMix();
+    for (const auto& [mail, interrupt] : held_mails)
+      PushMail(mail, interrupt);
+    held_mails.clear();
   }
 
   // ------------------------------------------------------------- memory
@@ -862,6 +928,11 @@ struct DspCore::Impl
 
   void PushMail(u32 mail, bool interrupt = false, int cycles_into_future = 0)
   {
+    if (mixing)
+    {
+      held_mails.emplace_back(mail, interrupt);
+      return;
+    }
     if (interrupt)
     {
       if (pending_mails.empty())
@@ -934,6 +1005,7 @@ struct DspCore::Impl
 
   void SetUCode(u32 crc)
   {
+    JoinMix();
     pending_mails.clear();
     ucode = MakeUCode(crc);
     InitializeUCode(*ucode);
@@ -1108,11 +1180,11 @@ struct DspCore::Impl
       break;
     case MailState::WaitingForCmdListAddress:
       CopyCmdList(ax, mail, ax.cmdlist_size);
-      HandleCommandList(u);
       ax.cmdlist_size = 0;
-      // An empty command list's cost on hardware.
-      PushMail(DSP_YIELD, true, 2500);
       ax.mail_state = MailState::WaitingForNextTask;
+      mix_state.store(MIX_QUEUED, std::memory_order_release);
+      mix_state.notify_one();
+      host.schedule_mix_done(host.user, AX_MIX_CYCLES);
       break;
     case MailState::WaitingForNextTask:
       if ((mail & TASK_MAIL_MASK) != TASK_MAIL_TO_DSP)
@@ -2216,6 +2288,8 @@ uint16_t DspCore::Read(uint32_t offset)
 void DspCore::Write(uint32_t offset, uint16_t value)
 {
   Impl& d = *m_impl;
+  if (offset == DSP_MAIL_TO_DSP_LO || offset == AR_DMA_CNT_L)
+    d.JoinMix();
   switch (offset)
   {
   case DSP_MAIL_TO_DSP_HI:
@@ -2273,6 +2347,11 @@ void DspCore::RaiseInterrupt(uint32_t type)
   m_impl->GenerateInterrupt(type);
 }
 
+void DspCore::CompleteMix()
+{
+  m_impl->ReleaseMix();
+}
+
 void DspCore::CompleteAramDma()
 {
   m_impl->dsp_control &= ~CTRL_DMA_STATE;
@@ -2296,6 +2375,8 @@ void DspCore::UpdateAudioDma()
 
 void DspCore::DoState(const DspStateIO& io)
 {
+  // A mix in flight lands now; the state has no room for it.
+  m_impl->ReleaseMix();
   State p(io);
   m_impl->DoState(p);
 }

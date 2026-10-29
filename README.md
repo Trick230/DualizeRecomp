@@ -284,7 +284,7 @@ After phase 6, before the stage modules:
 | Step | What changes | Status |
 |---|---|---|
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
-| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: the DSP's AX mixing is already host code (~1.3% of the CPU thread) |
+| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: the DSP's AX mixing is already host code, on a thread of its own; the CPU thread keeps ~0.6% for the mailbox and the hand-off |
 | Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
 
 ## Working on the forks

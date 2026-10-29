@@ -118,9 +118,11 @@ private:
                              uint32_t rate, uint8_t left_volume, uint8_t right_volume);
 
   int m_dsp_event = -1, m_dsp_interrupt_event = -1, m_aram_event = -1, m_audio_dma_event = -1;
+  int m_dsp_mix_event = -1;
   static void DspEvent(void* user, uint64_t, int64_t late);
   static void DspInterruptEvent(void* user, uint64_t type, int64_t);
   static void AramEvent(void* user, uint64_t, int64_t);
+  static void DspMixEvent(void* user, uint64_t, int64_t);
   static void AudioDmaEvent(void* user, uint64_t, int64_t late);
 
   apu::AudioOut m_audio;
