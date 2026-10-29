@@ -63,8 +63,10 @@ between are **interpolated** at the display's refresh rate.
 
 **Known issues**
 
-- FMVs (Sofdec) play at their 30 FPS but aren't interpolated, and their
-  frames arrive unevenly (σ ~6 ms against ~0.3 ms in play).
+- FMVs (Sofdec) play at their 30 FPS and aren't interpolated. The game copies
+  each video frame when its decoder finishes, not on the retrace, so frames
+  arrive unevenly (σ ~6 ms against ~0.3 ms in play); the present pacer
+  absorbs that, short of about one late refresh every second or two.
 - The stage RSO modules (`stage*`, `myDream`, `staffRoll`, `loading2P`)
   aren't recompiled yet; what code of theirs runs goes through the
   interpreter (none of it per frame in the forest stage measured).
