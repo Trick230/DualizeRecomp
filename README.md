@@ -57,7 +57,7 @@ between are **interpolated** at the display's refresh rate.
 | **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.4 ms); shown at the display's refresh rate |
 | **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
 | **Audio** | Native DSP/AX, the same samples as Dolphin's HLE, mixed on its own thread and out through SDL3 |
-| **Input** | SDL3 gamepads as Classic Controllers (Xbox, PlayStation and Switch layouts) |
+| **Input** | SDL3 gamepads as GameCube pads, with their button prompts, or Classic Controllers (Xbox, PlayStation and Switch layouts) |
 | **Tested on** | Windows 11, MSYS2 UCRT64, Clang 22, i5-9600KF + RTX 4060, 240 Hz display |
 | **Untested** | Linux and macOS |
 
@@ -129,7 +129,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
 | `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
 | `DUALIZE_IOS_TRACE=1` | Log each IOS request (open path, ioctl number, sizes), its reply and when the PPC receives it |
-| `DUALIZE_PAD_TARGET=gc` | Gamepads drive GameCube pads instead |
+| `DUALIZE_PAD_TARGET=classic` | Gamepads drive the Classic Controller instead of the GameCube pad |
 | `DUALIZE_PAD_TARGET=none` | Gamepads drive nothing, only automation does (deterministic tests) |
 | `DUALIZE_WIIMOTE_SPEAKER=0` | Silence the Wii Remote speaker |
 | `DUALIZE_AUDIO_STATS=1` | Log the audio queue once per second |
@@ -141,18 +141,20 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 
 ### Controls
 
-Each gamepad drives a Wii Remote with a Classic Controller, read through SDL3
-at 1 kHz, with hotplug and rumble. Buttons map by position, so PlayStation and
-Switch pads work the same way (Xbox names below).
+Each gamepad drives a GameCube pad, read through SDL3 at 1 kHz, with
+hotplug and rumble; the game then shows the GameCube's button prompts, and
+its sticks and triggers have the full 8-bit range (the Classic Controller's
+are 5 and 6 bits). Buttons map by position, so PlayStation and Switch pads
+work the same way (Xbox names below).
 
-| Gamepad | Classic Controller |
-|---|---|
-| A · B · X · Y | b · a · y · x |
-| Left / right stick | Left / right stick |
-| LT · RT | L · R |
-| LB · RB | ZL · ZR |
-| D-pad | D-pad |
-| Back · Start · Guide | − · + · Home |
+| Gamepad | GameCube pad | Classic Controller (`DUALIZE_PAD_TARGET=classic`) |
+|---|---|---|
+| A · B · X · Y | A · X · B · Y | b · a · y · x |
+| Left / right stick | Control stick / C stick | Left / right stick |
+| LT · RT | L · R (analog) | L · R |
+| LB · RB | — · Z | ZL · ZR |
+| D-pad | D-pad | D-pad |
+| Back · Start · Guide | — · START/PAUSE · — | − · + · Home |
 
 > [!WARNING]
 > Overlays that hook the swap chain (RivaTuner Statistics Server, Steam's frame
@@ -207,7 +209,7 @@ they recompile with the DOL.
 | `hw/` | PI, VI, AI, DSP, CP/PE registers, Hollywood GPIO; the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
-| `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
+| `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
 | `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
 | `boot.cpp` | The system menu's disc launch, then the apploader |
 
