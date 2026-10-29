@@ -23,8 +23,10 @@ add_executable(DualizeRecomp
     hid/gamepads.cpp
     gpu/native_gx.cpp
     sdk/rvl_alarm.cpp
+    sdk/rvl_exi.cpp
     sdk/rvl_interrupt.cpp
     sdk/rvl_ipc.cpp
+    sdk/rvl_pad.cpp
     sdk/rvl_wud.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE

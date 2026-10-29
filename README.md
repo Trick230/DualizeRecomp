@@ -168,7 +168,7 @@ Switch pads work the same way (Xbox names below).
  │  CPU thread                                    recompiled game                  │
  │   ├ native SDK functions (OS scheduler, mutexes, PSMTX, memcpy, cache, MWCC)    │
  │   ├ flat guest memory: one load or store per access                             │
- │   ├ scheduler · VI · PI · SI · EXI · AI · DSP · GPIO                            │
+ │   ├ scheduler · VI · PI · AI · DSP · GPIO                                       │
  │   └ IOS: /dev/di · fs · es · stm · net/kd · WUD: Wii Remotes at the SDK         │
  │       │ gather pipe                         │ DSP DMA          ▲ pads            │
  │       ▼ SPSC ring                           ▼                  │                 │
@@ -204,11 +204,11 @@ they recompile with the DOL.
 |---|---|
 | `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
 | `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
-| `hw/` | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Hollywood GPIO |
+| `hw/` | PI, VI, AI, DSP, CP/PE registers, Hollywood GPIO; the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
 | `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
-| `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
+| `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
 | `boot.cpp` | The system menu's disc launch, then the apploader |
 
 ### Frame interpolation
@@ -268,6 +268,8 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
+| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | ⏳ MSAA 4× and render scale next |
+| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | ⏳ After GX at the API |
 
 What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
 
@@ -284,7 +286,7 @@ What phase 7 did and what is left of it (🔸 steps are architecture only: measu
 | VI at the SDK | The retrace interrupt, `VISetNextFrameBuffer`, `VISetBlack` and the rest of VI's API in host code; no video interface register model | 🔸 Optional: the VI model and the retrace handler are ~0.1% of the CPU thread |
 | GX registers at the SDK | The token, finish and CP interrupts and GX's FIFO setup in host code; no CP/PE/MI register files | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
 | AI, DSP and ARAM at the SDK | AI DMA, the DSP mailbox and ARAM DMA at their SDK functions; AX stays the game's code over the native DSP | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
-| SI and EXI at the SDK | Pads and the RTC/SRAM through the SDK's SI and EXI functions; no serial or expansion interface models | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
+| SI and EXI at the SDK | `PADRead` builds each report from the host pad and runs the SDK's own `MakeStatus`; PAD's init, reset and rumble and the SI's init are host code. `EXILock`, `EXISelect`, `EXIImm`, `EXIDma` and the rest finish each transfer in the call on the IPL chip (RTC, SRAM, the UART behind OSReport). No serial or expansion interface registers or interrupts | ✅ |
 | DVD and NAND at the SDK | `DVD*` and `NAND*` served by host functions instead of IOS requests; IOS keeps only what the SDK can't skip | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
 
 After phase 6, before the stage modules:
@@ -295,6 +297,29 @@ After phase 6, before the stage modules:
 | AX mixing off the CPU thread | Each AX command list is mixed on a thread of its own while the game runs on; the DSP's mails arrive half a millisecond of DSP time later | ✅ Mixing from ~1.3% of the CPU thread to ~0.6% (the mailbox and the hand-off) |
 | AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: what is left of the DSP on the CPU thread is ~0.6% |
 | Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
+
+Phase 8, image quality, in order (Aurora renders at the window's size and
+scales EFB copies with it, so shadows, bloom and reflections follow the
+render scale):
+
+| Step | What changes | Status |
+|---|---|---|
+| MSAA 4× | Multisampled render targets, resolved for EFB copies and the present; on by default. WebGPU allows 1 or 4 samples | ⏳ Next |
+| Render scale | Render at 1× (default), 1.5×, 2× or 3× the window and reduce with an area (box) filter, so every rendered pixel counts | ⏳ Next |
+| Alpha-to-coverage | Alpha-tested foliage smoothed by MSAA's samples | ⏳ |
+| Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ⏳ |
+| Maximum preset | Render scale 2× with MSAA 4× and 16× anisotropic: 16 samples a pixel, above MSAA 8× | ⏳ |
+
+Phase 9, the native renderer, comes after GX at the API, when the whole
+renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
+shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
+between Aurora and the driver.
+
+Next, in order: SI and EXI at the SDK (done), MSAA 4× and render scale,
+alpha-to-coverage, anisotropic filtering, cheaper guest time, the stage RSO
+modules, booting without the interpreter, dropping the interpreter, then the
+🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, VI, AX at the SDK), phase 6,
+GX at the API and phase 9.
 
 Dropped after measuring: checking MSR[FP] once per function instead of per
 FPU instruction (under 1%; the OS switches the FPU lazily, so the check has to

@@ -90,6 +90,9 @@ public:
   void Throttle(uint64_t ticks);
   // Seconds since the Unix epoch on the guest's clock.
   int64_t EmulatedTime() const;
+  // The host's GameCube pad on a port; false while nothing drives it.
+  bool ReadGcPad(int port, GcPadInput* input);
+  void SetGcRumble(int port, bool on);
 
   const MachineConfig config;
   Memory memory;
@@ -97,8 +100,7 @@ public:
   Cpu cpu;
   ProcessorInterface pi;
   VideoInterface vi;
-  SerialInterface si;
-  ExpansionInterface exi;
+  ExpansionBus exi;
   AudioInterface ai;
   GraphicsRegisters gfx;
   Hollywood hollywood;
@@ -109,9 +111,8 @@ public:
 
 private:
   void StartDsp();
-  void DoState(StateIO& io);
+  void DoState(StateIO& io, uint32_t version);
   void ServiceRequests();
-  static bool ReadGcPad(void* user, int port, SerialInterface::PadInput* input);
   static bool SpeakerEnabled();
   static void ReadWiimote(void* user, int index, ios::WiimoteInput* input);
   static void WiimoteSpeaker(void* user, int index, const int16_t* samples, uint32_t count,
