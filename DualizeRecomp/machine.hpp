@@ -8,7 +8,7 @@
 
 #include "apu/audio_out.hpp"
 #include "apu/native_dsp.hpp"
-#include "dolrecomp.hpp"
+#include "cpu/cpu.hpp"
 #include "hw/hw.hpp"
 #include "hid/gamepads.hpp"
 #include "kernel/ios/disc.hpp"

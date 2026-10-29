@@ -7,7 +7,7 @@
 // natural register width; Machine splits or widens other accesses. The video
 // clock and the expansion bus have no registers: SDK natives drive them.
 
-#include "dolrecomp.hpp"
+#include "cpu/cpu.hpp"
 
 #include <array>
 #include <atomic>

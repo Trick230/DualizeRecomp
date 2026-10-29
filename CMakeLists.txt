@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 # DualizeRecomp: NiGHTS: Journey of Dreams (Wii) as a native PC program.
 #
-#   tools/DolRecomp    the PowerPC recompiler and the guest CPU runtime
+#   tools/DolRecomp    the PowerPC recompiler and what its output compiles with
 #   thirdparty/aurora  the GX renderer (WebGPU through Dawn) and SDL3
 #   DualizeRecompLib   the game's code, recompiled at build time from the disc
 #   DualizeRecomp      the runtime and the executable
@@ -43,3 +43,15 @@ endif()
 add_subdirectory(thirdparty)
 add_subdirectory(DualizeRecompLib)
 add_subdirectory(DualizeRecomp)
+
+option(DUALIZE_BUILD_TESTS "Build the runtime's unit tests" OFF)
+if(DUALIZE_BUILD_TESTS)
+    enable_testing()
+    # The CPU over a hand-made module: picking among overlapping groups.
+    add_executable(test_overlay_dispatch tests/test_overlay_dispatch.cpp
+        DualizeRecomp/cpu/cpu.cpp DualizeRecomp/cpu/interpreter.cpp
+        DualizeRecomp/kernel/memory.cpp DualizeRecomp/kernel/scheduler.cpp)
+    target_include_directories(test_overlay_dispatch PRIVATE DualizeRecomp)
+    target_link_libraries(test_overlay_dispatch PRIVATE dr_core)
+    add_test(NAME overlay_dispatch COMMAND test_overlay_dispatch)
+endif()

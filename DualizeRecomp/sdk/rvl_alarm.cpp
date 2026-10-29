@@ -10,7 +10,7 @@
 
 #include "core/cpu.h"
 
-#include "dolrecomp.hpp"
+#include "cpu/cpu.hpp"
 #include "machine.hpp"
 
 namespace dualize

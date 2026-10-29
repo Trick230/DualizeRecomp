@@ -822,33 +822,33 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
 }
 }  // namespace dualize
 
-// The CPU's host interface (host/cpu.hpp), bound at link time.
-uint32_t dolrecomp::CpuHost::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
+// The CPU's host interface (cpu/cpu.hpp), bound at link time.
+uint32_t dualize::CpuHost::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
 {
   return static_cast<dualize::Machine*>(this)->MmioRead(physical, size, pc);
 }
 
-void dolrecomp::CpuHost::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32_t pc)
+void dualize::CpuHost::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32_t pc)
 {
   static_cast<dualize::Machine*>(this)->MmioWrite(physical, value, size, pc);
 }
 
-void dolrecomp::CpuHost::GatherPipeBursts(const uint8_t* data, size_t size)
+void dualize::CpuHost::GatherPipeBursts(const uint8_t* data, size_t size)
 {
   static_cast<dualize::Machine*>(this)->GatherPipeBursts(data, size);
 }
 
-void dolrecomp::CpuHost::AfterEvents()
+void dualize::CpuHost::AfterEvents()
 {
   static_cast<dualize::Machine*>(this)->AfterEvents();
 }
 
-bool dolrecomp::CpuHost::AfterEventsInPlace()
+bool dualize::CpuHost::AfterEventsInPlace()
 {
   return static_cast<dualize::Machine*>(this)->AfterEventsInPlace();
 }
 
-void dolrecomp::CpuHost::BeforeIdle()
+void dualize::CpuHost::BeforeIdle()
 {
   static_cast<dualize::Machine*>(this)->BeforeIdle();
 }
