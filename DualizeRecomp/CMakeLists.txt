@@ -43,3 +43,9 @@ else()
     target_link_libraries(DualizeRecomp PRIVATE ${CMAKE_DL_LIBS} pthread)
 endif()
 aurora_copy_runtime_dlls(DualizeRecomp)
+# The pipelines seen in play (scripts/pipeline_seed.py), merged into the
+# user's cache and compiled before the game starts.
+add_custom_command(TARGET DualizeRecomp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
+        "$<TARGET_FILE_DIR:DualizeRecomp>/initial_pipeline_cache.db")
