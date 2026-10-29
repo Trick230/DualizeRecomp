@@ -34,28 +34,28 @@ modules = [
     { file = "files/rso/title.rso", base = 0x81732020, bss = 0x81731FA0 },
 ]
 # One stage (or the dream select, staff roll, 2P loading) at a time, each
-# into the same memory title.rso used: the module heap hands them out top
-# down from 0x81796040, so a module of file size F and bss size B (header
-# +0x1C) lands at base = 0x81796040 - round32(F), its bss at
-# base - 0x20 - round32(B). Read back for stage1000; the rest follow the
-# same allocator.
+# into the memory title.rso used: the module manager allocates the file and
+# then the bss from the tail of the expanded heap whose free space ends at
+# overlay_heap_top (the rule in DolRecomp's src/app/config.h). Read back with
+# `dolrecomp rso-find` for stage1000.
+overlay_heap_top = 0x81796040
 overlays = [
-    { file = "files/rso/stage1000.rso", base = 0x8176D320, bss = 0x8176D280 },
-    { file = "files/rso/stage1010.rso", base = 0x817731E0, bss = 0x81773160 },
-    { file = "files/rso/stage1100.rso", base = 0x817738C0, bss = 0x81773740 },
-    { file = "files/rso/stage1110.rso", base = 0x8176EA60, bss = 0x8176E9E0 },
-    { file = "files/rso/stage1200.rso", base = 0x81770A60, bss = 0x81770980 },
-    { file = "files/rso/stage1210.rso", base = 0x81762600, bss = 0x817625A0 },
-    { file = "files/rso/stage2000.rso", base = 0x817713A0, bss = 0x81771320 },
-    { file = "files/rso/stage2010.rso", base = 0x8176CD80, bss = 0x8176CD00 },
-    { file = "files/rso/stage2100.rso", base = 0x8176F260, bss = 0x8176F1E0 },
-    { file = "files/rso/stage2110.rso", base = 0x81775060, bss = 0x81774F80 },
-    { file = "files/rso/stage2200.rso", base = 0x8176A640, bss = 0x8176A4A0 },
-    { file = "files/rso/stage2210.rso", base = 0x81773EA0, bss = 0x81773E40 },
-    { file = "files/rso/stage3000.rso", base = 0x8176EF60, bss = 0x8176EEC0 },
-    { file = "files/rso/stage3010.rso", base = 0x81769720, bss = 0x817696E0 },
-    { file = "files/rso/stage4000.rso", base = 0x81767660, bss = 0x81767600 },
-    { file = "files/rso/myDream.rso", base = 0x8171E600, bss = 0x8171DB40 },
-    { file = "files/rso/staffRoll.rso", base = 0x8177ECE0 },
-    { file = "files/rso/loading2P.rso", base = 0x8178C0A0 },
+    { file = "files/rso/stage1000.rso" },
+    { file = "files/rso/stage1010.rso" },
+    { file = "files/rso/stage1100.rso" },
+    { file = "files/rso/stage1110.rso" },
+    { file = "files/rso/stage1200.rso" },
+    { file = "files/rso/stage1210.rso" },
+    { file = "files/rso/stage2000.rso" },
+    { file = "files/rso/stage2010.rso" },
+    { file = "files/rso/stage2100.rso" },
+    { file = "files/rso/stage2110.rso" },
+    { file = "files/rso/stage2200.rso" },
+    { file = "files/rso/stage2210.rso" },
+    { file = "files/rso/stage3000.rso" },
+    { file = "files/rso/stage3010.rso" },
+    { file = "files/rso/stage4000.rso" },
+    { file = "files/rso/myDream.rso" },
+    { file = "files/rso/staffRoll.rso" },
+    { file = "files/rso/loading2P.rso" },
 ]
