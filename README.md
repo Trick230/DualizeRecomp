@@ -13,8 +13,8 @@ Native CPU · native Wii runtime · WebGPU renderer · interpolated up to your r
 
 </div>
 
-The game's `main.dol` and its RSO modules are translated from PowerPC to C at
-build time by our fork of [DolRecomp](https://github.com/Trick230/DolRecomp/tree/dualize)
+The game's `main.dol` and the RSO modules it always loads are translated from
+PowerPC to C at build time by our fork of [DolRecomp](https://github.com/Trick230/DolRecomp/tree/dualize)
 and compiled into the executable, together with a runtime written for this
 game: its own Wii hardware, IOS, DSP, audio and input, and a GX renderer on
 our fork of [Aurora](https://github.com/Trick230/aurora/tree/dualize). No
@@ -36,8 +36,9 @@ between are **interpolated** at the display's refresh rate.
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
 - **High refresh gameplay.** 30 Hz game logic, presented at 60, 144 or 240 Hz
   with interpolated matrices, camera, lights and projected textures.
-- **5× headroom.** ~162 FPS uncapped in gameplay, up from ~32 at the start
-  of the native port.
+- **5× headroom.** Uncapped gameplay runs at 550–600% of the Wii's speed
+  (~165–180 game frames a second), up from ~32 FPS at the start of the
+  native port.
 - **Modern host stack.** Aurora on Dawn (D3D12 / Vulkan / Metal) for video,
   SDL3 for audio and gamepads. The fork keeps only what the game runs: its
   Dolphin SDK layer, input, card/DVD, rmlui, Tracy, the D3D11/OpenGL backends
@@ -53,9 +54,9 @@ between are **interpolated** at the display's refresh rate.
 |---|---|
 | **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) only |
 | **Playable** | Cold boot, intro, Story Select and gameplay |
-| **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.2 ms); shown at the display's refresh rate |
+| **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.4 ms); shown at the display's refresh rate |
 | **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
-| **Audio** | Native DSP/AX, bit-identical to Dolphin's HLE, out through SDL3 |
+| **Audio** | Native DSP/AX, the same samples as Dolphin's HLE, mixed on its own thread and out through SDL3 |
 | **Input** | SDL3 gamepads as Classic Controllers (Xbox, PlayStation and Switch layouts) |
 | **Tested on** | Windows 11, MSYS2 UCRT64, Clang 22, i5-9600KF + RTX 4060, 240 Hz display |
 | **Untested** | Linux and macOS |
@@ -64,7 +65,9 @@ between are **interpolated** at the display's refresh rate.
 
 - FMVs (Sofdec) play at their 30 FPS but aren't interpolated, and their
   frames arrive unevenly (σ ~6 ms against ~0.3 ms in play).
-- The stage RSO modules aren't recompiled yet and run on the interpreter.
+- The stage RSO modules (`stage*`, `myDream`, `staffRoll`, `loading2P`)
+  aren't recompiled yet; what code of theirs runs goes through the
+  interpreter (none of it per frame in the forest stage measured).
 
 ## Building
 
@@ -112,6 +115,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
 | `--window <w>x<h>` | Initial window size |
+| `--idle-pc <hex>` | The idle thread's loop the CPU skips to the next event from (default NiGHTS' `8036623C`) |
 | `--load-state <file>` | Start from a savestate |
 | `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop` (client: `scripts/automation.py`) |
 
@@ -188,17 +192,18 @@ mutexes, interrupts, matrix math, memcpy, cache ranges, MWCC's register
 save/restore helpers) are replaced by host code in
 [`DualizeRecomp/sdk`](DualizeRecomp/sdk), each pinned to a hash of the guest
 bytes it replaces ([`R7EE8P.natives`](DualizeRecompLib/config/R7EE8P.natives)).
-The game's RSO modules are linked inside the recompiler at the addresses the
-game loads them to, so they recompile with the DOL.
+The RSO modules the game always loads (`global`, `play`, `select`, `title`)
+are linked inside the recompiler at the addresses the game loads them to, so
+they recompile with the DOL.
 
 ### Runtime
 
 | Part | What it does |
 |---|---|
 | `cpu/` | The recompiled code wherever it covers the pc; an interpreter with the same semantics elsewhere. Timebase, decrementer, exceptions (interrupts and FP-unavailable save the OS context natively and start in the OS handler; the OS's sync system call runs in host code), locked L1 cache and its DMA |
-| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
+| `kernel/` | Guest memory: the 32-bit space as one host reservation, MEM1, MEM2 and the locked cache as views of one section. The event scheduler (one tick per CPU cycle; the idle loop leaves for it). IOS, entered from the SDK's IPC client (no mailbox): fd table, `/dev/di`, `/dev/fs` (NAND in the user directory), `/dev/es`, `/dev/stm`, `/dev/net/kd`, a fresh NAND's system directories and factory SYSCONF (16:9), the remotes' pairing in SYSCONF, and the Wii Remote model (reports, EEPROM, speaker, Classic Controller) |
 | `hw/` | PI, VI, SI, EXI, AI, DSP, CP/PE registers, Hollywood GPIO |
-| `apu/` | The AX DSP microcode in host code, mixed out through SDL3 |
+| `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | `gpu/` | The GX FIFO into Aurora, frame pacing and interpolation |
 | `hid/` | SDL3 gamepads as Classic Controllers or GameCube pads |
 | `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts |
@@ -235,7 +240,8 @@ with its matrices blended from the frame before:
    scrolls that wrap, and draws with no plausible counterpart, snap. When
    most of the scene jumps, it's a camera cut and the frame is shown as is.
 
-A replay costs ~1.4 ms on an RTX 4060, and 99% of draws blend in gameplay.
+A present costs ~0.5 ms of CPU, and 96–98% of draws blend in gameplay; the
+forest presents 810–860 FPS uncapped on an RTX 4060.
 Holding a frame adds one game frame (~33 ms) of latency. A check mode
 (`AURORA_INTERP_CHECK`) renders the endpoints of each interval and compares
 them pixel by pixel with the frames the game produced.
@@ -286,6 +292,12 @@ After phase 6, before the stage modules:
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
 | AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: the DSP's AX mixing is already host code, on a thread of its own; the CPU thread keeps ~0.6% for the mailbox and the hand-off |
 | Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
+
+Dropped after measuring: checking MSR[FP] once per function instead of per
+FPU instruction (under 1%; the OS switches the FPU lazily, so the check has to
+stay, and every instruction is a resume point) and paired singles as SIMD
+(the two lanes live in separate register arrays, and the helpers already
+reproduce the Wii's rounding bit for bit).
 
 ## Working on the forks
 
