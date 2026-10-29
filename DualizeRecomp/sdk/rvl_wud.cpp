@@ -10,7 +10,7 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 #include <algorithm>
@@ -387,7 +387,7 @@ extern "C" bool rvl_WUDInit(CPUState* ctx)
 {
   using namespace dualize;
   Cpu& cpu = CpuOf(ctx);
-  const Memory& memory = cpu.GetMachine().memory;
+  const Memory& memory = GetMachine(cpu).memory;
   uint8_t* initialized = Bytes(memory, ctx->gpr[13] + WUD_INITIALIZED_SDA_OFFSET, 4);
   uint8_t* wud = Bytes(memory, WUD_BASE, WUD_SIZE);
   if (!initialized || !wud)
@@ -418,7 +418,7 @@ extern "C" bool rvl_WUDShutdown(CPUState* ctx)
 {
   using namespace dualize;
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   uint8_t* wud = Bytes(machine.memory, WUD_BASE, WUD_SIZE);
   if (!wud)
     return false;
@@ -434,7 +434,7 @@ extern "C" bool rvl_WPADAlarmHandler(CPUState* ctx)
 {
   using namespace dualize;
   Cpu& cpu = CpuOf(ctx);
-  cpu.GetMachine().wud.Pump(cpu);
+  GetMachine(cpu).wud.Pump(cpu);
   ctx->gpr[5] = 0;
   ctx->gpr[6] = 0;
   ctx->gpr[7] = WPAD_MANAGER;
@@ -462,7 +462,7 @@ extern "C" bool rvl_WPADiSendData(CPUState* ctx)
   constexpr uint8_t OUT_READ_DATA = 0x17, OUT_SPEAKER_DATA = 0x18, OUT_WAIT = 0xFF;
 
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   const Memory& memory = machine.memory;
   const uint8_t* table = Bytes(memory, WPAD_CONTROL_BLOCKS + (ctx->gpr[3] & 3) * 4, 4);
   uint8_t* command = Bytes(memory, ctx->gpr[4], WPAD_COMMAND_SIZE);
@@ -568,7 +568,7 @@ extern "C" bool rvl_btm_remove_acl(CPUState* ctx)
 {
   using namespace dualize;
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   if (const uint8_t* address = Bytes(machine.memory, ctx->gpr[3], 6))
     machine.wud.Disconnect(address);
   ctx->gpr[3] = 0;

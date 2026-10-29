@@ -8,7 +8,7 @@
 #include "core/cpu.h"
 
 #include "apu/native_dsp.hpp"
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 #include <bit>
@@ -85,7 +85,7 @@ extern "C" bool rvl_OSDispatchInterrupt(CPUState* ctx)
 {
   using namespace dualize;
   Cpu& cpu = *static_cast<Cpu*>(ctx->external_user_data);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   const Memory& memory = machine.memory;
   const uint32_t context = ctx->gpr[4];
   const uint32_t sda = ctx->gpr[13];

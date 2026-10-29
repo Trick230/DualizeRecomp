@@ -3,10 +3,6 @@ add_executable(DualizeRecomp
     machine.cpp
     boot.cpp
     profiler.cpp
-    cpu/cpu.cpp
-    cpu/interpreter.cpp
-    kernel/memory.cpp
-    kernel/scheduler.cpp
     kernel/ios_kernel.cpp
     kernel/ios/devices.cpp
     kernel/ios/di.cpp
@@ -34,7 +30,7 @@ target_include_directories(DualizeRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/thirdparty/aurora/lib")
 target_link_libraries(DualizeRecomp PRIVATE
-    DualizeRecompLib aurora::core aurora::gx SDL3::SDL3)
+    DualizeRecompLib dr_host aurora::core aurora::gx SDL3::SDL3)
 if(WIN32)
     target_link_libraries(DualizeRecomp PRIVATE winmm shell32 ole32 uuid psapi)
     # Guest calls nest as host calls on the main thread (up to

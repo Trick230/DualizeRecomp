@@ -179,7 +179,7 @@ float DisplayAspect(ios::Nand& nand)
 }  // namespace
 
 Machine::Machine(MachineConfig config_)
-    : config(std::move(config_)), cpu(*this), pi(*this), vi(*this), exi(*this), ai(*this),
+    : config(std::move(config_)), cpu(*this, memory, scheduler), pi(*this), vi(*this), exi(*this), ai(*this),
       gfx(*this), hollywood(*this), ios(*this), wud(*this)
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
@@ -210,7 +210,7 @@ bool Machine::Start(std::string* error)
   disc = ios::OpenDirectoryDisc(config.game, error);
   if (!disc)
     return false;
-  if (!cpu.AttachModule(error))
+  if (!cpu.AttachModule(config.idle_pc, error))
     return false;
 
   m_boot_time = LocalTimeNow();
@@ -814,3 +814,34 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
   return true;
 }
 }  // namespace dualize
+
+// The CPU's host interface (host/cpu.hpp), bound at link time.
+uint32_t dolrecomp::CpuHost::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
+{
+  return static_cast<dualize::Machine*>(this)->MmioRead(physical, size, pc);
+}
+
+void dolrecomp::CpuHost::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32_t pc)
+{
+  static_cast<dualize::Machine*>(this)->MmioWrite(physical, value, size, pc);
+}
+
+void dolrecomp::CpuHost::GatherPipeBursts(const uint8_t* data, size_t size)
+{
+  static_cast<dualize::Machine*>(this)->GatherPipeBursts(data, size);
+}
+
+void dolrecomp::CpuHost::AfterEvents()
+{
+  static_cast<dualize::Machine*>(this)->AfterEvents();
+}
+
+bool dolrecomp::CpuHost::AfterEventsInPlace()
+{
+  return static_cast<dualize::Machine*>(this)->AfterEventsInPlace();
+}
+
+void dolrecomp::CpuHost::BeforeIdle()
+{
+  static_cast<dualize::Machine*>(this)->BeforeIdle();
+}

@@ -12,7 +12,7 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 #include <bit>
@@ -20,6 +20,7 @@
 namespace
 {
 using dualize::Cpu;
+using dualize::GetMachine;
 using dualize::Load16;
 using dualize::Load32;
 using dualize::Machine;
@@ -122,7 +123,7 @@ class Globals
 {
 public:
   explicit Globals(CPUState* ctx)
-      : m_base(CpuOf(ctx).GetMachine().memory.Effective(ctx->gpr[13] + SDA_LOW, SDA_SIZE))
+      : m_base(GetMachine(CpuOf(ctx)).memory.Effective(ctx->gpr[13] + SDA_LOW, SDA_SIZE))
   {
   }
   bool Ok() const { return m_base != nullptr; }
@@ -144,7 +145,7 @@ uint32_t HalfLine(Machine& machine, const uint8_t* timing)
 
 const uint8_t* CurrentTiming(CPUState* ctx, const Globals& globals)
 {
-  return CpuOf(ctx).GetMachine().memory.Effective(globals[CURRENT_TIMING], TIMING_SIZE);
+  return GetMachine(CpuOf(ctx)).memory.Effective(globals[CURRENT_TIMING], TIMING_SIZE);
 }
 
 // VI_NTSC, VI_PAL, VI_MPAL, VI_DEBUG... to the class whose filters and
@@ -290,7 +291,7 @@ void Dimming(Cpu& cpu, Globals& g, uint8_t* idle_flags)
 extern "C" bool rvl_VIRetraceHandler(CPUState* ctx)
 {
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   const dualize::Memory& memory = machine.memory;
   Globals g(ctx);
   const uint32_t context = ctx->gpr[4];
@@ -421,7 +422,7 @@ extern "C" bool rvl_VIRetraceHandler(CPUState* ctx)
 extern "C" bool rvl_VIInitHardware(CPUState* ctx)
 {
   Cpu& cpu = CpuOf(ctx);
-  Machine& machine = cpu.GetMachine();
+  Machine& machine = GetMachine(cpu);
   const uint32_t mode = ctx->gpr[3];
   uint8_t* tv_mode = machine.memory.Effective(OS_TV_MODE, 4);
   if (!tv_mode)
@@ -456,7 +457,7 @@ extern "C" bool rvl_VIInitHardware(CPUState* ctx)
 // u32 VIGetNextField(void)
 extern "C" bool rvl_VIGetNextField(CPUState* ctx)
 {
-  Machine& machine = CpuOf(ctx).GetMachine();
+  Machine& machine = GetMachine(CpuOf(ctx));
   const Globals g(ctx);
   const uint8_t* timing = g.Ok() ? CurrentTiming(ctx, g) : nullptr;
   const uint8_t* hor_ver = machine.memory.Effective(HOR_VER, HOR_VER_SIZE);
@@ -471,7 +472,7 @@ extern "C" bool rvl_VIGetNextField(CPUState* ctx)
 // u32 VIGetCurrentLine(void)
 extern "C" bool rvl_VIGetCurrentLine(CPUState* ctx)
 {
-  Machine& machine = CpuOf(ctx).GetMachine();
+  Machine& machine = GetMachine(CpuOf(ctx));
   const Globals g(ctx);
   const uint8_t* timing = g.Ok() ? CurrentTiming(ctx, g) : nullptr;
   if (!timing)
@@ -488,7 +489,7 @@ extern "C" bool rvl_VIGetCurrentLine(CPUState* ctx)
 // VIScanMode VIGetScanMode(void): what the VI scans out now.
 extern "C" bool rvl_VIGetScanMode(CPUState* ctx)
 {
-  const VideoTiming& timing = CpuOf(ctx).GetMachine().vi.Timing();
+  const VideoTiming& timing = GetMachine(CpuOf(ctx)).vi.Timing();
   ctx->gpr[3] = timing.clock54 ? 2 : timing.non_interlaced ? 1 : 0;
   ctx->downcount -= 20;
   return true;

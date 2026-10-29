@@ -10,7 +10,7 @@
 
 #include "core/cpu.h"
 
-#include "cpu/cpu.hpp"
+#include "dolrecomp.hpp"
 #include "machine.hpp"
 
 namespace dualize
@@ -42,7 +42,7 @@ class Alarms
 {
 public:
   explicit Alarms(CPUState* ctx)
-      : m_cpu(*static_cast<Cpu*>(ctx->external_user_data)), m_memory(m_cpu.GetMachine().memory),
+      : m_cpu(*static_cast<Cpu*>(ctx->external_user_data)), m_memory(GetMachine(m_cpu).memory),
         m_queue(m_memory.Effective(ctx->gpr[13] + QUEUE_SDA_OFFSET, 8))
   {
   }
