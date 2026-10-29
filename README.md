@@ -30,7 +30,8 @@ between are **interpolated** at the display's refresh rate.
 
 - **Every game instruction is native code.** No JIT. Interrupts and the
   exceptions the OS handles (FPU switch, system call) enter its handlers
-  directly; in play the interpreter runs nothing.
+  directly; from cold boot through play the interpreter runs nothing (the
+  apploader's work is host code).
 - **One program.** The recompiled game, the runtime and the renderer build
   into one executable from one CMake project, the way
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
@@ -215,7 +216,7 @@ they recompile with the DOL.
 | Aurora `lib/gx/fifo.cpp` | The GX FIFO's render thread (`aurora/fifo.h`): the ring the gather pipe fills, decoding into Aurora, draw-done and token markers back to the CPU, frame pacing and interpolation. `machine.cpp` is its host |
 | `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
 | `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts, and the VI's retrace handler and beam (`rvl_vi.cpp`). The natives any game can list (OS context, interrupts and mutexes, cache, matrices, the Metrowerks runtime) live in DolRecomp's `runtime/sdk`, placed by `define`s their signatures read off the code |
-| `boot.cpp` | The system menu's disc launch, then the apploader |
+| `boot.cpp` | The system menu's disc launch, then the apploader's work in host code (DOL, FST, bi2, low-memory globals) |
 
 ### Frame interpolation
 
@@ -324,7 +325,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: the stage RSO modules, booting without the interpreter, dropping the interpreter, then the
+Next, in order: the stage RSO modules, dropping the interpreter, then the
 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, AX at the SDK), phase 6,
 GX at the API and phase 9.
 
