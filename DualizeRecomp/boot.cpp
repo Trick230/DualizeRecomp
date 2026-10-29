@@ -1,8 +1,9 @@
 // The Wii's boot of a disc title, as Dolphin's BS2 emulation does it: the
 // system menu's NAND bookkeeping (setting.txt, state.dat, play_rec.dat), the
 // low-memory globals of IOS and the system menu, the CPU's boot state, then
-// the disc's apploader run on the interpreter until it hands over the DOL's
-// entry point, and finally ES_DIVerify of the game partition.
+// what the disc's apploader does (in host code: it loads the DOL and the FST
+// and hands over the DOL's entry point), and finally ES_DIVerify of the game
+// partition.
 
 #include "boot.hpp"
 
@@ -280,61 +281,105 @@ uint32_t Read32(Machine& machine, uint32_t address)
   return machine.memory.Read32(address & 0x1FFFFFFF);
 }
 
-bool RunApploader(Machine& machine, uint64_t partition, std::string* error)
+constexpr uint32_t RoundDown32(uint32_t value)
 {
-  std::array<uint8_t, 0x20> header;
-  if (!machine.disc->Read(0x2440, 0x20, header.data(), partition))
+  return value & ~31u;
+}
+
+constexpr uint32_t RoundUp32(uint32_t value)
+{
+  return (value + 31u) & ~31u;
+}
+
+// What a retail Wii apploader does, in host code: it places bi2 and the FST
+// below the top of MEM1, loads the DOL's sections and the FST, and sets the
+// low-memory globals the OS reads. Disc offsets in the header are in words.
+bool LoadGame(Machine& machine, uint64_t partition, std::string* error)
+{
+  Memory& memory = machine.memory;
+  std::array<uint8_t, 0x100> dol;
+  std::array<uint8_t, 0x20> header, bi2;
+  if (!machine.disc->Read(0x420, header.size(), header.data(), partition) ||
+      !machine.disc->Read(0x440, bi2.size(), bi2.data(), partition))
   {
-    *error = "can't read the apploader header";
+    *error = "can't read the disc header";
     return false;
   }
-  const auto be32 = [&](size_t at) {
-    return uint32_t{header[at]} << 24 | header[at + 1] << 16 | header[at + 2] << 8 | header[at + 3];
+  const auto be32 = [](const uint8_t* p) {
+    return uint32_t{p[0]} << 24 | p[1] << 16 | p[2] << 8 | p[3];
   };
-  const uint32_t entry = be32(0x10), size = be32(0x14), trailer = be32(0x18);
-  if (entry == UINT32_MAX || size + trailer == UINT32_MAX ||
-      !DiscRead(machine, 0x2460, 0x01200000, size + trailer, partition))
+  const uint64_t dol_offset = uint64_t{be32(&header[0x00])} << 2;
+  const uint64_t fst_offset = uint64_t{be32(&header[0x04])} << 2;
+  const uint32_t fst_size = be32(&header[0x08]) << 2;
+  const uint32_t fst_max = be32(&header[0x0C]) << 2;
+  if (!machine.disc->Read(dol_offset, dol.size(), dol.data(), partition))
   {
-    *error = "invalid apploader";
+    *error = "can't read the DOL header";
     return false;
   }
 
-  Cpu& cpu = machine.cpu;
-  CPUState& s = cpu.state;
-  s.gpr[3] = 0x80004000;
-  s.gpr[4] = 0x80004004;
-  s.gpr[5] = 0x80004008;
-  cpu.RunFunction(entry);
-  const uint32_t init = Read32(machine, 0x80004000);
-  const uint32_t main = Read32(machine, 0x80004004);
-  const uint32_t close = Read32(machine, 0x80004008);
-
-  // The apploader's report callback: a bare blr.
-  machine.memory.Write32(0x01300000, 0x4E800020);
-  s.gpr[3] = 0x81300000;
-  cpu.RunFunction(init);
-
-  do
+  // The debug monitor's reserve comes off the top of memory; bi2 may ask
+  // for less memory than there is.
+  const uint32_t mem1 = memory.Read32(0x28);
+  const uint32_t monitor = be32(&bi2[0x00]);
+  const uint32_t simulated = be32(&bi2[0x04]);
+  const uint32_t top = RoundDown32(0x80000000 + mem1 - monitor);
+  memory.Write32(0xE8, monitor);
+  memory.Write32(0xEC, top);
+  memory.Write32(0xF0, simulated && simulated < mem1 ? simulated : mem1);
+  const uint32_t fst = RoundDown32((simulated && simulated < mem1 ? 0x80000000 + simulated : top) - fst_max);
+  const uint32_t bi2_address = fst - 0x2000;
+  memory.Write32(0xF4, bi2_address);
+  if (!DiscRead(machine, 0x440, bi2_address, 0x2000, partition))
   {
-    s.gpr[3] = 0x81300004;
-    s.gpr[4] = 0x81300008;
-    s.gpr[5] = 0x8130000C;
-    cpu.RunFunction(main);
-    if (s.gpr[3] == 0)
-      break;
-    const uint32_t address = Read32(machine, 0x81300004);
-    const uint32_t length = Read32(machine, 0x81300008);
-    const uint64_t offset = uint64_t{Read32(machine, 0x8130000C)} << 2;
-    if (!DiscRead(machine, offset, address, length, partition))
+    *error = "can't read bi2";
+    return false;
+  }
+  // bi2 may also cap MEM2: the IOS globals above it move down with it.
+  if (const uint32_t mem2 = Read32(machine, bi2_address + 0x2C); mem2 && mem2 < memory.Read32(0x3118))
+  {
+    const uint32_t old = memory.Read32(0x311C);
+    for (const uint32_t at : {0x3120u, 0x3128u, 0x3130u, 0x3134u})
+      memory.Write32(at, mem2 - (old - memory.Read32(at)));
+    memory.Write32(0x311C, mem2);
+  }
+
+  // The DOL's 7 text and 11 data sections.
+  uint32_t loaded = 0;
+  for (size_t i = 0; i < 18; ++i)
+  {
+    const uint32_t offset = be32(&dol[i * 4]);
+    const uint32_t address = be32(&dol[0x48 + i * 4]);
+    const uint32_t size = be32(&dol[0x90 + i * 4]);
+    if (!offset)
+      continue;
+    if (!DiscRead(machine, dol_offset + offset, address, size, partition))
     {
-      *error = "apploader read outside the disc";
+      *error = "a DOL section is outside memory or the disc";
       return false;
     }
-    cpu.InvalidateICache(address, length);
-  } while (true);
+    loaded += RoundUp32(size);
+  }
+  if (!DiscRead(machine, fst_offset, fst, RoundUp32(fst_size), partition))
+  {
+    *error = "can't read the FST";
+    return false;
+  }
 
-  cpu.RunFunction(close);
-  s.pc = s.gpr[3];
+  const uint32_t entry = be32(&dol[0xE0]);
+  memory.Write32(0x30, 0);
+  memory.Write32(0x34, fst);
+  memory.Write32(0x38, fst);
+  memory.Write32(0x3C, fst_max);
+  if (entry >= 0x80004000)
+    memory.Write32(0x3110, fst);
+  memory.Write32(0x30D4, loaded + RoundUp32(fst_size));
+  memory.Write8(0x315D, 0x80);
+  // The apploader's own version, which the OS reports.
+  memory.Write32(0x3188, 0x00150202);
+
+  machine.cpu.state.gpr[3] = entry;
+  machine.cpu.state.pc = entry;
   return true;
 }
 
@@ -407,7 +452,7 @@ bool BootWiiDisc(Machine& machine, std::string* error)
   memory.Write32(0xC00, 0x4C000064);
   s.gpr[1] = 0x816FFFF0;
 
-  if (!RunApploader(machine, partition, error))
+  if (!LoadGame(machine, partition, error))
     return false;
 
   const int32_t verdict = machine.ios.Es().DiVerify(tmd, ticket);
