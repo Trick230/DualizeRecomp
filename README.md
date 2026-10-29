@@ -300,7 +300,7 @@ After phase 6, before the stage modules:
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
 | AX mixing off the CPU thread | Each AX command list is mixed on a thread of its own while the game runs on; the DSP's mails arrive half a millisecond of DSP time later | ✅ Mixing from ~1.3% of the CPU thread to ~0.6% (the mailbox and the hand-off) |
 | AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: what is left of the DSP on the CPU thread is ~0.6% |
-| Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ⏳ |
+| Cheaper guest time | Fewer downcount charges and safepoints, the scheduler's work only where an event is due | ❌ Dropped after measuring (below) |
 
 Phase 8, image quality, in order (Aurora renders at the window's size and
 scales EFB copies with it, so shadows, bloom and reflections follow the
@@ -324,8 +324,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: cheaper guest time, the stage RSO
-modules, booting without the interpreter, dropping the interpreter, then the
+Next, in order: the stage RSO modules, booting without the interpreter, dropping the interpreter, then the
 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, VI, AX at the SDK), phase 6,
 GX at the API and phase 9.
 
@@ -333,7 +332,13 @@ Dropped after measuring: checking MSR[FP] once per function instead of per
 FPU instruction (under 1%; the OS switches the FPU lazily, so the check has to
 stay, and every instruction is a resume point) and paired singles as SIMD
 (the two lanes live in separate register arrays, and the helpers already
-reproduce the Wii's rounding bit for bit).
+reproduce the Wii's rounding bit for bit). Cheaper guest time too: in the
+forest uncapped (~610% speed) over half the scheduler's passes find no event
+due, but ending slices only at events instead of every 20,000 cycles changes
+nothing measurable, and keeping each function's block costs in a register,
+charged to the downcount only at safepoints and returns, measured the same
+(609% against 611%): the per-block charge is a store the CPU already
+forwards.
 
 ## Working on the forks
 
