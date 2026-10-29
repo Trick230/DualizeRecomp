@@ -2,7 +2,9 @@
 
 #include "boot.hpp"
 #include "kernel/ios/directory_disc.hpp"
-#include "gpu/native_gx.h"
+#include "profiler.hpp"
+
+#include <aurora/fifo.h>
 
 #include <algorithm>
 #include <cmath>
@@ -196,7 +198,7 @@ Machine::~Machine()
   m_gamepads.Stop();
   m_audio.Stop();
   if (m_gx_started)
-    native_gx_stop();
+    aurora_fifo_stop();
   dsp.reset();
 }
 
@@ -242,7 +244,7 @@ bool Machine::Start(std::string* error)
   std::filesystem::create_directories(cache, ec);
   const std::string cache_path = cache.string();
   const std::string texture_path = (config.user / "Load" / "Textures").string();
-  const NativeGxConfig gx_config{
+  const AuroraFifoConfig gx_config{
       .title = "NiGHTS: Journey of Dreams",
       .cache_path = cache_path.c_str(),
       .texture_path = texture_path.c_str(),
@@ -254,15 +256,20 @@ bool Machine::Start(std::string* error)
       .aspect = DisplayAspect(ios.Nand()),
       .msaa = config.msaa,
       .render_scale = config.render_scale,
+      // Writes each texture no pack replaces to <cache>/texture_dumps, for making packs.
+      .dump_textures = std::getenv("DUALIZE_DUMP_TEXTURES") != nullptr,
+      // One line per second of render-thread counters.
+      .stats = std::getenv("DUALIZE_GX_STATS") != nullptr,
   };
-  const NativeGxHost gx_host{
+  const AuroraFifoHost gx_host{
       .user = this,
       .resolve = GxResolve,
       .draw_done = GxDrawDone,
       .token = GxToken,
       .quit = GxQuit,
+      .thread_started = [](void*) { profiler::RegisterThisThread("gx"); },
   };
-  if (!native_gx_start(&gx_config, &gx_host))
+  if (!aurora_fifo_start(&gx_config, &gx_host))
   {
     *error = "the native GX renderer could not start";
     return false;
@@ -582,7 +589,7 @@ void Machine::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32
 void Machine::GatherPipeBursts(const uint8_t* data, size_t size)
 {
   m_gx_bytes += size;
-  native_gx_submit(data, size);
+  aurora_fifo_submit(data, size);
 }
 
 // --- Run loop -----------------------------------------------------------------
@@ -603,7 +610,7 @@ bool Machine::AfterEventsInPlace()
 void Machine::BeforeIdle()
 {
   // The idle loop waits on what the GPU finishes; let it finish first.
-  native_gx_drain();
+  aurora_fifo_drain();
   gfx.Poll();
 }
 
@@ -758,7 +765,7 @@ void Machine::DoState(StateIO& io, uint32_t version)
 
 bool Machine::SaveState(const std::filesystem::path& path, std::string* error)
 {
-  native_gx_drain();
+  aurora_fifo_drain();
   gfx.Poll();
   std::vector<uint8_t> buffer;
   buffer.reserve(Memory::MEM1_SIZE + Memory::MEM2_SIZE + (1 << 20));
@@ -768,7 +775,7 @@ bool Machine::SaveState(const std::filesystem::path& path, std::string* error)
   io.Do(version);
   DoState(io, version);
   size_t gx_size = 0;
-  const uint8_t* gx = native_gx_save_state(&gx_size);
+  const uint8_t* gx = aurora_fifo_save_state(&gx_size);
   std::vector<uint8_t> gx_state(gx, gx + gx_size);
   io.Do(gx_state);
   std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -794,7 +801,7 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
     *error = path.string() + " is not a native state";
     return false;
   }
-  native_gx_drain();
+  aurora_fifo_drain();
   DoState(io, version);
   std::vector<uint8_t> gx_state;
   io.Do(gx_state);
@@ -805,7 +812,7 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
     RequestStop();
     return false;
   }
-  native_gx_load_state(gx_state.data(), gx_state.size());
+  aurora_fifo_load_state(gx_state.data(), gx_state.size());
   wud.AfterLoad(cpu);
   // The guest clock and field count jumped; report and throttle from here.
   m_throttle_host = m_report_host = Clock::now();
