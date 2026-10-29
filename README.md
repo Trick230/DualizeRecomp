@@ -316,7 +316,6 @@ render scale):
 | Pipeline precompile | Everything the pipeline cache knows compiles on a worker pool (cores minus two) before the game starts, so none of it pops in; the stats line counts draws skipped while compiling | ✅ Forest, 310 pipelines: 60 ms warm, 3.1 s with no driver cache (11.1 s on one thread) |
 | Seed pipeline cache | `DualizeRecomp/resources/initial_pipeline_cache.db`, merged into the user's cache at each start; `scripts/pipeline_seed.py` adds a played cache to it. Seeded with MSAA on, it serves `--msaa 1` too | ✅ Seeded from the forest; a playthrough of every stage fills it |
 | Ubershader | One shader that reads the TEV, texgen and lighting setup from uniforms, drawing anything whose own pipeline is still compiling, so a never-seen pipeline doesn't pop in either | ⏳ |
-| Maximum preset | Render scale 2× with MSAA 4× and 16× anisotropic: 16 samples a pixel, above MSAA 8× | ⏳ |
 
 Phase 9, the native renderer, comes after GX at the API, when the whole
 renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
