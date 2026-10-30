@@ -254,6 +254,7 @@ int main(int argc, char** argv)
   MachineConfig config;
   config.user = DefaultUserDir();
   config.idle_pc = 0x8036623C;  // NiGHTS' idle thread loop (see GameSettings/R7EE8P.ini)
+  config.rso_list = 0x80003168;  // the RSO library's list of linked modules, in OS low memory
   fs::path load_state, automation;
   for (int i = 1; i < argc; ++i)
   {

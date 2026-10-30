@@ -213,7 +213,7 @@ bool Machine::Start(std::string* error)
   disc = ios::OpenDirectoryDisc(config.game, error);
   if (!disc)
     return false;
-  if (!cpu.AttachModule(config.idle_pc, error))
+  if (!cpu.AttachModule(config.idle_pc, config.rso_list, error))
     return false;
   if ((!config.record_input.empty() && !m_movie.Record(config.record_input, error)) ||
       (!config.replay_input.empty() && !m_movie.Replay(config.replay_input, error)))

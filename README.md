@@ -68,10 +68,6 @@ between are **interpolated** at the display's refresh rate.
   each video frame when its decoder finishes, not on the retrace, so frames
   arrive unevenly (σ ~6 ms against ~0.3 ms in play); the present pacer
   absorbs that, short of about one late refresh every second or two.
-- The stage RSO modules (`stage*`, `myDream`, `staffRoll`, `loading2P`) are
-  recompiled for the address each is predicted to load at; only stage1000's
-  is read back from the game. A module that lands elsewhere fails its hash
-  check and runs on the interpreter.
 
 ## Building
 
@@ -212,7 +208,9 @@ are linked inside the recompiler at the addresses the game loads them to, so
 they recompile with the DOL. The stage modules load one at a time into the
 memory `title` used, at an address that follows from their size; each is
 linked there as an overlay, its functions next to the ones it overlaps, and
-the runtime runs whichever matches guest RAM.
+the runtime runs whichever matches guest RAM. That address is only a
+prediction. The CPU reads where each stage module was linked from the RSO
+library's list of modules and runs its code there.
 
 ### Runtime
 

@@ -32,6 +32,7 @@ struct MachineConfig
   std::filesystem::path game;     // extracted disc directory
   std::filesystem::path user;     // NAND, SRAM, shader cache
   uint32_t idle_pc = 0;
+  uint32_t rso_list = 0;  // where the game keeps its list of linked RSO modules
   bool throttle = true;
   bool vsync = true;
   bool interpolate = true;    // only while throttled to the game's rate
