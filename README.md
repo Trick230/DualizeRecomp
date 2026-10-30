@@ -124,6 +124,9 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--idle-pc <hex>` | The idle thread's loop the CPU skips to the next event from (default NiGHTS' `8036623C`) |
 | `--load-state <file>` | Start from a savestate |
 | `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop` (client: `scripts/automation.py`) |
+| `--record-input <file>` | Record what the game reads from its controllers, read by read (format in `DualizeRecomp/hid/input_movie.hpp`) |
+| `--replay-input <file>` | Play a recorded movie back and stop at its end. The game runs on its own clock (the GPU's signals reach it only at points of that clock), so the same start and the same movie make the same run at any speed |
+| `--hash-every <n>` | Log a hash of guest RAM every n fields, to compare runs |
 
 <details>
 <summary><b>Environment switches</b></summary>
@@ -220,7 +223,7 @@ the runtime runs whichever matches guest RAM.
 | `hw/` | PI, AI, DSP, CP/PE registers, Hollywood GPIO; the video clock behind the VI natives and the expansion bus behind the EXI natives (the IPL chip's RTC and SRAM) |
 | `apu/` | The AX DSP microcode in host code; each command list is mixed on a thread of its own, out through SDL3 |
 | Aurora `lib/gx/fifo.cpp` | The GX FIFO's render thread (`aurora/fifo.h`): the ring the gather pipe fills, decoding into Aurora, draw-done and token markers back to the CPU, frame pacing and interpolation. `machine.cpp` is its host |
-| `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers |
+| `hid/` | SDL3 gamepads as GameCube pads or Classic Controllers; input movies (record and replay) |
 | `sdk/` | Native replacements for SDK functions, including the OS's alarm queue (`rvl_alarm.cpp`) and interrupt dispatch (`rvl_interrupt.cpp`), the IPC client's transport and reply handler (`rvl_ipc.cpp`), the GameCube pads (`rvl_pad.cpp`: `PADRead` takes the host pad, no SI), the EXI driver (`rvl_exi.cpp`: transfers finish in the call, no EXI registers) and WUD, the Wii Remotes' side of the SDK's Bluetooth layer (`rvl_wud.cpp`): WPAD's reports go straight to the remote model, the Bluetooth stack never starts, and the VI's retrace handler and beam (`rvl_vi.cpp`). The OS's context, interrupt and mutex functions, cache ranges, matrices and the Metrowerks runtime are C (`rvl_os.c`, `rvl_cache.c`, `rvl_mtx.c`, `mwcc_runtime.c`, `msl_string.c`), compiled with the generated code so they inline into it, placed by `define`s their signatures read off the code |
 | `boot.cpp` | The system menu's disc launch, then the apploader's work in host code (DOL, FST, bi2, low-memory globals) |
 
