@@ -60,7 +60,8 @@ public:
   // if its tables are malformed. Without it everything runs on the interpreter.
   // idle_pc (0: none) is the OS idle thread's loop: the CPU waits there for
   // the next event instead of spinning. rso_list (0: none) holds the first of
-  // the RSO modules the game has linked, which says where its overlays are.
+  // the RSO modules the game has linked, which with the OS's list of REL
+  // modules says where the modules compiled to run anywhere are.
   bool AttachModule(uint32_t idle_pc, uint32_t rso_list, std::string* error);
   bool HasModule() const { return m_module != nullptr; }
 
@@ -250,7 +251,8 @@ private:
   // per 32-byte line from base to the end of their MEM1 code the first
   // function ending past the line's start, or NO_FUNCTION if none starts
   // before its end. An overlay's code runs shift bytes past the addresses it
-  // was compiled for (see guest_module.h); stem names its RSO module.
+  // was compiled for (see guest_module.h); stem names its RSO module, rel_id
+  // its REL module.
   struct FunctionGroup
   {
     uint32_t first;
@@ -260,11 +262,15 @@ private:
     uint32_t shift = 0;
     uint32_t bss_shift = 0;
     std::string stem;
+    uint32_t rel_id = 0;
   };
   std::vector<FunctionGroup> m_groups;
   uint32_t m_rso_list = 0;
-  // Code changed since the overlays were last looked for.
+  bool m_rel_overlays = false;
+  // Code changed since the overlays were last looked for; and since, no pc
+  // missed every function.
   bool m_overlays_dirty = false;
+  bool m_locate_on_miss = false;
   // Direct-mapped by pc, ahead of the line table. Entries only name verified
   // functions, so it empties whenever one stops being verified.
   static constexpr uint32_t DISPATCH_CACHE_SIZE = 4096;

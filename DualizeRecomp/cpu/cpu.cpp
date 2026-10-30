@@ -116,6 +116,10 @@ int LookupIndex(uint32_t address)
   return -1;
 }
 
+// The OS's list of the REL modules it linked: the first's header, each
+// header's next at +4.
+constexpr uint32_t OS_MODULE_LIST = 0x800030C8u;
+
 // A path's file name without its directory or extension: an overlay's config
 // file ("files/rso/stage1000.rso") and the name the game's module carries
 // ("...\stage1000.plf") share it.
@@ -236,6 +240,7 @@ void Cpu::BuildFunctionTables()
 
   // The resident functions, then each overlay's.
   m_groups.assign(1 + m_module->num_overlays, {});
+  m_rel_overlays = false;
   m_groups[0].end = m_module->num_overlays ? m_module->overlays[0].first_function : functions;
   m_groups[0].base = 0x80000000u;
   for (uint32_t i = 0; i < m_module->num_overlays; ++i)
@@ -246,6 +251,8 @@ void Cpu::BuildFunctionTables()
     group.end = overlay.first_function + overlay.num_functions;
     group.base = overlay.code_ranges[0].start & ~((1u << FUNCTION_LINE_SHIFT) - 1);
     group.stem = Stem(overlay.name);
+    group.rel_id = overlay.rel_id;
+    m_rel_overlays |= overlay.rel_id != 0;
     dolrecomp_overlay_shift[i] = 0;
     dolrecomp_overlay_bss_shift[i] = 0;
   }
@@ -295,21 +302,29 @@ void Cpu::MarkCodeLines(uint32_t start, uint32_t end)
     m_code_lines[line >> 6] |= uint64_t{1} << (line & 63);
 }
 
-// Where the game linked each overlay, from the RSO library's list of the
-// modules it linked: the module's header (where its file starts) and its bss
-// in the header's section table. An overlay not in the list stays where it
-// was last seen, its functions checked against RAM as always.
+// Where the game linked each overlay: an RSO module from the RSO library's
+// list of the modules it linked, by name, a REL module from the OS's, by id.
+// The module's header is where its file starts; its bss is in the header's
+// section table. An overlay in neither list stays where it was last seen, its
+// functions checked against RAM as always.
 void Cpu::LocateOverlays()
 {
   m_overlays_dirty = false;
-  if (!m_rso_list || m_groups.size() < 2)
+  if (m_groups.size() < 2)
     return;
   const auto read32 = [this](uint32_t address) -> uint32_t {
     const uint8_t* bytes = m_memory.Effective(address, 4);
     return bytes ? (uint32_t{bytes[0]} << 24) | (uint32_t{bytes[1]} << 16) | (uint32_t{bytes[2]} << 8) | bytes[3]
                  : 0;
   };
-  uint32_t header = read32(m_rso_list);
+  const auto place = [&](uint32_t group, uint32_t header, uint32_t section_count, uint32_t sections) {
+    const GuestOverlay& overlay = m_module->overlays[group - 1];
+    uint32_t bss_shift = m_groups[group].bss_shift;
+    if (overlay.bss && overlay.bss_section < section_count)
+      bss_shift = (read32(sections + overlay.bss_section * 8) & ~1u) - overlay.bss;
+    PlaceOverlay(group, header - overlay.base, bss_shift);
+  };
+  uint32_t header = m_rso_list ? read32(m_rso_list) : 0;
   for (uint32_t visited = 0; header && visited < 256; ++visited, header = read32(header))
   {
     const uint32_t name_length = read32(header + 0x14);
@@ -320,15 +335,16 @@ void Cpu::LocateOverlays()
       continue;
     const std::string_view stem = Stem({name, name_length});
     for (uint32_t group = 1; group < m_groups.size(); ++group)
-    {
-      if (m_groups[group].stem != stem)
-        continue;
-      const GuestOverlay& overlay = m_module->overlays[group - 1];
-      uint32_t bss_shift = m_groups[group].bss_shift;
-      if (overlay.bss && overlay.bss_section < read32(header + 0x08))
-        bss_shift = read32(read32(header + 0x0C) + overlay.bss_section * 8) - overlay.bss;
-      PlaceOverlay(group, header - overlay.base, bss_shift);
-    }
+      if (!m_groups[group].rel_id && m_groups[group].stem == stem)
+        place(group, header, read32(header + 0x08), read32(header + 0x0C));
+  }
+  header = m_rel_overlays ? read32(OS_MODULE_LIST) : 0;
+  for (uint32_t visited = 0; header && visited < 256; ++visited, header = read32(header + 4))
+  {
+    const uint32_t id = read32(header);
+    for (uint32_t group = 1; group < m_groups.size(); ++group)
+      if (m_groups[group].rel_id == id)
+        place(group, header, read32(header + 0x0C), read32(header + 0x10));
   }
 }
 
@@ -389,23 +405,17 @@ void Cpu::SetFunctionState(uint32_t index, FunctionState function_state)
 void Cpu::VerifyFunction(uint32_t index)
 {
   const GuestRange& function = m_module->function_ranges[index];
-  // An overlay's: its text where it loaded, less the bits that depend on
-  // where that is.
-  uint32_t shift = 0;
-  const GuestReloc* reloc = nullptr;
-  const GuestReloc* relocs_end = nullptr;
-  const bool overlay = m_module->num_overlays && index >= m_module->overlays[0].first_function;
-  if (overlay)
-  {
-    uint32_t group = 1;
-    while (index >= m_groups[group].end)
-      ++group;
-    const GuestOverlay& module = m_module->overlays[group - 1];
-    shift = m_groups[group].shift;
-    relocs_end = module.relocs + module.num_relocs;
-    reloc = std::lower_bound(module.relocs, relocs_end, function.start,
-                             [](const GuestReloc& r, uint32_t address) { return r.address < address; });
-  }
+  // Its text where its module loaded, less the bits that depend on where
+  // modules load.
+  uint32_t group = 0;
+  while (index >= m_groups[group].end)
+    ++group;
+  const bool overlay = group != 0;
+  const uint32_t shift = m_groups[group].shift;
+  const GuestReloc* relocs = overlay ? m_module->overlays[group - 1].relocs : m_module->relocs;
+  const GuestReloc* relocs_end = relocs + (overlay ? m_module->overlays[group - 1].num_relocs : m_module->num_relocs);
+  const GuestReloc* reloc = std::lower_bound(
+      relocs, relocs_end, function.start, [](const GuestReloc& r, uint32_t address) { return r.address < address; });
   const uint32_t size = function.end - function.start;
   const uint8_t* bytes = m_memory.Effective(function.start + shift, size);
   ++m_stats.verifications;
@@ -448,12 +458,24 @@ const Cpu::DispatchEntry* Cpu::Dispatch(uint32_t pc)
   if (entry.pc == pc)
     return &entry;
   if (m_overlays_dirty)
+  {
     LocateOverlays();
+    m_locate_on_miss = true;
+  }
   // A function that fails its check drops out of FunctionAt, so the next one
   // over pc (an overlay's) gets checked in turn.
   int function;
   while ((function = FunctionAt(pc)) >= 0 && m_function_state[function] == FUNCTION_UNVERIFIED)
     VerifyFunction(static_cast<uint32_t>(function));
+  // The game may link a module it just loaded after its code changed and run
+  // it right away: the first pc no function covers looks again.
+  if (function < 0 && m_locate_on_miss)
+  {
+    m_locate_on_miss = false;
+    LocateOverlays();
+    while ((function = FunctionAt(pc)) >= 0 && m_function_state[function] == FUNCTION_UNVERIFIED)
+      VerifyFunction(static_cast<uint32_t>(function));
+  }
   if (function < 0)
     return nullptr;
   entry = {pc, function, m_module->functions[function]};
