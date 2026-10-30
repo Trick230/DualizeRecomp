@@ -7,6 +7,7 @@
 #include <aurora/fifo.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -214,6 +215,9 @@ bool Machine::Start(std::string* error)
     return false;
   if (!cpu.AttachModule(config.idle_pc, error))
     return false;
+  if ((!config.record_input.empty() && !m_movie.Record(config.record_input, error)) ||
+      (!config.replay_input.empty() && !m_movie.Replay(config.replay_input, error)))
+    return false;
 
   m_boot_time = LocalTimeNow();
   ios::Config ios_config;
@@ -416,6 +420,7 @@ void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
     input->left_trigger = std::max(input->left_trigger, a.left_trigger);
     input->right_trigger = std::max(input->right_trigger, a.right_trigger);
   }
+  m.m_movie.Wiimote(index, m.vi.Fields(), input);
 }
 
 void Machine::WiimoteSpeaker(void* user, int index, const int16_t* samples, uint32_t count,
@@ -425,6 +430,14 @@ void Machine::WiimoteSpeaker(void* user, int index, const int16_t* samples, uint
 }
 
 bool Machine::ReadGcPad(int port, GcPadInput* input)
+{
+  *input = {};
+  bool plugged = ReadHostGcPad(port, input);
+  m_movie.GcPad(port, vi.Fields(), &plugged, input);
+  return plugged;
+}
+
+bool Machine::ReadHostGcPad(int port, GcPadInput* input)
 {
   hid::PadState pad;
   const bool plugged = PadDrivesGc() && m_gamepads.Read(port, &pad);
@@ -496,8 +509,10 @@ uint32_t Machine::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
   switch (physical >> 12)
   {
   case 0x0C000:
+    SyncGpu();
     return read16([&](uint32_t a) { return uint32_t{gfx.ReadCp(a & 0xFFF)}; });
   case 0x0C001:
+    SyncGpu();
     return read16([&](uint32_t a) { return uint32_t{gfx.ReadPe(a & 0xFFF)}; });
   case 0x0C002:
     // The VI lives at the SDK (sdk/rvl_vi.cpp); what of it still touches the
@@ -596,22 +611,29 @@ void Machine::GatherPipeBursts(const uint8_t* data, size_t size)
 
 void Machine::AfterEvents()
 {
-  gfx.Poll();
   if (m_requests.load(std::memory_order_relaxed))
     ServiceRequests();
 }
 
 bool Machine::AfterEventsInPlace()
 {
-  gfx.Poll();
   return !m_requests.load(std::memory_order_relaxed);
+}
+
+// What the GPU thread signals (a draw done, a token) reaches the guest only
+// here, with everything written before finished: when the CPU goes idle, at
+// each field's end and when the guest reads the CP or PE. Those are points of
+// the guest's own clock, so the guest sees the same signals at the same time
+// however far the GPU thread had got, and runs the same way every time.
+void Machine::SyncGpu()
+{
+  aurora_fifo_drain();
+  gfx.Poll();
 }
 
 void Machine::BeforeIdle()
 {
-  // The idle loop waits on what the GPU finishes; let it finish first.
-  aurora_fifo_drain();
-  gfx.Poll();
+  SyncGpu();
 }
 
 void Machine::Run()
@@ -619,6 +641,7 @@ void Machine::Run()
   m_throttle_host = m_report_host = Clock::now();
   m_throttle_ticks = m_report_ticks = scheduler.Now();
   cpu.Run();
+  m_movie.Finish(vi.Fields());
 }
 
 void Machine::RequestStop()
@@ -694,7 +717,33 @@ void Machine::Throttle(uint64_t ticks)
 
 void Machine::OnFieldEnd(uint64_t ticks)
 {
+  SyncGpu();
   m_fields.store(vi.Fields(), std::memory_order_relaxed);
+  if (m_movie.Ended(vi.Fields()) && !m_stop)
+  {
+    std::fprintf(stderr, "[movie] played to its end, field %llu\n",
+                 static_cast<unsigned long long>(vi.Fields()));
+    RequestStop();
+  }
+  if (config.hash_every && vi.Fields() % config.hash_every == 0)
+  {
+    // Two runs of the same input agree here field for field when the guest
+    // runs on its own clock alone.
+    uint64_t hash = 0x9E3779B97F4A7C15ull;
+    const auto mix = [&](const uint8_t* bytes, size_t size) {
+      for (size_t i = 0; i + 8 <= size; i += 8)
+      {
+        uint64_t word;
+        std::memcpy(&word, bytes + i, 8);
+        hash = (std::rotl(hash, 5) ^ word) * 0x100000001B3ull;
+      }
+    };
+    mix(cpu.state.ram, cpu.state.ram_size);
+    mix(cpu.state.exram, cpu.state.exram_size);
+    std::fprintf(stderr, "[hash] field %llu ticks %llu pc %08x %016llx\n",
+                 static_cast<unsigned long long>(vi.Fields()), static_cast<unsigned long long>(ticks),
+                 cpu.state.pc, static_cast<unsigned long long>(hash));
+  }
   const Clock::time_point now = Clock::now();
   const double seconds = std::chrono::duration<double>(now - m_report_host).count();
   if (seconds < 2.0)
@@ -765,8 +814,7 @@ void Machine::DoState(StateIO& io, uint32_t version)
 
 bool Machine::SaveState(const std::filesystem::path& path, std::string* error)
 {
-  aurora_fifo_drain();
-  gfx.Poll();
+  SyncGpu();
   std::vector<uint8_t> buffer;
   buffer.reserve(Memory::MEM1_SIZE + Memory::MEM2_SIZE + (1 << 20));
   StateIO io(buffer, false);

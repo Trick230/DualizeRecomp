@@ -11,6 +11,7 @@
 #include "cpu/cpu.hpp"
 #include "hw/hw.hpp"
 #include "hid/gamepads.hpp"
+#include "hid/input_movie.hpp"
 #include "kernel/ios/disc.hpp"
 #include "kernel/ios_kernel.hpp"
 #include "sdk/wud.hpp"
@@ -38,6 +39,8 @@ struct MachineConfig
   uint32_t width = 1280, height = 960;
   uint32_t msaa = 4;          // samples a pixel: 1 or 4 (WebGPU allows no other)
   float render_scale = 1.0f;  // frame buffer over window; above 1 reduced by an area filter
+  uint32_t hash_every = 0;    // print a hash of guest RAM every n fields (0: never)
+  std::filesystem::path record_input, replay_input;  // input movies (hid/input_movie.hpp)
 };
 
 class Machine : public CpuHost
@@ -114,6 +117,7 @@ private:
   void StartDsp();
   void DoState(StateIO& io, uint32_t version);
   void ServiceRequests();
+  void SyncGpu();
   static bool SpeakerEnabled();
   static void ReadWiimote(void* user, int index, ios::WiimoteInput* input);
   static void WiimoteSpeaker(void* user, int index, const int16_t* samples, uint32_t count,
@@ -129,6 +133,8 @@ private:
 
   apu::AudioOut m_audio;
   hid::Gamepads m_gamepads;
+  hid::InputMovie m_movie;
+  bool ReadHostGcPad(int port, GcPadInput* input);
   bool m_gx_started = false;
 
   // Guest clock at boot, seconds since the Unix epoch in local time (the

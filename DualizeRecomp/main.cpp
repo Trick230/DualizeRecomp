@@ -4,6 +4,7 @@
 //       [--user <dir>] [--load-state <file>] [--automation-dir <dir>]
 //       [--unthrottled] [--no-vsync] [--no-interpolation] [--present-rate <hz>]
 //       [--window <width>x<height>] [--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]
+//       [--hash-every <fields>] [--record-input <file>] [--replay-input <file>]
 //
 // Automation: each file dropped in <dir>/commands holds key=value lines, as
 // command=save_state|load_state with path=<file>;
@@ -239,7 +240,8 @@ int Usage()
   std::fprintf(stderr, "usage: DualizeRecomp --game <dir> [--user <dir>] "
                        "[--load-state <file>] [--automation-dir <dir>] [--unthrottled] "
                        "[--no-vsync] [--no-interpolation] [--present-rate <hz>] [--window <w>x<h>] "
-                       "[--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]\n");
+                       "[--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>] [--hash-every <fields>] "
+                       "[--record-input <file>] [--replay-input <file>]\n");
   return 2;
 }
 }  // namespace
@@ -283,6 +285,12 @@ int main(int argc, char** argv)
     else if (arg == "--render-scale" && (v = value()) && std::strtof(v, nullptr) >= 0.25f &&
              std::strtof(v, nullptr) <= 4.0f)
       config.render_scale = std::strtof(v, nullptr);
+    else if (arg == "--hash-every" && (v = value()))
+      config.hash_every = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+    else if (arg == "--record-input" && (v = value()))
+      config.record_input = Utf8Path(v);
+    else if (arg == "--replay-input" && (v = value()))
+      config.replay_input = Utf8Path(v);
     else
       return Usage();
   }
