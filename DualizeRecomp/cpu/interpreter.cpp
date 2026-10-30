@@ -1158,6 +1158,7 @@ int Cpu::Execute(uint32_t raw, uint32_t cia)
     case 70:  // mtfsb0
     {
       const uint32_t mask = 0x80000000u >> rd;
+      ppc_fpscr_sync(&c);
       if (rd != 1 && rd != 2)
         c.fpscr = x10 == 38 ? c.fpscr | mask : c.fpscr & ~mask;
       cycles = 3;
@@ -1178,6 +1179,7 @@ int Cpu::Execute(uint32_t raw, uint32_t cia)
     case 64:  // mcrfs
     {
       const uint32_t shift = CrShift(ra >> 2);
+      ppc_fpscr_sync(&c);
       const uint32_t field = (c.fpscr >> shift) & 0xF;
       c.fpscr &= ~((0xFu << shift) & 0x83F80700u);
       ppc_fpscr_updated(&c);
@@ -1187,12 +1189,14 @@ int Cpu::Execute(uint32_t raw, uint32_t cia)
     case 134:  // mtfsfi
     {
       const uint32_t shift = CrShift(rd >> 2);
+      ppc_fpscr_sync(&c);
       c.fpscr = (c.fpscr & ~(0xFu << shift)) | (((raw >> 12) & 0xF) << shift);
       ppc_fpscr_updated(&c);
       cycles = 3;
       break;
     }
     case 583:  // mffs
+      ppc_fpscr_sync(&c);
       c.fpr[rd] = F64(0xFFF8000000000000ull | c.fpscr);
       break;
     case 711:  // mtfsf
@@ -1202,6 +1206,7 @@ int Cpu::Execute(uint32_t raw, uint32_t cia)
       for (uint32_t i = 0; i < 8; ++i)
         if (fm & (1u << i))
           mask |= 0xFu << (i * 4);
+      ppc_fpscr_sync(&c);
       c.fpscr = (c.fpscr & ~mask) | (static_cast<uint32_t>(Bits(c.fpr[rb])) & mask);
       ppc_fpscr_updated(&c);
       cycles = 3;

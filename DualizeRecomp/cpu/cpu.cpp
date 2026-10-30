@@ -1273,6 +1273,7 @@ void Cpu::DoState(StateIO& io)
   io.Do(state.ctr);
   io.Do(state.cr);
   io.Do(state.xer);
+  ppc_fpscr_sync(&state);
   io.Do(state.fpscr);
   io.Do(state.msr);
   io.Do(state.srr0);
