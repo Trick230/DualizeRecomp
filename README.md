@@ -332,9 +332,12 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: dropping the interpreter, then the
-🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, AX at the SDK), phase 6,
-GX at the API and phase 9.
+Next, in order: the 🔸 steps (AI/DSP/ARAM, GX registers, DVD/NAND, AX at
+the SDK), phase 6, GX at the API and phase 9. The interpreter stays as the
+safety net: in play nothing runs on it (the gate and the forest interpret
+nothing), but code the tables don't cover, an entry point inside a function
+and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,
+`icbi`) still step on it instead of stopping the game.
 
 Dropped after measuring: checking MSR[FP] once per function instead of per
 FPU instruction (under 1%; the OS switches the FPU lazily, so the check has to
