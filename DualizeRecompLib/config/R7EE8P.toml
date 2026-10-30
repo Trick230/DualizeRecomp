@@ -3,6 +3,7 @@
 
 [main]
 dol = "sys/main.dol"
+cpu = "broadway"
 # Functions with host implementations in DualizeRecomp/sdk, found by
 # signature. Each matches only the SDK build it was written for; the
 # recompiler writes what it found to natives.txt.

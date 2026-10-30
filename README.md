@@ -210,7 +210,15 @@ memory `title` used, at an address that follows from their size; each is
 linked there as an overlay, its functions next to the ones it overlaps, and
 the runtime runs whichever matches guest RAM. That address is only a
 prediction. The CPU reads where each stage module was linked from the RSO
-library's list of modules and runs its code there.
+library's list of modules and runs its code there. For another game the
+config needs no addresses at all: a resident module given none is compiled
+the same way, to run wherever the game links it (calls and addresses into it
+add its shift); REL modules, resident or overlays, are found by id in the
+OS's module list; and modules are read from inside RARC and U8 archives and
+Yaz0 files. NiGHTS keeps its resident modules' addresses: without them it
+runs as fast (forest 613% either way) and interprets nothing, but where a
+module is compiled moves a few function boundaries, so the guest clock's
+event points, and the recorded replays' RAM hashes, would differ.
 
 ### Runtime
 

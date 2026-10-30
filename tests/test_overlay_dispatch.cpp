@@ -1,6 +1,6 @@
 // Of the functions recompiled over one address (the resident code's and each
 // overlay's), the CPU runs the one whose guest text is in RAM; an overlay runs
-// wherever the game linked it.
+// wherever the game linked it, found by name (RSO) or module id (REL).
 
 #include "cpu/cpu.hpp"
 
@@ -53,6 +53,16 @@ constexpr uint32_t STAGE_B[] = {0x38600004u, 0x4E800020u, 0x38600005u, 0x4E80002
 constexpr uint32_t C_BASE = 0x80200000u;
 constexpr uint32_t C_CODE = C_BASE + 0x40;
 constexpr uint32_t STAGE_C[] = {0x3C600000u, 0x4E800020u};
+// Overlay D: REL module 7, compiled with its header at D_BASE and its bss
+// (section 3) at D_BSS.
+constexpr uint32_t D_ID = 7;
+constexpr uint32_t D_BASE = 0x80400000u;
+constexpr uint32_t D_CODE = D_BASE + 0x40;
+constexpr uint32_t D_BSS = 0x80480000u;
+constexpr uint32_t STAGE_D[] = {0x38600007u, 0x4E800020u};
+// The resident code's second function holds a word whose bits 8-15 depend on
+// where an overlay loads.
+constexpr uint32_t RESIDENT_MASK = 0xFFFF00FFu;
 
 void resident_0(CPUState*) {}
 void resident_1(CPUState*) {}
@@ -60,6 +70,7 @@ void stage_a(CPUState*) {}
 void stage_b_0(CPUState*) {}
 void stage_b_1(CPUState*) {}
 void stage_c(CPUState*) {}
+void stage_d(CPUState*) {}
 
 uint64_t Hash(const uint32_t* words, uint32_t count)
 {
@@ -78,31 +89,36 @@ const GuestRange s_code_ranges[] = {{CODE, CODE + 16}};
 const GuestRange s_a_ranges[] = {{CODE, CODE + 16}};
 const GuestRange s_b_ranges[] = {{CODE + 8, CODE + 24}};
 const GuestRange s_c_ranges[] = {{C_CODE, C_CODE + 8}};
+const GuestRange s_d_ranges[] = {{D_CODE, D_CODE + 8}};
 const GuestRange s_function_ranges[] = {
-    {CODE, CODE + 8},      {CODE + 8, CODE + 16},  {CODE, CODE + 16},
-    {CODE + 8, CODE + 16}, {CODE + 16, CODE + 24}, {C_CODE, C_CODE + 8},
+    {CODE, CODE + 8},      {CODE + 8, CODE + 16},  {CODE, CODE + 16},   {CODE + 8, CODE + 16},
+    {CODE + 16, CODE + 24}, {C_CODE, C_CODE + 8}, {D_CODE, D_CODE + 8},
 };
-const GuestCode s_functions[] = {resident_0, resident_1, stage_a, stage_b_0, stage_b_1, stage_c};
+const GuestCode s_functions[] = {resident_0, resident_1, stage_a, stage_b_0, stage_b_1, stage_c, stage_d};
 const uint64_t s_function_hashes[] = {
-    Hash(RESIDENT, 2), Hash(RESIDENT + 2, 2), Hash(STAGE_A, 4), Hash(STAGE_B, 2), Hash(STAGE_B + 2, 2), Hash(STAGE_C, 2),
+    Hash(RESIDENT, 2),       Hash(RESIDENT + 2, 2), Hash(STAGE_A, 4), Hash(STAGE_B, 2),
+    Hash(STAGE_B + 2, 2),    Hash(STAGE_C, 2),         Hash(STAGE_D, 2),
 };
+const GuestReloc s_resident_relocs[] = {{CODE + 8, RESIDENT_MASK}};
 const GuestReloc s_c_relocs[] = {{C_CODE, 0xFFFF0000u}};
 const GuestOverlay s_overlays[] = {
-    {"a", s_a_ranges, 1, 2, 1},
-    {"b", s_b_ranges, 1, 3, 2},
-    {"files/rso/stagec.rso", s_c_ranges, 1, 5, 1, C_BASE, 0, 0, s_c_relocs, 1},
+    {"a", 0, s_a_ranges, 1, 2, 1},
+    {"b", 0, s_b_ranges, 1, 3, 2},
+    {"files/rso/stagec.rso", 0, s_c_ranges, 1, 5, 1, C_BASE, 0, 0, s_c_relocs, 1},
+    {"files/rels/staged.rel", D_ID, s_d_ranges, 1, 6, 1, D_BASE, D_BSS, 3, nullptr, 0},
 };
 }  // namespace
 
 extern "C" const GuestModule g_guest_module = {
-    s_code_ranges, 1, s_function_ranges, s_functions, s_function_hashes, 6, s_overlays, 3,
+    s_code_ranges,     1, s_function_ranges, s_functions, s_function_hashes, 7, s_overlays, 4,
+    s_resident_relocs, 1,
 };
 
 extern "C" void guest_set_direct_calls(const unsigned char*, u32) {}
 extern "C"
 {
-u32 dolrecomp_overlay_shift[3];
-u32 dolrecomp_overlay_bss_shift[3];
+u32 dolrecomp_overlay_shift[4];
+u32 dolrecomp_overlay_bss_shift[4];
 }
 
 namespace
@@ -192,11 +208,47 @@ bool TestMovedOverlay()
   CHECK(cpu.Lookup(C_CODE) == nullptr, "overlay C where it no longer is");
   return true;
 }
+
+// Overlay D linked 0x3000 past where it was compiled for, its bss 0x100 past:
+// found by its id in the OS's module list.
+bool TestMovedRel()
+{
+  Memory memory;
+  CHECK(memory.mem1 != nullptr, "no guest memory");
+  Scheduler scheduler;
+  Host host;
+  Cpu cpu(host, memory, scheduler);
+  std::string error;
+  constexpr uint32_t LIST = 0x800030C8u, SHIFT = 0x3000u, BSS_SHIFT = 0x100u;
+  CHECK(cpu.AttachModule(0, 0, &error), "attach: %s", error.c_str());
+
+  // Another module first in the list; D's header: id, next, its 4 sections'
+  // table (made absolute by the linker) with the bss's address in entry 3.
+  const uint32_t other = 0x80500000u, header = D_BASE + SHIFT, table = header + 0x60;
+  const uint32_t other_header[] = {3, header};
+  Store(memory, other, other_header, 2);
+  const uint32_t d_header[] = {D_ID, 0, 0, 4, table};
+  Store(memory, header, d_header, 5);
+  const uint32_t d_bss_entry[] = {D_BSS + BSS_SHIFT, 0x20};
+  Store(memory, table + 3 * 8, d_bss_entry, 2);
+  const uint32_t list[] = {other};
+  Store(memory, LIST, list, 1);
+  Store(memory, D_CODE + SHIFT, STAGE_D, 2);
+  CHECK(cpu.Lookup(D_CODE + SHIFT) == stage_d, "overlay D where it was linked");
+  CHECK(dolrecomp_overlay_shift[3] == SHIFT && dolrecomp_overlay_bss_shift[3] == BSS_SHIFT, "overlay D's shifts");
+
+  // The resident word that depends on an overlay's placement is left out of
+  // its function's check.
+  const uint32_t resident[] = {0x38600001u, 0x4E800020u, 0x38601202u, 0x4E800020u};
+  Store(memory, CODE, resident, 4);
+  CHECK(cpu.Lookup(CODE + 8) == resident_1, "resident code with a word an overlay's placement sets");
+  return true;
+}
 }  // namespace
 
 int main()
 {
-  if (!TestDispatch() || !TestMovedOverlay())
+  if (!TestDispatch() || !TestMovedOverlay() || !TestMovedRel())
     return 1;
   std::printf("overlay dispatch tests passed\n");
   return 0;
