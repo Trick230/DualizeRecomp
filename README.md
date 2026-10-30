@@ -117,7 +117,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--render-scale <x>` | Render at x times the window (0.25–4, default 1), reduced by an area filter |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
 | `--window <w>x<h>` | Initial window size |
-| `--idle-pc <hex>` | The idle thread's loop the CPU skips to the next event from (default NiGHTS' `8036623C`) |
+| `--idle-pc <hex>` | The idle thread's loop the CPU skips to the next event from (default: the game config's `IDLE_PC`, NiGHTS' `8036623C`) |
 | `--load-state <file>` | Start from a savestate |
 | `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop` (client: `scripts/automation.py`) |
 | `--record-input <file>` | Record what the game reads from its controllers, read by read (format in `DualizeRecomp/hid/input_movie.hpp`) |

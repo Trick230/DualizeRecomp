@@ -13,9 +13,9 @@ shards = 64
 # Much of the game's code ships in RSO modules (files/rso) that the game loads
 # into the heap at run time. Boot and heap order are deterministic, so each
 # module always lands at the same address; linking them there ahead of time
-# reproduces their loaded text byte for byte. If a module ever lands
-# elsewhere, the runtime's chunk hash check sees different bytes and that code
-# stays on the interpreter.
+# reproduces their loaded text byte for byte. If one of the resident modules
+# ever lands elsewhere, the runtime's hash check sees different bytes and that
+# code stays on the interpreter; the overlays run wherever they land.
 #
 # Values read back from guest RAM during gameplay (the RSO list starting at
 # the static module header, 0x904B0120).
@@ -59,3 +59,12 @@ overlays = [
     { file = "files/rso/staffRoll.rso" },
     { file = "files/rso/loading2P.rso" },
 ]
+
+# Constants of NiGHTS' own the runtime compiles against (ppc_natives.h).
+[defines]
+# The idle thread's loop: the CPU skips from it to the next event (Dolphin's
+# idle skip in GameSettings/R7EE8P.ini).
+IDLE_PC = 0x8036623C
+# The first of the RSO modules the game has linked: where the CPU finds its
+# overlays.
+RSO_LIST = 0x80003168
