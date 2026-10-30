@@ -2,10 +2,12 @@
 // causes come straight from the host's devices instead of the guest reading
 // their registers, and the handler the OS picks runs as the game's code.
 //
-// The native is found by its SDK code (config/sdk.sigs); the addresses and
-// offsets below are NiGHTS' (defines, were it shared).
+// The native is found by its SDK code (config/sdk.sigs); the addresses
+// and small-data offsets that depend on the game's link come from the
+// natives list's defines (ppc_natives.h).
 
 #include "core/cpu.h"
+#include "ppc_natives.h"
 
 #include "apu/native_dsp.hpp"
 #include "cpu/cpu.hpp"
@@ -17,24 +19,17 @@ namespace dualize
 {
 namespace
 {
-constexpr uint32_t OS_LOAD_CONTEXT = 0x8044F578;
 // __OSInterruptPrioTable: masks of OS interrupts, highest priority first; the
 // last one takes every interrupt.
-constexpr uint32_t PRIORITY_TABLE = 0x805621E8;
 constexpr uint32_t PRIORITY_ENTRIES = 32;
-constexpr int32_t HANDLER_TABLE_SDA_OFFSET = -27568;  // __OSInterrupt (*)[32]
 // The last interrupt past the first five (the memory interface's), for the
 // OS's error reports.
-constexpr int32_t LAST_INTERRUPT_SDA_OFFSET = -27580;       // s16
-constexpr int32_t LAST_INTERRUPT_TIME_SDA_OFFSET = -27576;  // OSTime
-constexpr int32_t LAST_INTERRUPT_SRR0_SDA_OFFSET = -27584;
 constexpr uint32_t CONTEXT_SRR0 = 408;
 // The OS's own and the application's masks of disabled interrupts.
 constexpr uint32_t OS_INTERRUPT_MASK = 0x800000C4, USER_INTERRUPT_MASK = 0x800000C8;
 // __OSDispatchInterrupt from where it runs the handler and then reschedules
 // and loads the interrupted context; it wants its frame, the interrupt in
 // r29, the context in r30 and the handler in r31.
-constexpr uint32_t DISPATCH_TAIL = 0x80453AFC;
 constexpr uint32_t DISPATCH_FRAME = 32;
 
 // Sets each OS interrupt bit whose device bit is set.
@@ -90,9 +85,9 @@ extern "C" bool rvl_OSDispatchInterrupt(CPUState* ctx)
   const uint32_t context = ctx->gpr[4];
   const uint32_t sda = ctx->gpr[13];
   const uint8_t* masks = memory.Effective(OS_INTERRUPT_MASK, 8);
-  const uint8_t* priorities = memory.Effective(PRIORITY_TABLE, PRIORITY_ENTRIES * 4);
-  const uint8_t* table = memory.Effective(sda + HANDLER_TABLE_SDA_OFFSET, 4);
-  uint8_t* last = memory.Effective(sda + LAST_INTERRUPT_SRR0_SDA_OFFSET, 16);
+  const uint8_t* priorities = memory.Effective(OS_INTERRUPT_PRIORITY_TABLE, PRIORITY_ENTRIES * 4);
+  const uint8_t* table = memory.Effective(sda + OS_INTERRUPT_HANDLERS_SDA_OFFSET, 4);
+  uint8_t* last = memory.Effective(sda + OS_LAST_INTERRUPT_SRR0_SDA_OFFSET, 16);
   const uint8_t* saved = memory.Effective(context + CONTEXT_SRR0, 4);
   uint8_t* frame = memory.Effective(ctx->gpr[1] - DISPATCH_FRAME, DISPATCH_FRAME + 8);
   const uint8_t* handlers = table ? memory.Effective(Load32(table), 32 * 4) : nullptr;
@@ -125,9 +120,9 @@ extern "C" bool rvl_OSDispatchInterrupt(CPUState* ctx)
 
   if (interrupt > 4)
   {
-    constexpr int32_t base = LAST_INTERRUPT_SRR0_SDA_OFFSET;
-    Store16(last + (LAST_INTERRUPT_SDA_OFFSET - base), static_cast<uint16_t>(interrupt));
-    Store64(last + (LAST_INTERRUPT_TIME_SDA_OFFSET - base), cpu.Timebase());  // OSGetTime
+    constexpr int32_t base = OS_LAST_INTERRUPT_SRR0_SDA_OFFSET;
+    Store16(last + (OS_LAST_INTERRUPT_SDA_OFFSET - base), static_cast<uint16_t>(interrupt));
+    Store64(last + (OS_LAST_INTERRUPT_TIME_SDA_OFFSET - base), cpu.Timebase());  // OSGetTime
     Store32(last, Load32(saved));
   }
   // The dispatcher's frame (its back chain and saved lr), then its tail.
@@ -137,6 +132,6 @@ extern "C" bool rvl_OSDispatchInterrupt(CPUState* ctx)
   ctx->gpr[29] = static_cast<uint32_t>(interrupt);
   ctx->gpr[30] = context;
   ctx->gpr[31] = handler;
-  ctx->pc = DISPATCH_TAIL;
+  ctx->pc = OS_DISPATCH_INTERRUPT_TAIL;
   return true;
 }

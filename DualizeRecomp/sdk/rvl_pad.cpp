@@ -8,9 +8,11 @@
 // GameCube pad when one drives a port.
 //
 // The natives are found by their SDK code (config/sdk.sigs); the addresses
-// and offsets below are NiGHTS' (defines, were it shared).
+// and small-data offsets that depend on the game's link come from the
+// natives list's defines (ppc_natives.h).
 
 #include "core/cpu.h"
+#include "ppc_natives.h"
 
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
@@ -29,17 +31,8 @@ using dualize::Store16;
 using dualize::Store32;
 
 // Small-data globals
-constexpr int32_t PAD_INITIALIZED_SDA = -26944;
-constexpr int32_t PAD_PENDING_SPEC_SDA = -26976;
-constexpr int32_t PAD_SPEC_SDA = -29584;
-constexpr int32_t PAD_MAKE_STATUS_SDA = -29580;  // void (*)(s32 chan, PADStatus*, u32 data[2])
-constexpr int32_t PAD_ANALOG_MODE_SDA = -29588;  // the mode in bits 8-10
-constexpr int32_t SI_INITIALIZED_SDA = -27756;
-constexpr int32_t SI_SAMPLING_RATE_SDA = -27744;
 
 // MakeStatus for the controller specs (PADSetSpec) 1 and 2 to 5.
-constexpr uint32_t SPEC1_MAKE_STATUS = 0x804682E4;
-constexpr uint32_t SPEC2_MAKE_STATUS = 0x804683FC;
 
 constexpr uint32_t PAD_STATUS_SIZE = 12;
 constexpr uint32_t PAD_STATUS_ERR = 10;
@@ -111,9 +104,9 @@ extern "C" bool rvl_PADInit(CPUState* ctx)
     {
       Store32(pending, 0);
       if (next == 1)
-        Store32(make_status, SPEC1_MAKE_STATUS);
+        Store32(make_status, PAD_SPEC1_MAKE_STATUS);
       else if (next >= 2 && next < 6)
-        Store32(make_status, SPEC2_MAKE_STATUS);
+        Store32(make_status, PAD_SPEC2_MAKE_STATUS);
       Store32(spec, static_cast<uint32_t>(next));
     }
     Store32(initialized, 1);

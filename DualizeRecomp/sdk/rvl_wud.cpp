@@ -4,11 +4,13 @@
 // and callbacks) stays the game's own code.
 //
 // The natives are found by their SDK code (config/sdk.sigs); the addresses
-// and offsets below are NiGHTS' (defines, were it shared).
+// and small-data offsets that depend on the game's link come from the
+// natives list's defines (ppc_natives.h).
 
 #include "sdk/wud.hpp"
 
 #include "core/cpu.h"
+#include "ppc_natives.h"
 
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
@@ -22,7 +24,6 @@ namespace dualize
 namespace
 {
 // WUD's state (one block of its .bss).
-constexpr uint32_t WUD_BASE = 0x806F1000;
 constexpr uint32_t WUD_SIZE = 0x750;
 constexpr uint32_t WUD_CALLBACKS = 0;        // three words, cleared by WUDInit
 constexpr uint32_t WUD_STARTED = 16;         // byte
@@ -33,38 +34,21 @@ constexpr uint32_t WUD_STATUS = 1800;        // byte
 constexpr uint32_t WUD_BUFFER_HEAD = 1860, WUD_BUFFER_TAIL = 1862;
 // Each handle's device address, as WUDGetDevAddr returns it; the addresses
 // themselves live in WUD's device records.
-constexpr uint32_t WUD_DEVICE_ADDRESSES = 0x806F1D48;
-constexpr uint32_t WUD_DEVICE_RECORDS = 0x806F1124;
+constexpr uint32_t WUD_DEVICE_RECORDS = WUD_BASE + 0x124;
 constexpr uint32_t WUD_DEVICE_RECORD_SIZE = 16;
-constexpr int32_t WUD_INITIALIZED_SDA_OFFSET = -26048;  // word
 
 // WUDGetStatus: 2 while WPAD hasn't registered its callbacks, 3 running.
 constexpr uint8_t WUD_STATE_INITIALIZED = 2;
 constexpr uint8_t WUD_STATE_RUNNING = 3;
 constexpr uint8_t WUD_STATE_OFF = 0;
 
-constexpr uint32_t SC_INIT = 0x80484564;
-constexpr uint32_t OS_CANCEL_ALARM = 0x8044DF58;
-constexpr int32_t OS_ALARM_QUEUE_SDA_OFFSET = -27664;  // head, tail
 constexpr uint32_t OS_ALARM_NEXT = 20;
-constexpr uint32_t OS_SWITCH_FIBER_EX = 0x8044F688;
 
 // WPAD
-constexpr uint32_t WPAD_CONTROL_BLOCKS = 0x806ED890;  // WPADCB* per channel
 constexpr uint32_t WPAD_CONTROL_SIZE = 2464;
 constexpr uint32_t WPAD_COMMAND_SIZE = 48;
-constexpr uint32_t WPAD_MANAGER = 0x804BB08C;       // runs on WPAD's fiber
-constexpr uint32_t WPAD_FIBER_STACK = 0x806EE8A0;   // its top
-constexpr int32_t WPAD_RUMBLE_SDA_OFFSET = -26092;  // word
+constexpr uint32_t WPAD_FIBER_STACK = WPAD_FIBER_STACK_BASE + WPAD_FIBER_STACK_SIZE;  // its top
 
-// The Bluetooth stack's code, whose alarms states from before this file
-// may still hold: BTE and its USB transport, and WUD.
-bool InBluetoothStack(uint32_t address)
-{
-  return (address >= 0x80487BD0 && address < 0x804B5A54) ||
-         (address >= 0x804B8C30 && address < 0x804B9D00) ||
-         (address >= 0x804C6E90 && address < 0x804CB79C);
-}
 
 Cpu& CpuOf(CPUState* ctx)
 {
@@ -372,7 +356,7 @@ void Wud::AfterLoad(Cpu& cpu)
     const uint8_t* bytes = Bytes(memory, alarm, OS_ALARM_NEXT + 4);
     if (!bytes)
       break;
-    if (InBluetoothStack(Load32(bytes)))
+    if (Load32(bytes) == BTE_ALARM_HANDLER)
       stale.push_back(alarm);
     alarm = Load32(bytes + OS_ALARM_NEXT);
   }

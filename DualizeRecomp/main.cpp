@@ -13,6 +13,7 @@
 // command=clear_pad; command=stop.
 
 #include "machine.hpp"
+#include "ppc_natives.h"
 #include "profiler.hpp"
 
 #include <algorithm>
@@ -253,8 +254,9 @@ int main(int argc, char** argv)
 #endif
   MachineConfig config;
   config.user = DefaultUserDir();
-  config.idle_pc = 0x8036623C;  // NiGHTS' idle thread loop (see GameSettings/R7EE8P.ini)
-  config.rso_list = 0x80003168;  // the RSO library's list of linked modules, in OS low memory
+  // The game's own constants, from its config's [defines].
+  config.idle_pc = IDLE_PC;
+  config.rso_list = RSO_LIST;
   fs::path load_state, automation;
   for (int i = 1; i < argc; ++i)
   {

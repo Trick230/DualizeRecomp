@@ -66,6 +66,8 @@ add_library(DualizeRecompLib STATIC
     "${RUNTIME_DIR}/sdk/rvl_mtx.c"
     "${RUNTIME_DIR}/sdk/rvl_os.c")
 target_include_directories(DualizeRecompLib PRIVATE "${PPC_DIR}" "${RUNTIME_DIR}")
+# ppc_natives.h: where the game's link put what the runtime's natives use.
+target_include_directories(DualizeRecompLib INTERFACE "${PPC_DIR}")
 target_link_libraries(DualizeRecompLib PUBLIC dr_core)
 # DolRecomp's glue to the generated tables, compiled here too.
 target_link_libraries(DualizeRecompLib PRIVATE dr_guest)

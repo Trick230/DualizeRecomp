@@ -48,3 +48,110 @@ rvl_WPADiSendData 234 9421FFC0 C41DC0793736F75A
 rvl_WUDInit F8 9421FFF0 5FEA57A71A94C346
 rvl_WUDShutdown 18C 9421FFE0 4FE92E2C0BDE2738
 rvl_StartSyncDevice 134 9421FFE0 3E4B4F3F8268BB12
+
+# Anchors the defines below read from: IpcReplyHandler (it calls
+# IPCiProfReply), WUDGetDevAddr and the alarm handler of the Bluetooth stack
+# (BTE's timer; states saved while it ran still hold its alarm).
+@IpcReplyHandler 258 9421FD20 73D8A61DA4BB2D37
+@WUDGetDevAddr 54 9421FFF0 FBF6ADFC7DD840C9
+@BteAlarmHandler 18 3C800000 705E9C3AF3370B54
+
+# What the .cpp natives call and read where this game's link put it: SDK
+# functions, data and small-data (r13) offsets, read off the natives' code.
+# rvl_alarm.cpp
+define OS_ALARM_QUEUE_SDA_OFFSET imm(rvl_OSCancelAlarm+48)
+define OS_LOAD_CONTEXT call(rvl_DecrementerExceptionCallback+3C)
+define OS_ALARM_HANDLER_TAIL rvl_DecrementerExceptionCallback+1C4
+# rvl_interrupt.cpp
+define OS_INTERRUPT_PRIORITY_TABLE addr(rvl_OSDispatchInterrupt+1FC,200)
+define OS_INTERRUPT_HANDLERS_SDA_OFFSET imm(rvl_OSDispatchInterrupt+224)
+define OS_LAST_INTERRUPT_SDA_OFFSET imm(rvl_OSDispatchInterrupt+240)
+define OS_LAST_INTERRUPT_TIME_SDA_OFFSET imm(rvl_OSDispatchInterrupt+24C)
+define OS_LAST_INTERRUPT_SRR0_SDA_OFFSET imm(rvl_OSDispatchInterrupt+254)
+define OS_DISPATCH_INTERRUPT_TAIL rvl_OSDispatchInterrupt+258
+# rvl_ipc.cpp
+define OS_SET_CURRENT_CONTEXT call(rvl_DecrementerExceptionCallback+1D4)
+define OS_CLEAR_CONTEXT call(rvl_DecrementerExceptionCallback+1CC)
+define OS_WAKEUP_THREAD call(rvl_IPCInterruptHandler+B8)
+define IOS_FREE call(rvl_ios_Ipc2+108)
+define IPC_PROF_QUEUE_REQ call(rvl_ios_Ipc2+E4)
+define IPC_PROF_REPLY call(@IpcReplyHandler+234)
+define IOS_IPC2_WAIT rvl_ios_Ipc2+1E8
+define IPC_HEAP_SDA_OFFSET imm(rvl_ios_Ipc2+100)
+# rvl_pad.cpp
+define PAD_INITIALIZED_SDA imm(rvl_PADInit+C)
+define PAD_PENDING_SPEC_SDA imm(rvl_PADInit+28)
+define PAD_SPEC_SDA imm(rvl_PADInit+88)
+define PAD_MAKE_STATUS_SDA imm(rvl_PADInit+64)
+define PAD_ANALOG_MODE_SDA imm(rvl_PADControlMotor+78)
+define SI_INITIALIZED_SDA imm(rvl_SIInit+C)
+define SI_SAMPLING_RATE_SDA imm(rvl_SISetSamplingRate+34)
+define PAD_SPEC1_MAKE_STATUS addr(rvl_PADInit+6C,70)
+define PAD_SPEC2_MAKE_STATUS addr(rvl_PADInit+7C,80)
+# rvl_vi.cpp
+define OS_SET_VI_FORCE_DIMMING call(rvl_VIRetraceHandler+578)
+define SI_REFRESH_SAMPLING_RATE call(rvl_VIRetraceHandler+2EC)
+define VI_GET_TIMING call(rvl_VIInitHardware+24)
+define VI_DISPLAY_POSITION_TO_XY call(rvl_VIRetraceHandler+F8)
+define VI_SET_YUVSEL call(rvl_VIRetraceHandler+318)
+define VI_SET_FILTER_4_EURGB60 call(rvl_VIRetraceHandler+378)
+define VI_SHADOW_REGS addr(rvl_VIRetraceHandler+18,24)
+define VI_HOR_VER addr(rvl_VIGetNextField+70,78)
+define VI_RETRACE_COUNT_SDA imm(rvl_VIRetraceHandler+124)
+define VI_PRE_RETRACE_CALLBACK_SDA imm(rvl_VIRetraceHandler+140)
+define VI_POST_RETRACE_CALLBACK_SDA imm(rvl_VIRetraceHandler+524)
+define VI_RETRACE_QUEUE_SDA imm(rvl_VIRetraceHandler+548)
+define VI_POSITION_CALLBACK_SDA imm(rvl_VIRetraceHandler+BC)
+define VI_FLUSH_PENDING_SDA imm(rvl_VIRetraceHandler+1B4)
+define VI_FLUSH_IN_FIRST_FIELD_SDA imm(rvl_VIRetraceHandler+1C0)
+define VI_CHANGED_HI_SDA imm(rvl_VIRetraceHandler+238)
+define VI_CHANGED_LO_SDA imm(rvl_VIRetraceHandler+23C)
+define VI_CURRENT_TIMING_SDA imm(rvl_VIRetraceHandler+190)
+define VI_CURRENT_TV_SDA imm(rvl_VIRetraceHandler+2CC)
+define VI_CURRENT_DISPLAY_SDA imm(rvl_VIRetraceHandler+2D0)
+define VI_STAGED_DISPLAY_SDA imm(rvl_VIRetraceHandler+2B0)
+define VI_BEAM_CHECK_SDA imm(rvl_VIRetraceHandler+158)
+define VI_BEAM_CHECK_MISSES_SDA imm(rvl_VIRetraceHandler+1A8)
+define VI_ENCODER_PENDING_SDA imm(rvl_VIRetraceHandler+440)
+define VI_ENCODER_UPDATE_BITS_SDA imm(rvl_VIRetraceHandler+458)
+define VI_LAST_YUVSEL_SDA imm(rvl_VIRetraceHandler+304)
+define VI_LAST_TV_CLASS_SDA imm(rvl_VIRetraceHandler+360)
+define VI_DIM_TIME_MODE_SDA imm(rvl_VIRetraceHandler+394)
+define VI_DIM_RESET_SDA imm(rvl_VIRetraceHandler+560)
+define VI_DIM_ENABLED_SDA imm(rvl_VIRetraceHandler+5E0)
+define VI_DIM_LAST_ENABLED_SDA imm(rvl_VIRetraceHandler+674)
+define VI_DIM_COUNT_SDA imm(rvl_VIRetraceHandler+438)
+define VI_DIM_TIME_SDA imm(rvl_VIRetraceHandler+638)
+define VI_DIM_TIME_SETTING_SDA imm(rvl_VIRetraceHandler+3B4)
+define VI_DIM_REQUEST_SDA imm(rvl_VIRetraceHandler+6CC)
+define VI_UNDIM_REQUEST_SDA imm(rvl_VIRetraceHandler+648)
+define VI_DIMMED_SDA imm(rvl_VIRetraceHandler+6FC)
+define VI_STANDBY_ENABLED_SDA imm(rvl_VIRetraceHandler+608)
+define VI_STANDBY_LAST_ENABLED_SDA imm(rvl_VIRetraceHandler+734)
+define VI_STANDBY_COUNT_SDA imm(rvl_VIRetraceHandler+43C)
+define VI_STANDBY_TIME_SDA imm(rvl_VIRetraceHandler+3DC)
+define VI_IDLE_PAD_SDA imm(rvl_VIRetraceHandler+5BC)
+define VI_IDLE_REMOTE_SDA imm(rvl_VIRetraceHandler+5C8)
+# rvl_wud.cpp
+define WUD_BASE addr(rvl_WUDInit+14,18)
+define WUD_DEVICE_ADDRESSES addr(@WUDGetDevAddr+20,28)
+define WUD_INITIALIZED_SDA_OFFSET imm(rvl_WUDInit+1C)
+define SC_INIT call(rvl_WUDInit+8C)
+define OS_CANCEL_ALARM call(rvl_WUDShutdown+A8)
+define OS_SWITCH_FIBER_EX call(rvl_WPADAlarmHandler+1C)
+define WPAD_CONTROL_BLOCKS addr(rvl_WPADiSendData+30,38)
+define WPAD_MANAGER addr(rvl_WPADAlarmHandler+4,10)
+define WPAD_RUMBLE_SDA_OFFSET imm(rvl_WPADiSendData+64)
+# rvl_vi.cpp, rvl_wud.cpp
+define VI_IDLE_FLAGS_OFFSET imm(rvl_VIRetraceHandler+594)
+define VI_ENCODER_UPDATE_0 call(rvl_VIRetraceHandler+4C8)
+define VI_ENCODER_UPDATE_1 call(rvl_VIRetraceHandler+4D0)
+define VI_ENCODER_UPDATE_2 call(rvl_VIRetraceHandler+4D8)
+define VI_ENCODER_UPDATE_3 call(rvl_VIRetraceHandler+4E0)
+define VI_ENCODER_UPDATE_4 call(rvl_VIRetraceHandler+4E8)
+define VI_ENCODER_UPDATE_5 call(rvl_VIRetraceHandler+4F0)
+define VI_ENCODER_UPDATE_6 call(rvl_VIRetraceHandler+4F8)
+define VI_ENCODER_UPDATE_7 call(rvl_VIRetraceHandler+500)
+define WPAD_FIBER_STACK_BASE addr(rvl_WPADAlarmHandler+0,8)
+define WPAD_FIBER_STACK_SIZE imm(rvl_WPADAlarmHandler+18)
+define BTE_ALARM_HANDLER @BteAlarmHandler

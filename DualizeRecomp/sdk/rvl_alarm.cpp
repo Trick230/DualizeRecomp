@@ -6,9 +6,11 @@
 // code.
 //
 // The natives are found by their SDK code (config/sdk.sigs); the addresses
-// and offsets below are NiGHTS' (defines, were it shared).
+// and small-data offsets that depend on the game's link come from the
+// natives list's defines (ppc_natives.h).
 
 #include "core/cpu.h"
+#include "ppc_natives.h"
 
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
@@ -17,7 +19,6 @@ namespace dualize
 {
 namespace
 {
-constexpr int32_t QUEUE_SDA_OFFSET = -27664;  // head, then tail
 constexpr uint32_t QUEUE_TAIL = 4;
 
 // OSAlarm
@@ -31,11 +32,9 @@ constexpr uint32_t ALARM_SIZE = 40;
 
 // OSGetSystemTime is the timebase plus this.
 constexpr uint32_t SYSTEM_TIME_OFFSET = 0x800030D8;
-constexpr uint32_t OS_LOAD_CONTEXT = 0x8044F578;
 // DecrementerExceptionCallback from where it runs the alarm's handler on a
 // temporary context, then reschedules and loads the interrupted one; it wants
 // its frame, the handler in r30, the alarm in r31 and the context in r29.
-constexpr uint32_t ALARM_HANDLER_TAIL = 0x8044E234;
 constexpr uint32_t ALARM_HANDLER_FRAME = 736;
 
 class Alarms
@@ -43,7 +42,7 @@ class Alarms
 public:
   explicit Alarms(CPUState* ctx)
       : m_cpu(*static_cast<Cpu*>(ctx->external_user_data)), m_memory(GetMachine(m_cpu).memory),
-        m_queue(m_memory.Effective(ctx->gpr[13] + QUEUE_SDA_OFFSET, 8))
+        m_queue(m_memory.Effective(ctx->gpr[13] + OS_ALARM_QUEUE_SDA_OFFSET, 8))
   {
   }
 
@@ -246,6 +245,6 @@ extern "C" bool rvl_DecrementerExceptionCallback(CPUState* ctx)
   ctx->gpr[29] = context;
   ctx->gpr[30] = handler;
   ctx->gpr[31] = alarm;
-  ctx->pc = ALARM_HANDLER_TAIL;
+  ctx->pc = OS_ALARM_HANDLER_TAIL;
   return true;
 }

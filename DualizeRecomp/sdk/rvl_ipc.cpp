@@ -7,9 +7,11 @@
 // partly by running the SDK's own code.
 //
 // Both natives are found by their SDK code (config/sdk.sigs); the addresses
-// and offsets below are NiGHTS' (defines, were it shared).
+// and small-data offsets that depend on the game's link come from the
+// natives list's defines (ppc_natives.h).
 
 #include "core/cpu.h"
+#include "ppc_natives.h"
 
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
@@ -39,17 +41,9 @@ constexpr uint32_t IPC_CMD_IOCTL = 6;
 constexpr uint32_t IPC_CMD_IOCTLV = 7;
 
 // SDK functions
-constexpr uint32_t OS_SET_CURRENT_CONTEXT = 0x8044F490;
-constexpr uint32_t OS_CLEAR_CONTEXT = 0x8044F6B8;
-constexpr uint32_t OS_WAKEUP_THREAD = 0x804570DC;
-constexpr uint32_t IOS_FREE = 0x80480D14;          // iosFree(heap, block)
-constexpr uint32_t IPC_PROF_QUEUE_REQ = 0x80480FB8;
-constexpr uint32_t IPC_PROF_REPLY = 0x80481048;
 // ios_Ipc2 after the transport: sleeps on the request when synchronous,
 // restores interrupts, reads the result, frees the request and returns.
-constexpr uint32_t IOS_IPC2_WAIT = 0x8047F9B4;
 // The IPC client's heap handle, a small-data global.
-constexpr int32_t IPC_HEAP_SDA_OFFSET = -29412;
 
 constexpr uint32_t OS_CONTEXT_SIZE = 0x2C8;
 
