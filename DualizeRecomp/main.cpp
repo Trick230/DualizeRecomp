@@ -5,6 +5,7 @@
 //       [--unthrottled] [--no-vsync] [--no-interpolation] [--present-rate <hz>]
 //       [--window <width>x<height>] [--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]
 //       [--hash-every <fields>] [--record-input <file>] [--replay-input <file>]
+//       [--log-entries <file>]
 //
 // Automation: each file dropped in <dir>/commands holds key=value lines, as
 // command=save_state|load_state with path=<file>;
@@ -242,7 +243,7 @@ int Usage()
                        "[--load-state <file>] [--automation-dir <dir>] [--unthrottled] "
                        "[--no-vsync] [--no-interpolation] [--present-rate <hz>] [--window <w>x<h>] "
                        "[--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>] [--hash-every <fields>] "
-                       "[--record-input <file>] [--replay-input <file>]\n");
+                       "[--record-input <file>] [--replay-input <file>] [--log-entries <file>]\n");
   return 2;
 }
 }  // namespace
@@ -294,6 +295,8 @@ int main(int argc, char** argv)
       config.record_input = Utf8Path(v);
     else if (arg == "--replay-input" && (v = value()))
       config.replay_input = Utf8Path(v);
+    else if (arg == "--log-entries" && (v = value()))
+      config.log_entries = Utf8Path(v);
     else
       return Usage();
   }
@@ -322,6 +325,7 @@ int main(int argc, char** argv)
   done = true;
   if (watcher.joinable())
     watcher.join();
+  machine->cpu.SaveEntries();
   const auto& stats = machine->cpu.GetStats();
   std::fprintf(stderr,
                "[native] dispatches %llu, safepoints %llu, interpreted %llu, entry misses %llu, fallbacks %llu, native exceptions %llu\n",

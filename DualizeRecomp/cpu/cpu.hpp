@@ -16,8 +16,10 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -93,6 +95,11 @@ public:
   // mtdec from host code (the OS's alarm timer): the decrementer interrupt
   // comes after value timebase ticks.
   void SetDecrementer(uint32_t value);
+
+  // Keeps where recompiled code was entered at a point it has no entry for, in
+  // the file the recompiler's main.entries reads, added to what it holds.
+  void LogEntries(const std::filesystem::path& path);
+  void SaveEntries() const;
 
   void DoState(StateIO& io);
   // After loading a state: function verification starts over.
@@ -271,6 +278,10 @@ private:
   // missed every function.
   bool m_overlays_dirty = false;
   bool m_locate_on_miss = false;
+  void NoteEntryMiss(int function, uint32_t pc);
+  std::filesystem::path m_entries_path;
+  std::set<std::string> m_entries;
+  uint32_t m_entry_miss_next = 0;  // the pc one miss stepping on from the last would have
   // Direct-mapped by pc, ahead of the line table. Entries only name verified
   // functions, so it empties whenever one stops being verified.
   static constexpr uint32_t DISPATCH_CACHE_SIZE = 4096;

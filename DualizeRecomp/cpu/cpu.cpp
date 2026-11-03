@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iterator>
 
 #ifdef _WIN32
@@ -444,6 +445,38 @@ void Cpu::VerifyFunction(uint32_t index)
   // An overlay's text that doesn't match may be the module loaded elsewhere
   // since the list was last read.
   m_overlays_dirty |= !verified && overlay;
+}
+
+void Cpu::LogEntries(const std::filesystem::path& path)
+{
+  m_entries_path = path;
+  std::ifstream file(path);
+  for (std::string line; std::getline(file, line);)
+    m_entries.insert(line);
+}
+
+void Cpu::SaveEntries() const
+{
+  if (m_entries_path.empty())
+    return;
+  std::ofstream file(m_entries_path, std::ios::trunc);
+  for (const std::string& line : m_entries)
+    file << line << '\n';
+}
+
+// Only where such a run starts: the steps after it go on to the next entry.
+void Cpu::NoteEntryMiss(int function, uint32_t pc)
+{
+  const bool stepping = pc == m_entry_miss_next;
+  m_entry_miss_next = pc + 4;
+  if (stepping)
+    return;
+  uint32_t group = 0;
+  while (static_cast<uint32_t>(function) >= m_groups[group].end)
+    ++group;
+  char address[16];
+  std::snprintf(address, sizeof(address), "%08X", pc - m_groups[group].shift);
+  m_entries.insert(group ? std::string(address) + ' ' + m_module->overlays[group - 1].name : std::string(address));
 }
 
 void Cpu::FlushDispatchCache()
@@ -1057,6 +1090,8 @@ void Cpu::RunLoop()
         if (!RunNative(function))
         {
           ++m_stats.entry_misses;
+          if (!m_entries_path.empty())
+            NoteEntryMiss(function, state.pc);
           state.pc = pc;
         }
         else if (m_idle_pc && state.pc == m_idle_pc)
@@ -1097,6 +1132,8 @@ uint32_t Cpu::CallGuest(uint32_t address, std::initializer_list<uint32_t> args)
     const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
     if (function >= 0 && RunNative(function))
       continue;
+    if (function >= 0 && !m_entries_path.empty())
+      NoteEntryMiss(function, state.pc);
     Charge(Step());
   }
 

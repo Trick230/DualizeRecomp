@@ -121,6 +121,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--load-state <file>` | Start from a savestate |
 | `--automation-dir <dir>` | Drive the game from command files: `save_state`, `load_state`, `pad`, `pad_frames`, `clear_pad`, `stop` (client: `scripts/automation.py`) |
 | `--record-input <file>` | Record what the game reads from its controllers, read by read (format in `DualizeRecomp/hid/input_movie.hpp`) |
+| `--log-entries <file>` | Add to the file each point recompiled code was entered at without an entry there, stepping on the interpreter from it. Name the file in the config's `main.entries` and the next recompilation gives those points entries |
 | `--replay-input <file>` | Play a recorded movie back and stop at its end. The game runs on its own clock (the GPU's signals reach it only at points of that clock), so the same start and the same movie make the same run at any speed |
 | `--hash-every <n>` | Log a hash of guest RAM every n fields, to compare runs |
 

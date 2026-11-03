@@ -42,6 +42,7 @@ struct MachineConfig
   float render_scale = 1.0f;  // frame buffer over window; above 1 reduced by an area filter
   uint32_t hash_every = 0;    // print a hash of guest RAM every n fields (0: never)
   std::filesystem::path record_input, replay_input;  // input movies (hid/input_movie.hpp)
+  std::filesystem::path log_entries;  // for the recompiler's main.entries (Cpu::LogEntries)
 };
 
 class Machine : public CpuHost

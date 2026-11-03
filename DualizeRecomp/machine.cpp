@@ -215,6 +215,8 @@ bool Machine::Start(std::string* error)
     return false;
   if (!cpu.AttachModule(config.idle_pc, config.rso_list, error))
     return false;
+  if (!config.log_entries.empty())
+    cpu.LogEntries(config.log_entries);
   if ((!config.record_input.empty() && !m_movie.Record(config.record_input, error)) ||
       (!config.replay_input.empty() && !m_movie.Replay(config.replay_input, error)))
     return false;
