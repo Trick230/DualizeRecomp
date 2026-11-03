@@ -113,6 +113,7 @@ void Complete(Cpu& cpu, uint32_t request, uint32_t interrupted_context)
     s.gpr[1] = scratch - 16;
     cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
     cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {scratch});
+    cpu.EnterHandlerContext();
     cpu.CallGuest(callback, {Load(block, REQUEST_RESULT), Load(block, REQUEST_CALLBACK_DATA)});
     cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
     cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {interrupted_context});

@@ -79,6 +79,10 @@ public:
   // thread switch, which holds inside an OS interrupt handler (the scheduler
   // is off there). r1 must leave the callee room below it.
   uint32_t CallGuest(uint32_t address, std::initializer_list<uint32_t> args = {});
+  // What OSSetCurrentContext leaves in the MSR on a handler's own context, which
+  // its guest call doesn't keep: the FPU off until the code on it uses it, and
+  // the context recoverable, or the OS takes any exception on it as fatal.
+  void EnterHandlerContext() { state.msr = (state.msr & ~uint32_t{0x2000}) | 0x2; }
 
   CpuHost& Host() { return m_host; }
 

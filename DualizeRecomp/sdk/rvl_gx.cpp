@@ -44,6 +44,7 @@ void CallOnOwnContext(CPUState* ctx, uint32_t callback, uint32_t context, uint32
   ctx->gpr[1] = frame;
   cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
   cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {scratch});
+  cpu.EnterHandlerContext();
   cpu.CallGuest(callback, {token});
   cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
   cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {context});

@@ -272,6 +272,7 @@ extern "C" bool rvl_VIRetraceHandler(CPUState* ctx)
     // Display interrupts 2 and 3: the display position callback.
     cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
     cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {scratch});
+    cpu.EnterHandlerContext();
     if (const uint32_t callback = g[VI_POSITION_CALLBACK_SDA])
     {
       const uint32_t vct = machine.vi.Vct();
@@ -291,6 +292,7 @@ extern "C" bool rvl_VIRetraceHandler(CPUState* ctx)
   g.Set(VI_RETRACE_COUNT_SDA, g[VI_RETRACE_COUNT_SDA] + 1);
   cpu.CallGuest(OS_CLEAR_CONTEXT, {scratch});
   cpu.CallGuest(OS_SET_CURRENT_CONTEXT, {scratch});
+  cpu.EnterHandlerContext();
   if (const uint32_t callback = g[VI_PRE_RETRACE_CALLBACK_SDA])
     cpu.CallGuest(callback, {g[VI_RETRACE_COUNT_SDA]});
 
