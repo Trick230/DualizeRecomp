@@ -35,6 +35,7 @@ struct MachineConfig
   uint32_t rso_list = 0;  // where the game keeps its list of linked RSO modules
   bool throttle = true;
   bool vsync = true;
+  bool hidden = false;  // never show the window (scripted runs)
   bool interpolate = true;    // only while throttled to the game's rate
   uint32_t present_rate = 0;  // without vsync; 0 = the display's refresh rate
   uint32_t width = 1280, height = 960;

@@ -22,14 +22,14 @@ class Game:
         self.proc = None
 
     # -- process ---------------------------------------------------------
-    def start(self, state=None, log=None, extra_args=(), game=None):
+    def start(self, state=None, log=None, extra_args=(), game=None, hidden=True):
         self.stop()
         commands = self.dir / "commands"
         commands.mkdir(parents=True, exist_ok=True)
         for f in commands.iterdir():
             f.unlink()
         args = [str(self.exe), "--game", str(game or self.repo / "extracted/nights"),
-                "--automation-dir", str(self.dir), *extra_args]
+                "--automation-dir", str(self.dir), *(["--hidden"] if hidden else []), *extra_args]
         if state:
             args += ["--load-state", str(state)]
         out = open(log, "w") if log else subprocess.DEVNULL

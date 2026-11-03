@@ -112,6 +112,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--user <dir>` | User directory: NAND and saves (default `%LOCALAPPDATA%\DualizeRecomp`, `~/.local/share/DualizeRecomp`) |
 | `--no-interpolation` | Show the game's own 30 FPS |
 | `--no-vsync` | Present without vsync, paced by a timer |
+| `--hidden` | Never show the window; everything still renders (scripted runs, which `scripts/automation.py` starts this way) |
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
 | `--msaa <1\|4>` | Multisample anti-aliasing (default 4) |
 | `--render-scale <x>` | Render at x times the window (0.25–4, default 1), reduced by an area filter |

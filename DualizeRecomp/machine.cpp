@@ -266,6 +266,7 @@ bool Machine::Start(std::string* error)
       .dump_textures = std::getenv("DUALIZE_DUMP_TEXTURES") != nullptr,
       // One line per second of render-thread counters.
       .stats = std::getenv("DUALIZE_GX_STATS") != nullptr,
+      .hidden = config.hidden,
   };
   const AuroraFifoHost gx_host{
       .user = this,
