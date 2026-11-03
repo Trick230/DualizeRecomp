@@ -115,6 +115,83 @@ ios::Device& IosKernel::Di()
   return *m_devices[DeviceId("/dev/di")];
 }
 
+bool IosKernel::IsFsFile(std::string_view path)
+{
+  return path.starts_with('/') && !path.starts_with("/dev/");
+}
+
+bool IosKernel::IsFsFd(int32_t fd) const
+{
+  return fd >= 0 && static_cast<uint32_t>(fd) < MAX_FDS && m_fds[fd] == FS;
+}
+
+std::string IosKernel::ReadPath(uint32_t address) const
+{
+  const ios::Memory& memory = m_memory;
+  return memory.ReadString(address, 64);
+}
+
+ios::Reply IosKernel::HostOpen(const std::string& path, uint32_t flags)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host open %s mode %u\n", path.c_str(), flags);
+  ios::OpenRequest request(path, flags);
+  return Open(request).value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+ios::Reply IosKernel::HostClose(int32_t fd)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host fd %d close\n", fd);
+  m_fds[fd] = -1;
+  return m_devices[FS]->Close(fd).value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+ios::Reply IosKernel::HostReadWrite(int32_t fd, uint32_t buffer, uint32_t size, bool write)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host fd %d %s size %u\n", fd, write ? "write" : "read", size);
+  const ios::ReadWriteRequest request(fd, buffer, size);
+  return (write ? m_devices[FS]->Write(request) : m_devices[FS]->Read(request)).value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+ios::Reply IosKernel::HostSeek(int32_t fd, int32_t offset, uint32_t mode)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host fd %d seek %d mode %u\n", fd, offset, mode);
+  return m_devices[FS]->Seek(ios::SeekRequest(fd, offset, mode)).value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+ios::Reply IosKernel::HostIoctl(int32_t fd, uint32_t request, uint32_t in, uint32_t in_size, uint32_t out,
+                                uint32_t out_size)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host fd %d ioctl %x\n", fd, request);
+  return m_devices[FS]->IOCtl(ios::IOCtlRequest(fd, request, in, in_size, out, out_size))
+      .value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+ios::Reply IosKernel::HostIoctlv(int32_t fd, uint32_t request, std::vector<ios::IOCtlVRequest::Vector> in,
+                                 std::vector<ios::IOCtlVRequest::Vector> io)
+{
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host fd %d ioctlv %x\n", fd, request);
+  return m_devices[FS]->IOCtlV(ios::IOCtlVRequest(fd, request, std::move(in), std::move(io)))
+      .value_or(ios::Reply{ios::IPC_EINVAL});
+}
+
+void IosKernel::PostReply(uint32_t address, int64_t delay)
+{
+  // Replies go out in order.
+  const uint64_t now = m_machine.scheduler.Now();
+  if (m_last_reply_time > now)
+    delay += static_cast<int64_t>(m_last_reply_time - now);
+  m_last_reply_time = now + static_cast<uint64_t>(delay);
+  if (m_trace)
+    std::fprintf(stderr, "[ios] host async reply %08x in %lld\n", address, static_cast<long long>(delay));
+  m_machine.scheduler.Schedule(delay, m_queue_event, address);
+}
+
 bool IosKernel::PopReply(uint32_t* address)
 {
   if (m_replies.empty())

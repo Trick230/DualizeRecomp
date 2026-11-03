@@ -311,7 +311,7 @@ What phase 7 did and what is left of it (🔸 steps are architecture only: measu
 | GX registers at the SDK | The draw-done and token interrupt handlers are host code over the renderer's signals. GX's FIFO setup and the `GXPoke` family stay the game's code against windows that ignore writes and read idle: the renderer takes the bytes as the CPU writes them, so there is no FIFO to set up. No CP, PE or MI registers | ✅ |
 | AI, DSP and ARAM at the SDK | AI DMA (`AIInitDMA`, `AIStartDMA`, `AIStopDMA`, `AIGetDMABytesLeft`), the DSP mailbox and both interrupt handlers go straight to the native DSP; AX stays the game's code over it. What runs once at boot (`__OSInitAudioSystem` with the game's only ARAM DMA, `AIInit`, `DSPInit`) keeps the interface block's registers: the game doesn't link the ARAM library | ✅ |
 | SI and EXI at the SDK | `PADRead` builds each report from the host pad and runs the SDK's own `MakeStatus`; PAD's init, reset and rumble and the SI's init are host code. `EXILock`, `EXISelect`, `EXIImm`, `EXIDma` and the rest finish each transfer in the call on the IPL chip (RTC, SRAM, the UART behind OSReport). No serial or expansion interface registers or interrupts | ✅ |
-| DVD and NAND at the SDK | `DVD*` and `NAND*` served by host functions instead of IOS requests; IOS keeps only what the SDK can't skip | 🔸 Optional: the device models are host code already, all of them under 0.5% of the CPU thread in play |
+| DVD and NAND at the SDK | `DVDLowRead` and `DVDLowClearCoverInterrupt` are served by the host's drive, and the IOS client calls (`IOS_Open`, `IOS_Read`, `IOS_Ioctl` and the rest, with their async forms) go straight to the host's file system when they name the NAND. The DVD queue, `NAND*` and `ISFS_*` stay the game's code. IOS requests remain for the rarer `DVDLow` commands and the other devices: boot and gate went from over 500 requests to under 50 | ✅ |
 
 After phase 6, before the stage modules:
 
@@ -342,7 +342,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: the 🔸 steps (DVD/NAND, AX at the SDK), phase 6, GX at the API and phase 9. The interpreter stays as the
+Next, in order: the 🔸 step (AX at the SDK), phase 6, GX at the API and phase 9. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,

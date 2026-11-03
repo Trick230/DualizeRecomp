@@ -13,7 +13,9 @@
 #include <deque>
 #include <memory>
 #include <string_view>
+#include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace dualize
 {
@@ -36,6 +38,23 @@ public:
   // of PopReply in the replies' place, under the same interrupt.
   void PostCompletion(uint32_t completion, int64_t delay);
   ios::Device& Di();
+
+  // The file system with no request block (natives in sdk/rvl_nand.cpp): it
+  // answers in the call, the reply's delay being how long the NAND would take.
+  static bool IsFsFile(std::string_view path);
+  bool IsFsFd(int32_t fd) const;
+  std::string ReadPath(uint32_t address) const;
+  ios::Reply HostOpen(const std::string& path, uint32_t flags);
+  ios::Reply HostClose(int32_t fd);
+  ios::Reply HostReadWrite(int32_t fd, uint32_t buffer, uint32_t size, bool write);
+  ios::Reply HostSeek(int32_t fd, int32_t offset, uint32_t mode);
+  ios::Reply HostIoctl(int32_t fd, uint32_t request, uint32_t in, uint32_t in_size, uint32_t out,
+                       uint32_t out_size);
+  ios::Reply HostIoctlv(int32_t fd, uint32_t request, std::vector<ios::IOCtlVRequest::Vector> in,
+                        std::vector<ios::IOCtlVRequest::Vector> io);
+  // The block at address, its result filled in, comes out of PopReply after delay
+  // and after the replies before it.
+  void PostReply(uint32_t address, int64_t delay);
   // A reply a state saved before SDK-level IPC had left in the mailbox.
   void AdoptMailboxReply(uint32_t address);
 

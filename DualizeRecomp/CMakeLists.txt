@@ -30,6 +30,7 @@ add_executable(DualizeRecomp
     sdk/rvl_ipc.cpp
     sdk/rvl_pad.cpp
     sdk/rvl_gx.cpp
+    sdk/rvl_nand.cpp
     sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp)
 

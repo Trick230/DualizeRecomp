@@ -195,6 +195,8 @@ struct Request
         fd(static_cast<int32_t>(memory.Read32(address_ + 8)))
   {
   }
+  // A request host code makes, with no block behind it (SDK natives).
+  explicit Request(int32_t fd_) : fd(fd_) {}
 };
 
 struct OpenRequest : Request
@@ -206,6 +208,7 @@ struct OpenRequest : Request
         flags(memory.Read32(address_ + 16))
   {
   }
+  OpenRequest(std::string path_, uint32_t flags_) : Request(-1), path(std::move(path_)), flags(flags_) {}
 };
 
 struct ReadWriteRequest : Request
@@ -217,6 +220,7 @@ struct ReadWriteRequest : Request
         size(memory.Read32(address_ + 16))
   {
   }
+  ReadWriteRequest(int32_t fd_, uint32_t buffer_, uint32_t size_) : Request(fd_), buffer(buffer_), size(size_) {}
 };
 
 struct SeekRequest : Request
@@ -228,6 +232,7 @@ struct SeekRequest : Request
         mode(memory.Read32(address_ + 16))
   {
   }
+  SeekRequest(int32_t fd_, int32_t offset_, uint32_t mode_) : Request(fd_), offset(offset_), mode(mode_) {}
 };
 
 struct IOCtlRequest : Request
@@ -239,6 +244,11 @@ struct IOCtlRequest : Request
       : Request(memory, address_), request(memory.Read32(address_ + 12)),
         buffer_in(memory.Read32(address_ + 16)), buffer_in_size(memory.Read32(address_ + 20)),
         buffer_out(memory.Read32(address_ + 24)), buffer_out_size(memory.Read32(address_ + 28))
+  {
+  }
+  IOCtlRequest(int32_t fd_, uint32_t request_, uint32_t in, uint32_t in_size, uint32_t out, uint32_t out_size)
+      : Request(fd_), request(request_), buffer_in(in), buffer_in_size(in_size), buffer_out(out),
+        buffer_out_size(out_size)
   {
   }
 };
@@ -254,6 +264,10 @@ struct IOCtlVRequest : Request
   std::vector<Vector> in;  // read by IOS
   std::vector<Vector> io;  // written by IOS
 
+  IOCtlVRequest(int32_t fd_, uint32_t request_, std::vector<Vector> in_, std::vector<Vector> io_)
+      : Request(fd_), request(request_), in(std::move(in_)), io(std::move(io_))
+  {
+  }
   IOCtlVRequest(const Memory& memory, uint32_t address_)
       : Request(memory, address_), request(memory.Read32(address_ + 12))
   {
