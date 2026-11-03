@@ -2352,6 +2352,52 @@ void DspCore::CompleteMix()
   m_impl->ReleaseMix();
 }
 
+bool DspCore::StartAxTask(uint32_t iram, uint32_t size)
+{
+  Impl& d = *m_impl;
+  // The game's code waits for the ROM's mail before it sends its own.
+  if (d.halted || !d.ucode || d.ucode->kind != Ucode::Kind::Rom || d.pending_mails.empty())
+    return false;
+  const u8* code = d.Span(iram, size);
+  if (!code)
+    return false;
+  d.SetUCode(HashEctor(code, size));
+  return true;
+}
+
+bool DspCore::SubmitAxFrame(uint32_t address, uint32_t size)
+{
+  Impl& d = *m_impl;
+  d.JoinMix();
+  if (!d.ucode || d.ucode->kind != Ucode::Kind::AxWii || d.ucode->upload_setup_in_progress)
+    return false;
+  AxWii& ax = *d.ucode->ax;
+  d.CopyCmdList(ax, address, static_cast<u16>(size));
+  ax.cmdlist_size = 0;
+  ax.mail_state = MailState::WaitingForNextTask;
+  d.mix_state.store(Impl::MIX_QUEUED, std::memory_order_release);
+  d.mix_state.notify_one();
+  d.host.schedule_mix_done(d.host.user, AX_MIX_CYCLES);
+  return true;
+}
+
+bool DspCore::AxWaitsForListAddress() const
+{
+  const Impl& d = *m_impl;
+  return d.ucode && d.ucode->kind == Ucode::Kind::AxWii && d.ucode->ax->mail_state == MailState::WaitingForCmdListAddress;
+}
+
+bool DspCore::HasAxYield() const
+{
+  const Impl& d = *m_impl;
+  return !d.halted && !d.pending_mails.empty() && d.pending_mails.front().first == DSP_YIELD;
+}
+
+void DspCore::TakeAxYield()
+{
+  m_impl->ReadMailLow();
+}
+
 void DspCore::CompleteAramDma()
 {
   m_impl->dsp_control &= ~CTRL_DMA_STATE;

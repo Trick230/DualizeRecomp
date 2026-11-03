@@ -319,7 +319,7 @@ After phase 6, before the stage modules:
 |---|---|---|
 | GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🔸 Optional: the game's GX functions are ~2–3% of the CPU thread, the GX thread waits on the CPU, and vertex writes (inline stores) and display lists stay FIFO streams anyway |
 | AX mixing off the CPU thread | Each AX command list is mixed on a thread of its own while the game runs on; the DSP's mails arrive half a millisecond of DSP time later | ✅ Mixing from ~1.3% of the CPU thread to ~0.6% (the mailbox and the hand-off) |
-| AX at the SDK | The host mixes AX's voices itself; no DSP mailbox or ucode | 🔸 Optional: what is left of the DSP on the CPU thread is ~0.6% |
+| AX at the SDK | `__DSP_boot_task` starts the host's mixer with no upload, `__AXOutNewFrame` hands it the command list, and `__DSPHandler` resumes the task at a mix's end, all with no mail to or from the guest in a frame. AX's voice and command list code stays the game's, and the mixer stays the ucode's model behind the DSP interrupt. Quitting or switching tasks still goes through the mailbox | ✅ |
 
 Phase 8, image quality, in order (Aurora renders at the window's size and
 scales EFB copies with it, so shadows, bloom and reflections follow the
@@ -342,7 +342,7 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: the 🔸 step (AX at the SDK), phase 6, GX at the API and phase 9. The interpreter stays as the
+Next, in order: phase 6, GX at the API and phase 9. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,

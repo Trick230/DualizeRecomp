@@ -73,6 +73,18 @@ public:
   // One 32-byte audio DMA step (8 stereo frames).
   void UpdateAudioDma();
 
+  // AX at the SDK, with no mail: each returns false when the DSP isn't where
+  // the mails would have found it, and the game's code then sends them.
+  // Starts the AX ucode at iram from the boot ROM; its init mail follows.
+  bool StartAxTask(uint32_t iram, uint32_t size);
+  // Mixes the command list; the mix's end raises the DSP interrupt as usual.
+  bool SubmitAxFrame(uint32_t address, uint32_t size);
+  // A savestate from before these calls has sent the size mail already.
+  bool AxWaitsForListAddress() const;
+  // The next mail is the end of a mix; taking it is the same as reading it.
+  bool HasAxYield() const;
+  void TakeAxYield();
+
   // Same layout as Dolphin's DSP and DSP HLE state, so either loads the other.
   void DoState(const DspStateIO& io);
 

@@ -31,6 +31,10 @@ rvl_DSPCheckMailToDSP 10 3C600000 249314737E71CFEE at call(rvl_DSPHandler+114)
 rvl_DSPCheckMailFromDSP 10 3C600000 249314737E71CFEE at call(rvl_DSPHandler+3C)
 rvl_DSPReadMailFromDSP 14 3C600000 4A16A6A6160FDE2C at call(rvl_DSPHandler+48)
 rvl_DSPSendMailToDSP 14 3C800000 6D5A3463625CB729 at call(rvl_DSPHandler+110)
+rvl_DSPBootTask 18C 9421FFE0 343345EC2225E847
+@AXOutNewFrame 260 9421FFD0 D1651D260809DF77
+rvl_AXSendCommandList 4 48000001 4BA5D7D7DCEB1B0A at @AXOutNewFrame+74 jump
+rvl_AXCommandListSent 4 48000001 4BA5D7D7DCEB1B0A at @AXOutNewFrame+88 jump
 rvl_AIInitDMA 7C 9421FFF0 E68FEEF4C35A28AD
 rvl_AIStartDMA 14 3C600000 CC3D129B73E1CA77
 rvl_AIStopDMA 14 3C600000 26F33BC224391289
@@ -88,6 +92,13 @@ rvl_StartSyncDevice 134 9421FFE0 3E4B4F3F8268BB12
 # functions, data and small-data (r13) offsets, read off the natives' code.
 # rvl_audio.cpp
 define DSP_HANDLER_TAIL rvl_DSPHandler+3C
+define DSP_HANDLER_DONE rvl_DSPHandler+410
+define DSP_CURRENT_TASK_SDA imm(rvl_DSPHandler+4C)
+define DSP_TASK_PENDING_SDA imm(rvl_DSPHandler+F0)
+define DSP_RUDE_TASK_SDA imm(rvl_DSPHandler+FC)
+define DSP_FIRST_TASK_SDA imm(rvl_DSPHandler+19C)
+define AX_LIST_SIZE_SENT rvl_AXSendCommandList+4
+define AX_LIST_ADDRESS_SENT rvl_AXCommandListSent+4
 define AI_DMA_CALLBACK_SDA imm(rvl_AIDHandler+3C)
 define AI_DMA_CALLBACK_ACTIVE_SDA imm(rvl_AIDHandler+48)
 define AI_CALLBACK_STACK_SDA imm(rvl_AIDHandler+54)

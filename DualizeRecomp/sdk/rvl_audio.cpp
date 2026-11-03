@@ -1,6 +1,7 @@
 // The Revolution SDK's audio libraries at their boundary with the hardware: AI
 // DMA and the DSP mailbox go straight to the native DSP, and the interrupt
-// handlers acknowledge it there. AX stays the game's code over them, and what
+// handlers acknowledge it there. AX stays the game's code over them, but its
+// ucode's boot and the mails of each frame are calls to the host's mixer. What
 // runs once at boot (__OSInitAudioSystem, AIInit, DSPInit) keeps the interface
 // block's registers.
 //
@@ -41,6 +42,11 @@ constexpr uint32_t HANDLER_LR = HANDLER_FRAME + 4;
 constexpr uint32_t HANDLER_R31 = 732;
 constexpr uint32_t HANDLER_CONTEXT = 8;
 
+// In a DSPTaskInfo.
+constexpr uint32_t TASK_FLAGS = 8, TASK_IRAM = 12, TASK_IRAM_SIZE = 16;
+constexpr uint32_t TASK_RESUME_CALLBACK = 44, TASK_NEXT = 56;
+constexpr uint32_t TASK_FLAG_CANCEL = 2;
+
 Cpu& CpuOf(CPUState* ctx)
 {
   return *static_cast<Cpu*>(ctx->external_user_data);
@@ -56,6 +62,45 @@ void Acknowledge(DspCore& dsp, uint16_t interrupt)
 {
   const uint16_t others = (CONTROL_AI_INTERRUPT | CONTROL_ARAM_INTERRUPT | CONTROL_DSP_INTERRUPT) & ~interrupt;
   dsp.Write(CONTROL, static_cast<uint16_t>((dsp.Read(CONTROL) & ~others) | interrupt));
+}
+
+uint32_t ReadWord(Machine& machine, uint32_t address)
+{
+  const uint8_t* bytes = machine.memory.Effective(address, 4);
+  return bytes ? Load32(bytes) : 0;
+}
+
+void WriteWord(Machine& machine, uint32_t address, uint32_t value)
+{
+  if (uint8_t* bytes = machine.memory.Effective(address, 4))
+    Store32(bytes, value);
+}
+
+// The mail waiting is a mix's end and __DSPHandler would only tell the DSP to
+// go on and resume the task that's running: returns that task with the mail
+// taken, or 0 for the game's code to read it and switch tasks or finish.
+uint32_t TakeFinishedFrame(CPUState* ctx, Machine& machine)
+{
+  DspCore& dsp = *machine.dsp;
+  if (!dsp.HasAxYield())
+    return 0;
+  const uint32_t sda = ctx->gpr[13];
+  const uint32_t task = ReadWord(machine, sda + DSP_CURRENT_TASK_SDA);
+  if (!task || (ReadWord(machine, task + TASK_FLAGS) & TASK_FLAG_CANCEL))
+    return 0;
+  if (ReadWord(machine, sda + DSP_TASK_PENDING_SDA))
+  {
+    if (task != ReadWord(machine, sda + DSP_RUDE_TASK_SDA))
+      return 0;
+    WriteWord(machine, sda + DSP_RUDE_TASK_SDA, 0);
+    WriteWord(machine, sda + DSP_TASK_PENDING_SDA, 0);
+  }
+  else if (ReadWord(machine, task + TASK_NEXT) || task != ReadWord(machine, sda + DSP_FIRST_TASK_SDA))
+  {
+    return 0;
+  }
+  dsp.TakeAxYield();
+  return task;
 }
 }  // namespace
 
@@ -96,8 +141,41 @@ extern "C" bool rvl_DSPSendMailToDSP(CPUState* ctx)
   return true;
 }
 
-// void __DSPHandler(__OSInterrupt, OSContext* context): the mail that answers
-// a task runs as the game's code, from where it waits for that mail.
+// void __DSP_boot_task(DSPTaskInfo* task): the AX ucode starts with no upload.
+extern "C" bool rvl_DSPBootTask(CPUState* ctx)
+{
+  Machine& machine = GetMachine(CpuOf(ctx));
+  const uint32_t task = ctx->gpr[3];
+  if (!machine.dsp->StartAxTask(ReadWord(machine, task + TASK_IRAM), ReadWord(machine, task + TASK_IRAM_SIZE)))
+    return false;
+  ctx->downcount -= 100;
+  return true;
+}
+
+// In __AXOutNewFrame, the mail with the command list's size (in r3, its
+// address is in r29): the host's mixer takes the list here.
+extern "C" bool rvl_AXSendCommandList(CPUState* ctx)
+{
+  if (!DspOf(ctx).SubmitAxFrame(ctx->gpr[29], ctx->gpr[3] & 0xFFFF))
+    return false;
+  ctx->downcount -= 20;
+  ctx->pc = AX_LIST_SIZE_SENT;
+  return true;
+}
+
+// In __AXOutNewFrame, the mail with the command list's address.
+extern "C" bool rvl_AXCommandListSent(CPUState* ctx)
+{
+  if (DspOf(ctx).AxWaitsForListAddress())
+    return false;
+  ctx->downcount -= 5;
+  ctx->pc = AX_LIST_ADDRESS_SENT;
+  return true;
+}
+
+// void __DSPHandler(__OSInterrupt, OSContext* context): a mix's end resumes the
+// task from here. Any other mail runs as the game's code, from where it waits
+// for that mail.
 extern "C" bool rvl_DSPHandler(CPUState* ctx)
 {
   Cpu& cpu = CpuOf(ctx);
@@ -119,6 +197,13 @@ extern "C" bool rvl_DSPHandler(CPUState* ctx)
   cpu.EnterHandlerContext();
   ctx->gpr[31] = context;
   ctx->pc = DSP_HANDLER_TAIL;
+  if (const uint32_t task = TakeFinishedFrame(ctx, GetMachine(cpu)))
+  {
+    const uint32_t resume = ReadWord(GetMachine(cpu), task + TASK_RESUME_CALLBACK);
+    ctx->gpr[3] = task;
+    ctx->lr = DSP_HANDLER_DONE;
+    ctx->pc = resume ? resume : DSP_HANDLER_DONE;
+  }
   return true;
 }
 
