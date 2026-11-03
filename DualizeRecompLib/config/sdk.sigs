@@ -26,6 +26,16 @@ rvl_DecrementerExceptionCallback 22C 9421FD20 6220CEE09190C739 jump
 rvl_OSDispatchInterrupt 2A4 9421FFE0 7B0A53661C41579B jump
 rvl_GXFinishInterruptHandler 80 9421FD20 D5E93D3B88B28E46
 rvl_GXTokenInterruptHandler 84 9421FD20 22425621AF37140F
+rvl_DSPHandler 434 9421FD20 77A0C0F4E2A1F63B jump
+rvl_DSPCheckMailToDSP 10 3C600000 249314737E71CFEE at call(rvl_DSPHandler+114)
+rvl_DSPCheckMailFromDSP 10 3C600000 249314737E71CFEE at call(rvl_DSPHandler+3C)
+rvl_DSPReadMailFromDSP 14 3C600000 4A16A6A6160FDE2C at call(rvl_DSPHandler+48)
+rvl_DSPSendMailToDSP 14 3C800000 6D5A3463625CB729 at call(rvl_DSPHandler+110)
+rvl_AIInitDMA 7C 9421FFF0 E68FEEF4C35A28AD
+rvl_AIStartDMA 14 3C600000 CC3D129B73E1CA77
+rvl_AIStopDMA 14 3C600000 26F33BC224391289
+rvl_AIGetDMABytesLeft 10 3C600000 1FEA01F02FC6F934
+rvl_AIDHandler A8 9421FD20 9A14181CBEFEE8DA jump
 rvl_VIRetraceHandler 810 9421FD10 EB954488BDBFE65E
 rvl_VIInitHardware 210 9421FFE0 830B2C323D81F7D8
 rvl_VIGetNextField 9C 9421FFF0 83E2895BD947F8C8
@@ -60,6 +70,15 @@ rvl_StartSyncDevice 134 9421FFE0 3E4B4F3F8268BB12
 
 # What the .cpp natives call and read where this game's link put it: SDK
 # functions, data and small-data (r13) offsets, read off the natives' code.
+# rvl_audio.cpp
+define DSP_HANDLER_TAIL rvl_DSPHandler+3C
+define AI_DMA_CALLBACK_SDA imm(rvl_AIDHandler+3C)
+define AI_DMA_CALLBACK_ACTIVE_SDA imm(rvl_AIDHandler+48)
+define AI_CALLBACK_STACK_SDA imm(rvl_AIDHandler+54)
+define AI_CALLBACK_STACK_SWITCH call(rvl_AIDHandler+68)
+define AI_HANDLER_CALL_CALLBACK rvl_AIDHandler+70
+define AI_HANDLER_AFTER_CALLBACK rvl_AIDHandler+7C
+define AI_HANDLER_TAIL rvl_AIDHandler+84
 # rvl_gx.cpp
 define GX_DRAW_DONE_CALLBACK_SDA imm(rvl_GXFinishInterruptHandler+28)
 define GX_DRAW_DONE_FLAG_SDA imm(rvl_GXFinishInterruptHandler+2C)

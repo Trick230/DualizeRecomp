@@ -23,6 +23,7 @@ add_executable(DualizeRecomp
     hid/gamepads.cpp
     hid/input_movie.cpp
     sdk/rvl_alarm.cpp
+    sdk/rvl_audio.cpp
     sdk/rvl_exi.cpp
     sdk/rvl_interrupt.cpp
     sdk/rvl_ipc.cpp
