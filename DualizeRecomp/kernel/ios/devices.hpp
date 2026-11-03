@@ -90,6 +90,17 @@ std::unique_ptr<Device> CreateDevice(const Host& host, const Config& config, std
 // started before the native driver took over).
 void FinishHostDiCommand(Device& di, bool success);
 
+// /dev/di's drive without a request, for the SDK's DVD natives (sdk/rvl_dvd.cpp):
+// the command is done at the call, its result due after ticks. Nothing, with
+// nothing done, when the drive can't take it now: the request path decides.
+struct DiHostReply
+{
+  int32_t result;
+  int64_t ticks;
+};
+std::optional<DiHostReply> HostDiRead(Device& di, uint32_t address, uint32_t length, uint32_t offset_in_words);
+std::optional<DiHostReply> HostDiClearCover(Device& di);
+
 // /dev/stm/eventhook's pending hook, completed by the console buttons.
 void PressResetButton();
 void PressPowerButton();

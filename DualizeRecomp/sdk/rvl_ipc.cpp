@@ -16,6 +16,13 @@
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
 
+namespace dualize
+{
+// sdk/rvl_dvd.cpp
+bool IsDvdCompletion(uint32_t reply);
+void CompleteDvdCommand(Cpu& cpu, uint32_t completion, uint32_t interrupted_context);
+}  // namespace dualize
+
 namespace
 {
 using dualize::Cpu;
@@ -182,7 +189,12 @@ extern "C" bool rvl_IPCInterruptHandler(CPUState* ctx)
   const uint32_t context = ctx->gpr[4];
   uint32_t reply;
   while (GetMachine(cpu).ios.PopReply(&reply))
-    Complete(cpu, Virtual(reply), context);
+  {
+    if (dualize::IsDvdCompletion(reply))
+      dualize::CompleteDvdCommand(cpu, reply, context);
+    else
+      Complete(cpu, Virtual(reply), context);
+  }
   ctx->downcount -= 20;
   return true;
 }

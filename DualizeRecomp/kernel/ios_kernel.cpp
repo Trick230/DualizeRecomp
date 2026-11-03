@@ -105,6 +105,16 @@ void IosKernel::Submit(uint32_t address)
   ExecuteCommand(address);
 }
 
+void IosKernel::PostCompletion(uint32_t completion, int64_t delay)
+{
+  m_machine.scheduler.Schedule(delay, m_queue_event, completion);
+}
+
+ios::Device& IosKernel::Di()
+{
+  return *m_devices[DeviceId("/dev/di")];
+}
+
 bool IosKernel::PopReply(uint32_t* address)
 {
   if (m_replies.empty())

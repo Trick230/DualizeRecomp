@@ -32,6 +32,10 @@ public:
   // the device's delay, with the IPC interrupt raised while any is waiting.
   void Submit(uint32_t address);
   bool PopReply(uint32_t* address);
+  // A command an SDK native served itself: after delay, its completion comes out
+  // of PopReply in the replies' place, under the same interrupt.
+  void PostCompletion(uint32_t completion, int64_t delay);
+  ios::Device& Di();
   // A reply a state saved before SDK-level IPC had left in the mailbox.
   void AdoptMailboxReply(uint32_t address);
 

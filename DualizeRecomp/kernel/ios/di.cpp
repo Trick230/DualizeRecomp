@@ -201,6 +201,9 @@ public:
   // (in flight when a state from before the native driver was loaded).
   void FinishHostCommand(bool success) { Finish(success ? Success : DriveError); }
 
+  std::optional<DiHostReply> HostRead(uint32_t address, uint32_t length, uint32_t offset_in_words);
+  std::optional<DiHostReply> HostClearCover();
+
 private:
   // Dolphin's ExecutingCommandInfo, byte for byte.
   struct Executing
@@ -588,6 +591,45 @@ void DiDevice::Event(uint32_t event, uint32_t data)
   }
 }
 
+std::optional<DiHostReply> DiDevice::HostRead(uint32_t address, uint32_t length, uint32_t offset_in_words)
+{
+  if (m_executing || m_partition == PARTITION_NONE || m_drive_state == DriveState::DiscChangeDetected ||
+      m_drive_state == DriveState::MotorStopped || m_drive_state == DriveState::DiscIdNotRead)
+    return std::nullopt;
+  const DiscRead read{uint64_t{offset_in_words} << 2, length, address, m_partition,
+                      m_config.disc->HasWiiHashes() ? WII_BLOCK_DATA_SIZE : ECC_BLOCK_SIZE};
+  if (read.offset + read.length > m_config.disc->EndOffset())
+    return std::nullopt;
+  m_last_length = offset_in_words;
+  if (m_drive_state == DriveState::ReadyNoReadsMade)
+    m_drive_state = DriveState::Ready;
+  int64_t ticks = Microseconds(READ_LATENCY_US);
+  bool ok = true;
+  const uint32_t blocks = read.Blocks();
+  for (uint32_t i = 0; i < blocks; ++i)
+  {
+    const auto [offset, size] = read.Block(i);
+    ticks += static_cast<int64_t>(uint64_t{size} * m_host.ticks_per_second / BUFFER_TRANSFER_RATE);
+    const uint32_t to = address + static_cast<uint32_t>(offset - read.offset);
+    // A block bound for unmapped memory is read and dropped, like a DMA there.
+    uint8_t* out = m_memory.Pointer(to, size);
+    ok = (!out || m_config.disc->Read(offset, size, out, read.partition)) && ok;
+    if (out)
+      m_memory.DmaWritten(to, size);
+  }
+  if (!ok)
+    m_error = ERROR_READ;
+  return DiHostReply{ok ? Success : DriveError, ticks};
+}
+
+std::optional<DiHostReply> DiDevice::HostClearCover()
+{
+  if (m_executing)
+    return std::nullopt;
+  m_dicvr &= ~DICVR_CVRINT;
+  return DiHostReply{Success, IPC_OVERHEAD};
+}
+
 void DiDevice::Finish(Result result)
 {
   if (!m_executing)
@@ -630,5 +672,15 @@ std::unique_ptr<Device> CreateDi(const Host& host, const Config& config, uint32_
 void FinishHostDiCommand(Device& di, bool success)
 {
   static_cast<DiDevice&>(di).FinishHostCommand(success);
+}
+
+std::optional<DiHostReply> HostDiRead(Device& di, uint32_t address, uint32_t length, uint32_t offset_in_words)
+{
+  return static_cast<DiDevice&>(di).HostRead(address, length, offset_in_words);
+}
+
+std::optional<DiHostReply> HostDiClearCover(Device& di)
+{
+  return static_cast<DiDevice&>(di).HostClearCover();
 }
 }  // namespace dualize::ios
