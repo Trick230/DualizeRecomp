@@ -100,6 +100,8 @@ public:
   // The host's GameCube pad on a port; false while nothing drives it.
   bool ReadGcPad(int port, GcPadInput* input);
   void SetGcRumble(int port, bool on);
+  // Applies what the render thread signalled, with everything written done.
+  void SyncGpu();
 
   const MachineConfig config;
   Memory memory;
@@ -109,7 +111,7 @@ public:
   VideoInterface vi;
   ExpansionBus exi;
   AudioInterface ai;
-  GraphicsRegisters gfx;
+  GpuSignals gfx;
   Hollywood hollywood;
   IosKernel ios;
   Wud wud;
@@ -120,7 +122,6 @@ private:
   void StartDsp();
   void DoState(StateIO& io, uint32_t version);
   void ServiceRequests();
-  void SyncGpu();
   static bool SpeakerEnabled();
   static void ReadWiimote(void* user, int index, ios::WiimoteInput* input);
   static void WiimoteSpeaker(void* user, int index, const int16_t* samples, uint32_t count,

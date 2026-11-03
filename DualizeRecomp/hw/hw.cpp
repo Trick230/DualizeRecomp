@@ -33,12 +33,6 @@ uint32_t ProcessorInterface::Read32(uint32_t offset) const
     return m_cause;
   case 0x04:
     return m_mask;
-  case 0x0C:
-    return m_fifo_base;
-  case 0x10:
-    return m_fifo_end;
-  case 0x14:
-    return m_fifo_write;
   case 0x24:
     return m_reset_code;
   case 0x2C:
@@ -60,15 +54,6 @@ void ProcessorInterface::Write32(uint32_t offset, uint32_t value)
     m_mask = value;
     Update();
     break;
-  case 0x0C:
-    m_fifo_base = value & 0xFFFFFFE0;
-    break;
-  case 0x10:
-    m_fifo_end = value & 0xFFFFFFE0;
-    break;
-  case 0x14:
-    m_fifo_write = value & 0xFFFFFFE0;
-    break;
   case 0x18:
     // GXAbortFrame: drop what the CPU still holds of the next burst.
     if (value & 1)
@@ -86,12 +71,19 @@ void ProcessorInterface::DoState(StateIO& io)
 {
   io.Do(m_cause);
   io.Do(m_mask);
-  io.Do(m_fifo_base);
-  io.Do(m_fifo_end);
-  io.Do(m_fifo_write);
   io.Do(m_reset_code);
   if (io.Reading())
     Update();
+}
+
+void ProcessorInterface::DoLegacyState(StateIO& io)
+{
+  io.Do(m_cause);
+  io.Do(m_mask);
+  uint32_t fifo[3];
+  io.Do(fifo);
+  io.Do(m_reset_code);
+  Update();
 }
 
 // ---------------------------------------------------------------------------
@@ -667,98 +659,46 @@ void AudioInterface::DoState(StateIO& io)
 }
 
 // ---------------------------------------------------------------------------
-// Command processor, pixel engine, memory interface
+// The GPU's signals
 
 namespace
 {
-constexpr uint16_t PE_TOKEN_ENABLE = 1u << 0;
-constexpr uint16_t PE_FINISH_ENABLE = 1u << 1;
-constexpr uint16_t PE_TOKEN = 1u << 2;
-constexpr uint16_t PE_FINISH = 1u << 3;
-
 constexpr uint32_t POSTED_FINISH = 1u << 0;
 constexpr uint32_t POSTED_TOKEN = 1u << 1;
 constexpr uint32_t POSTED_TOKEN_INTERRUPT = 1u << 2;
 }  // namespace
 
-uint16_t GraphicsRegisters::ReadCp(uint32_t offset) const
+void GpuSignals::AckFinish()
 {
-  switch (offset &= 0x7E)
-  {
-  case 0x00:
-    return 0x000C;  // the FIFO is always drained: read idle, command idle
-  case 0x04:
-    return 0;
-  default:
-    return m_cp[offset >> 1];
-  }
+  m_signal_finish = false;
+  UpdateInterrupts();
 }
 
-void GraphicsRegisters::WriteCp(uint32_t offset, uint16_t value)
+void GpuSignals::AckToken()
 {
-  m_cp[(offset >> 1) & 0x3F] = value;
+  m_signal_token = false;
+  UpdateInterrupts();
 }
 
-uint16_t GraphicsRegisters::ReadPe(uint32_t offset) const
+void GpuSignals::UpdateInterrupts()
 {
-  switch (offset &= 0x7E)
-  {
-  case 0x00:
-  case 0x02:
-  case 0x04:
-  case 0x06:
-  case 0x08:
-    return m_pe_conf[offset >> 1];
-  case 0x0A:
-    return m_pe_control;
-  case 0x0E:
-    return m_token;
-  default:
-    return 0;  // bounding box and performance counters are not modelled
-  }
+  m_machine.pi.SetInterrupt(PI_INT_PE_TOKEN, m_signal_token);
+  m_machine.pi.SetInterrupt(PI_INT_PE_FINISH, m_signal_finish);
 }
 
-void GraphicsRegisters::WritePe(uint32_t offset, uint16_t value)
-{
-  switch (offset &= 0x7E)
-  {
-  case 0x00:
-  case 0x02:
-  case 0x04:
-  case 0x06:
-  case 0x08:
-    m_pe_conf[offset >> 1] = value;
-    break;
-  case 0x0A:
-    if (value & PE_TOKEN)
-      m_signal_token = false;
-    if (value & PE_FINISH)
-      m_signal_finish = false;
-    m_pe_control = value & (PE_TOKEN_ENABLE | PE_FINISH_ENABLE);
-    UpdateInterrupts();
-    break;
-  }
-}
-
-void GraphicsRegisters::UpdateInterrupts()
-{
-  m_machine.pi.SetInterrupt(PI_INT_PE_TOKEN, m_signal_token && (m_pe_control & PE_TOKEN_ENABLE));
-  m_machine.pi.SetInterrupt(PI_INT_PE_FINISH, m_signal_finish && (m_pe_control & PE_FINISH_ENABLE));
-}
-
-void GraphicsRegisters::PostDrawDone()
+void GpuSignals::PostDrawDone()
 {
   m_posted.fetch_or(POSTED_FINISH, std::memory_order_release);
 }
 
-void GraphicsRegisters::PostToken(uint16_t token, bool interrupt)
+void GpuSignals::PostToken(uint16_t token, bool interrupt)
 {
   m_posted_token.store(token, std::memory_order_relaxed);
   m_posted.fetch_or(POSTED_TOKEN | (interrupt ? POSTED_TOKEN_INTERRUPT : 0),
                     std::memory_order_release);
 }
 
-void GraphicsRegisters::Poll()
+void GpuSignals::Poll()
 {
   if (m_posted.load(std::memory_order_relaxed) == 0)
     return;
@@ -772,12 +712,8 @@ void GraphicsRegisters::Poll()
   UpdateInterrupts();
 }
 
-void GraphicsRegisters::DoState(StateIO& io)
+void GpuSignals::DoState(StateIO& io)
 {
-  io.Do(m_cp);
-  io.Do(m_mi);
-  io.Do(m_pe_conf);
-  io.Do(m_pe_control);
   io.Do(m_token);
   io.Do(m_signal_token);
   io.Do(m_signal_finish);
@@ -786,6 +722,18 @@ void GraphicsRegisters::DoState(StateIO& io)
     m_posted.store(0);
     UpdateInterrupts();
   }
+}
+
+void GpuSignals::DoLegacyState(StateIO& io)
+{
+  std::array<uint16_t, 0x40> cp, mi;
+  std::array<uint16_t, 5> pe_conf;
+  uint16_t pe_control;
+  io.Do(cp);
+  io.Do(mi);
+  io.Do(pe_conf);
+  io.Do(pe_control);
+  DoState(io);
 }
 
 // ---------------------------------------------------------------------------

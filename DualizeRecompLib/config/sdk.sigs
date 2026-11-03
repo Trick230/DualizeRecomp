@@ -24,6 +24,8 @@ rvl_OSSetPeriodicAlarm 84 9421FFE0 282323D5186B9174
 rvl_OSCancelAlarm 118 9421FFE0 836B05F326866686
 rvl_DecrementerExceptionCallback 22C 9421FD20 6220CEE09190C739 jump
 rvl_OSDispatchInterrupt 2A4 9421FFE0 7B0A53661C41579B jump
+rvl_GXFinishInterruptHandler 80 9421FD20 D5E93D3B88B28E46
+rvl_GXTokenInterruptHandler 84 9421FD20 22425621AF37140F
 rvl_VIRetraceHandler 810 9421FD10 EB954488BDBFE65E
 rvl_VIInitHardware 210 9421FFE0 830B2C323D81F7D8
 rvl_VIGetNextField 9C 9421FFF0 83E2895BD947F8C8
@@ -58,6 +60,11 @@ rvl_StartSyncDevice 134 9421FFE0 3E4B4F3F8268BB12
 
 # What the .cpp natives call and read where this game's link put it: SDK
 # functions, data and small-data (r13) offsets, read off the natives' code.
+# rvl_gx.cpp
+define GX_DRAW_DONE_CALLBACK_SDA imm(rvl_GXFinishInterruptHandler+28)
+define GX_DRAW_DONE_FLAG_SDA imm(rvl_GXFinishInterruptHandler+2C)
+define GX_FINISH_QUEUE_SDA imm(rvl_GXFinishInterruptHandler+64)
+define GX_DRAW_SYNC_CALLBACK_SDA imm(rvl_GXTokenInterruptHandler+18)
 # rvl_alarm.cpp
 define OS_ALARM_QUEUE_SDA_OFFSET imm(rvl_OSCancelAlarm+48)
 define OS_LOAD_CONTEXT call(rvl_DecrementerExceptionCallback+3C)

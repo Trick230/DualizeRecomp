@@ -29,11 +29,12 @@ namespace
 constexpr uint32_t GC_EPOCH = 0x386D4380;  // 2000-01-01, Unix seconds
 constexpr int64_t DSP_UPDATE_PERIOD = Scheduler::CPU_CLOCK / 1000;
 constexpr uint32_t STATE_MAGIC = 0x5354474D;  // "MGTS"
-constexpr uint32_t STATE_VERSION = 3;
+constexpr uint32_t STATE_VERSION = 4;
 // Version 1 still kept the SI and EXI register files, versions 1 and 2 the
 // VI's.
 constexpr uint32_t STATE_VERSION_REGISTER_SI_EXI = 1;
 constexpr uint32_t STATE_VERSION_REGISTER_VI = 2;
+constexpr uint32_t STATE_VERSION_REGISTER_GX = 3;
 
 // Seconds since 1970 on the local clock.
 int64_t LocalTimeNow()
@@ -511,12 +512,15 @@ uint32_t Machine::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
   };
   switch (physical >> 12)
   {
+  // GX lives at the SDK (sdk/rvl_gx.cpp): what of it still polls the CP's
+  // status or the PE's token sees everything written so far done, and the
+  // rest reads idle.
   case 0x0C000:
     SyncGpu();
-    return read16([&](uint32_t a) { return uint32_t{gfx.ReadCp(a & 0xFFF)}; });
+    return read16([&](uint32_t a) { return (a & 0xFFF) == 0x00 ? 0x000Cu : 0u; });
   case 0x0C001:
     SyncGpu();
-    return read16([&](uint32_t a) { return uint32_t{gfx.ReadPe(a & 0xFFF)}; });
+    return read16([&](uint32_t a) { return (a & 0xFFF) == 0x0E ? uint32_t{gfx.Token()} : 0u; });
   case 0x0C002:
     // The VI lives at the SDK (sdk/rvl_vi.cpp); what of it still touches the
     // registers (VIInit, OSFatal's video setup) reads them idle.
@@ -524,7 +528,7 @@ uint32_t Machine::MmioRead(uint32_t physical, uint32_t size, uint32_t pc)
   case 0x0C003:
     return read32([&](uint32_t a) { return pi.Read32(a & 0xFFF); });
   case 0x0C004:
-    return read16([&](uint32_t a) { return uint32_t{gfx.ReadMi(a & 0xFFF)}; });
+    return 0;  // no memory protection faults to report
   case 0x0C005:
     return read16([&](uint32_t a) { return uint32_t{dsp->Read(a & 0xFFFF)}; });
   case 0x0C006:
@@ -576,15 +580,13 @@ void Machine::MmioWrite(uint32_t physical, uint32_t value, uint32_t size, uint32
   switch (physical >> 12)
   {
   case 0x0C000:
-    return write16([&](uint32_t a, uint16_t v) { gfx.WriteCp(a & 0xFFF, v); });
   case 0x0C001:
-    return write16([&](uint32_t a, uint16_t v) { gfx.WritePe(a & 0xFFF, v); });
+  case 0x0C004:
+    return;  // GX lives at the SDK
   case 0x0C002:
     return;  // the VI lives at the SDK
   case 0x0C003:
     return write32([&](uint32_t a, uint32_t v) { pi.Write32(a & 0xFFF, v); });
-  case 0x0C004:
-    return write16([&](uint32_t a, uint16_t v) { gfx.WriteMi(a & 0xFFF, v); });
   case 0x0C005:
     return write16([&](uint32_t a, uint16_t v) { dsp->Write(a & 0xFFFF, v); });
   case 0x0C006:
@@ -785,7 +787,10 @@ void Machine::DoState(StateIO& io, uint32_t version)
   io.Marker(0x3E3E0001);
   scheduler.DoState(io);
   cpu.DoState(io);
-  pi.DoState(io);
+  if (version <= STATE_VERSION_REGISTER_GX)
+    pi.DoLegacyState(io);
+  else
+    pi.DoState(io);
   if (version <= STATE_VERSION_REGISTER_VI)
     vi.DoLegacyState(io);
   else
@@ -800,7 +805,10 @@ void Machine::DoState(StateIO& io, uint32_t version)
     exi.DoState(io);
   }
   ai.DoState(io);
-  gfx.DoState(io);
+  if (version <= STATE_VERSION_REGISTER_GX)
+    gfx.DoLegacyState(io);
+  else
+    gfx.DoState(io);
   hollywood.DoState(io);
   io.Marker(0x3E3E0002);
   ios.DoState(io);

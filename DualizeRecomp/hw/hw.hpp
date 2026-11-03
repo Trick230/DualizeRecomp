@@ -45,6 +45,8 @@ public:
   uint32_t Read32(uint32_t offset) const;
   void Write32(uint32_t offset, uint32_t value);
   void DoState(StateIO& io);
+  // A state from when the PI held the CPU FIFO's registers.
+  void DoLegacyState(StateIO& io);
 
 private:
   void Update();
@@ -52,7 +54,6 @@ private:
   Machine& m_machine;
   uint32_t m_cause = PI_INT_RST_BUTTON | PI_INT_VI;
   uint32_t m_mask = 0;
-  uint32_t m_fifo_base = 0, m_fifo_end = 0, m_fifo_write = 0;
   uint32_t m_reset_code = 0;
 };
 
@@ -207,19 +208,16 @@ private:
   uint64_t m_cycles_per_sample = 0;
 };
 
-// Pixel engine interrupts and token, set by the render thread's draw-done and
-// token markers (queued, applied on the CPU thread), plus the command
-// processor's and memory interface's plain register files.
-class GraphicsRegisters
+// The draw-done and token signals behind the SDK's GX natives (sdk/rvl_gx.cpp),
+// set by the render thread's markers (queued, applied on the CPU thread). The
+// guest sees no CP, PE or MI registers.
+class GpuSignals
 {
 public:
-  explicit GraphicsRegisters(Machine& machine) : m_machine(machine) {}
-  uint16_t ReadCp(uint32_t offset) const;
-  void WriteCp(uint32_t offset, uint16_t value);
-  uint16_t ReadPe(uint32_t offset) const;
-  void WritePe(uint32_t offset, uint16_t value);
-  uint16_t ReadMi(uint32_t offset) const { return m_mi[(offset >> 1) & 0x3F]; }
-  void WriteMi(uint32_t offset, uint16_t value) { m_mi[(offset >> 1) & 0x3F] = value; }
+  explicit GpuSignals(Machine& machine) : m_machine(machine) {}
+  uint16_t Token() const { return m_token; }
+  void AckFinish();
+  void AckToken();
 
   // Render thread.
   void PostDrawDone();
@@ -227,15 +225,13 @@ public:
   // CPU thread: applies what the render thread posted.
   void Poll();
   void DoState(StateIO& io);
+  // A state from when the CP, PE and MI were register files.
+  void DoLegacyState(StateIO& io);
 
 private:
   void UpdateInterrupts();
 
   Machine& m_machine;
-  std::array<uint16_t, 0x40> m_cp{};
-  std::array<uint16_t, 0x40> m_mi{};
-  std::array<uint16_t, 5> m_pe_conf{};  // ZCONF..ALPHAREAD
-  uint16_t m_pe_control = 0;
   uint16_t m_token = 0;
   bool m_signal_token = false, m_signal_finish = false;
 

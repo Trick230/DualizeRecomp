@@ -49,12 +49,10 @@ uint32_t MapBits(uint32_t value, std::initializer_list<BitMap> bits)
 
 // The OS interrupts (__OS_INTERRUPT_*, bit 31 - n) behind the PI causes. The
 // SI and EXI raise none: their SDK natives finish every transfer in the call.
+// Nor does the MI: nothing faults on memory protection.
 uint32_t OsInterrupts(Machine& machine, uint32_t cause)
 {
   uint32_t os = 0;
-  if (cause & PI_INT_MEM)  // MI_INTSR: the four protected regions, address
-    os |= MapBits(machine.gfx.ReadMi(0x1E), {{0x1, 0x80000000}, {0x2, 0x40000000}, {0x4, 0x20000000},
-                                             {0x8, 0x10000000}, {0x10, 0x08000000}});
   if ((cause & PI_INT_DSP) && machine.dsp)  // DSP_CSR: AI DMA, ARAM DMA, DSP
     os |= MapBits(machine.dsp->Read(0x500A), {{0x08, 0x04000000}, {0x20, 0x02000000}, {0x80, 0x01000000}});
   if (cause & PI_INT_AI)  // AI_CR: the sample counter
