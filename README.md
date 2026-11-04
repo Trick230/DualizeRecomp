@@ -290,7 +290,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 3. Native OS/SDK | Natives, codegen, native DSP/IOS/input, a runtime with no emulator, the stage RSO modules | ✅ |
 | 4. Interpolation | Render between game ticks at the display's rate | ✅ 240 Hz; the game names its cameras, skinned draws pair by their bones |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
-| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | 🟡 Functions, direct calls, live cycle counter, safepoints; registers as locals left |
+| 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ✅ Functions, direct calls, live cycle counter, safepoints, registers as locals where they pay (no speed gained in the forest, see below) |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 | 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 4×, render scale with an area filter, 16× anisotropic |
 | 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | ⏳ After GX at the API |
@@ -342,7 +342,14 @@ renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
 shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
-Next, in order: phase 6, GX at the API and phase 9. The interpreter stays as the
+Registers as locals, measured in the forest uncapped: the old code reached
+~626% speed, every register in a local ~586% (each one loaded on entry and
+stored on the way out, past what x86-64 can keep in registers), and `restrict`
+on the context with or without locals ~624%. A register now gets a local only
+where it is touched well more often than it has to move, and that wins no speed
+either; guest RAM hashes match the old code's in the gate and the forest.
+
+Next, in order: GX at the API and phase 9. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,
