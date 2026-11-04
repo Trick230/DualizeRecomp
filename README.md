@@ -293,7 +293,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ✅ Functions, direct calls, live cycle counter, safepoints, registers as locals where they pay (no speed gained in the forest, see below) |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 | 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 4×, render scale with an area filter, 16× anisotropic |
-| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | ⏳ After GX at the API |
+| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | 🟡 Started: a layer over both APIs, one HLSL source through DXC; not linked into the game yet |
 
 What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
 
@@ -337,9 +337,9 @@ render scale):
 | Seed pipeline cache | `DualizeRecomp/resources/initial_pipeline_cache.db`, merged into the user's cache at each start; `scripts/pipeline_seed.py` adds a played cache to it. Seeded with MSAA on, it serves `--msaa 1` too | ✅ Seeded from the forest; a playthrough of every stage fills it |
 | Ubershader | One shader that reads the TEV, texgen and lighting setup from a per-draw table, drawing anything whose own pipeline is still compiling, so a never-seen shader doesn't pop in. Its pipelines vary only by fixed-function state (blend, depth, cull): they're derived from the cache at boot, and the frame waits for a never-seen combination of those, so no draw is skipped. `AURORA_FORCE_UBERSHADER=1` draws everything with it, `2` every other pipeline | ✅ Entering a stage with none of its shaders cached: 10708 draws by the ubershader, 0 skipped, worst frame 105 ms (one such wait) and otherwise 65 ms or less. Forced on every draw, with and without GX state randomized (texgens with emboss, indirect, TEV, lights, fog, alpha compare, lines and points; deliberate errors in those change the frames): the forest's frames are bit-identical, others differ by 1/255 in a few pixels at most. All of a frame on it is slow (forest 25 fps), which never happens in play. Unthrottled speed unchanged (625%) |
 
-Phase 9, the native renderer, comes after GX at the API, when the whole
-renderer is ours: Aurora's backend on D3D12 and Vulkan without Dawn, the TEV
-shaders as HLSL/SPIR-V. It lifts WebGPU's limits (MSAA 8×) and drops a layer
+Phase 9, the native renderer: Aurora's backend on D3D12 and Vulkan without Dawn,
+with the same features on both, and the TEV shaders as one HLSL source that DXC
+compiles to DXIL and SPIR-V. Dawn stays until the numbers match. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
 Registers as locals, measured in the forest uncapped: the old code reached
@@ -349,7 +349,7 @@ on the context with or without locals ~624%. A register now gets a local only
 where it is touched well more often than it has to move, and that wins no speed
 either; guest RAM hashes match the old code's in the gate and the forest.
 
-Next, in order: GX at the API and phase 9. The interpreter stays as the
+Next, in order: phase 9 and GX at the API. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,
