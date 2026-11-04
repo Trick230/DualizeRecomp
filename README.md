@@ -132,6 +132,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | Variable | Effect |
 |---|---|
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
+| `AURORA_FRAME_DUMP=<dir>` | Write each frame's hash to `hashes.txt` there and every 30th frame's pixels, to compare renderers by numbers (`scripts/frame_compare.py`) |
 | `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
 | `DUALIZE_IOS_TRACE=1` | Log each IOS request (open path, ioctl number, sizes), its reply and when the PPC receives it |
 | `DUALIZE_PAD_TARGET=classic` | Gamepads drive the Classic Controller instead of the GameCube pad |
