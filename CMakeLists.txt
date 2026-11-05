@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 # DualizeRecomp: NiGHTS: Journey of Dreams (Wii) as a native PC program.
 #
 #   tools/DolRecomp    the PowerPC recompiler and what its output compiles with
-#   thirdparty/aurora  the GX renderer (WebGPU through Dawn) and SDL3
+#   thirdparty/aurora  the GX renderer (D3D12 and Vulkan) and SDL3
 #   DualizeRecompLib   the game's code, recompiled at build time from the disc
 #   DualizeRecomp      the runtime and the executable
 
