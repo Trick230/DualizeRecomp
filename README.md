@@ -294,7 +294,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ✅ Functions, direct calls, live cycle counter, safepoints, registers as locals where they pay (no speed gained in the forest, see below) |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
 | 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 4×, render scale with an area filter, 16× anisotropic |
-| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | 🟡 Layer over both APIs done and tested against each other under their validation layers; the GX generator and the ubershader in HLSL compile offline for both (578 sources, 13 s); the game doesn't draw with them yet |
+| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | 🟡 Layer over both APIs done and tested against each other under their validation layers; the GX generator and the ubershader in HLSL compile offline for both (578 sources, 13 s); on branch `native` the forest runs on both without Dawn, D3D12 matching Dawn's frames but for a few pixels off by 2 of 255, at the same speed; interpolation, ImGui, texture replacement and the other scenes are next |
 
 What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
 
