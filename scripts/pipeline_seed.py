@@ -9,15 +9,30 @@ leaves nothing to compile (or pop in) mid-play on a fresh install.
 
 The default source is the user's own cache
 (%LOCALAPPDATA%/DualizeRecomp/Cache/NativeGX/pipeline_cache.db). Only rows
-of each type's newest config version are kept: older ones no longer load.
+of the config versions Aurora's sources define are kept: no others load.
 """
 import os
+import re
 import sqlite3
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEED = os.path.join(REPO, "DualizeRecomp", "resources", "initial_pipeline_cache.db")
 SCHEMA = 1
+AURORA = os.path.join(REPO, "thirdparty", "aurora", "lib")
+# Shader type: the header and constant holding its config version.
+VERSIONS = {
+    0: ("gfx/clear.hpp", "ClearPipelineConfigVersion"),
+    1: ("gx/pipeline.hpp", "GXPipelineConfigVersion"),
+}
+
+
+def config_versions():
+    versions = {}
+    for type_, (header, name) in VERSIONS.items():
+        text = open(os.path.join(AURORA, header), encoding="utf-8").read()
+        versions[type_] = int(re.search(rf"{name}\s*=\s*(\d+)", text).group(1))
+    return versions
 
 
 def default_cache():
@@ -61,10 +76,10 @@ def main(sources):
         )
         src.close()
         print(f"{path}: {len(rows)} rows")
-    seed.execute(
-        "DELETE FROM pipeline_cache WHERE config_version < "
-        "(SELECT MAX(config_version) FROM pipeline_cache AS newest WHERE newest.type = pipeline_cache.type)"
-    )
+    versions = config_versions()
+    seed.execute(f"DELETE FROM pipeline_cache WHERE type NOT IN ({', '.join(map(str, versions))})")
+    for type_, version in versions.items():
+        seed.execute("DELETE FROM pipeline_cache WHERE type = ? AND config_version != ?", (type_, version))
     seed.commit()
     seed.execute("VACUUM")
     for type_, version, count in seed.execute(
