@@ -54,3 +54,15 @@ add_custom_command(TARGET DualizeRecomp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
         "$<TARGET_FILE_DIR:DualizeRecomp>/initial_pipeline_cache.db")
+# Their shaders, compiled for every backend so play doesn't wait on DXC.
+set(DUALIZE_SHADER_PACKS
+    "${CMAKE_CURRENT_BINARY_DIR}/shaders_d3d12.bin"
+    "${CMAKE_CURRENT_BINARY_DIR}/shaders_vulkan.bin")
+add_custom_command(OUTPUT ${DUALIZE_SHADER_PACKS}
+    COMMAND aurora_shader_pack
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS aurora_shader_pack "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
+    COMMENT "Compiling the pipeline seed's shaders"
+    VERBATIM)
+add_custom_target(DualizeShaderPacks ALL DEPENDS ${DUALIZE_SHADER_PACKS})
