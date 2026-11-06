@@ -269,6 +269,7 @@ bool Machine::Start(std::string* error)
       .stats = std::getenv("DUALIZE_GX_STATS") != nullptr,
       .hidden = config.hidden,
       .ambient_occlusion = config.ambient_occlusion,
+      .ambient_occlusion_min_height = config.ambient_occlusion_min_height,
   };
   const AuroraFifoHost gx_host{
       .user = this,
