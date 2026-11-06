@@ -39,7 +39,7 @@ struct MachineConfig
   bool interpolate = true;    // only while throttled to the game's rate
   uint32_t present_rate = 0;  // without vsync; 0 = the display's refresh rate
   uint32_t width = 1280, height = 960;
-  uint32_t msaa = 4;          // samples a pixel: 1 or 4 (WebGPU allows no other)
+  uint32_t msaa = 4;          // samples a pixel: 1, 2, 4 or 8 (capped at the GPU's most)
   float render_scale = 1.0f;  // frame buffer over window; above 1 reduced by an area filter
   uint32_t hash_every = 0;    // print a hash of guest RAM every n fields (0: never)
   std::filesystem::path record_input, replay_input;  // input movies (hid/input_movie.hpp)

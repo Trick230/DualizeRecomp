@@ -3,7 +3,7 @@
 //   DualizeRecomp --game <extracted disc>
 //       [--user <dir>] [--load-state <file>] [--automation-dir <dir>]
 //       [--unthrottled] [--no-vsync] [--no-interpolation] [--present-rate <hz>]
-//       [--window <width>x<height>] [--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>]
+//       [--window <width>x<height>] [--msaa <1|2|4|8>] [--render-scale <x>] [--idle-pc <hex>]
 //       [--hash-every <fields>] [--record-input <file>] [--replay-input <file>]
 //       [--log-entries <file>] [--hidden]
 //
@@ -242,7 +242,7 @@ int Usage()
   std::fprintf(stderr, "usage: DualizeRecomp --game <dir> [--user <dir>] "
                        "[--load-state <file>] [--automation-dir <dir>] [--unthrottled] "
                        "[--no-vsync] [--no-interpolation] [--present-rate <hz>] [--window <w>x<h>] "
-                       "[--msaa <1|4>] [--render-scale <x>] [--idle-pc <hex>] [--hash-every <fields>] "
+                       "[--msaa <1|2|4|8>] [--render-scale <x>] [--idle-pc <hex>] [--hash-every <fields>] "
                        "[--record-input <file>] [--replay-input <file>] [--log-entries <file>] [--hidden]\n");
   return 2;
 }
@@ -286,7 +286,8 @@ int main(int argc, char** argv)
       config.present_rate = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
     else if (arg == "--window" && (v = value()) && std::sscanf(v, "%ux%u", &config.width, &config.height) == 2)
       continue;
-    else if (arg == "--msaa" && (v = value()) && (std::string_view(v) == "1" || std::string_view(v) == "4"))
+    else if (arg == "--msaa" && (v = value()) && (std::string_view(v) == "1" || std::string_view(v) == "2" ||
+                                                std::string_view(v) == "4" || std::string_view(v) == "8"))
       config.msaa = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
     else if (arg == "--render-scale" && (v = value()) && std::strtof(v, nullptr) >= 0.25f &&
              std::strtof(v, nullptr) <= 4.0f)

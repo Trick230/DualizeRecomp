@@ -1,6 +1,6 @@
 """Compares renderers by numbers: replays recorded inputs and dumps the frames.
 
-    python scripts/frame_compare.py run <tag> [--exe <path>] [--env K=V ...] [scene ...]
+    python scripts/frame_compare.py run <tag> [--exe <path>] [--env K=V ...] [--arg <game arg> ...] [scene ...]
     python scripts/frame_compare.py diff <a> <b> [scene ...]
 
 Scenes come from the saved states in build/states/native and the input movies in
@@ -37,7 +37,7 @@ def run(argv):
     from automation import Game
 
     tag = argv.pop(0)
-    exe, env, scenes = None, {}, []
+    exe, env, args, scenes = None, {}, [], []
     while argv:
         arg = argv.pop(0)
         if arg == "--exe":
@@ -45,6 +45,8 @@ def run(argv):
         elif arg == "--env":
             key, _, value = argv.pop(0).partition("=")
             env[key] = value
+        elif arg == "--arg":
+            args.append(argv.pop(0))
         else:
             scenes.append(arg)
     for scene in scenes or SCENES:
@@ -60,7 +62,7 @@ def run(argv):
             state = SCENES[scene]
             game.start(state=os.path.join(STATES, state) if state else None, log=log,
                        extra_args=["--user", USER, "--no-interpolation",
-                                   "--replay-input", os.path.join(MOVIES, scene + ".movie")])
+                                   "--replay-input", os.path.join(MOVIES, scene + ".movie"), *args])
             deadline = time.time() + 300
             while game.proc.poll() is None and time.time() < deadline:
                 time.sleep(0.25)

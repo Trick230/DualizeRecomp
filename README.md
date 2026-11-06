@@ -114,7 +114,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--no-vsync` | Present without vsync, paced by a timer |
 | `--hidden` | Never show the window; everything still renders (scripted runs, which `scripts/automation.py` starts this way) |
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
-| `--msaa <1\|4>` | Multisample anti-aliasing (default 4) |
+| `--msaa <1\|2\|4\|8>` | Multisample anti-aliasing (default 4), capped at the GPU's most |
 | `--render-scale <x>` | Render at x times the window (0.25–4, default 1), reduced by an area filter |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
 | `--window <w>x<h>` | Initial window size |
@@ -328,7 +328,7 @@ render scale):
 
 | Step | What changes | Status |
 |---|---|---|
-| MSAA 4× | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. On by default (`--msaa 1` turns it off). WebGPU allows 1 or 4 samples | ✅ Forest at 1080p: as fast as without (530–585 presents/s, GPU-bound) |
+| MSAA | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. 4× by default, up to 8× (`--msaa 8`); `--msaa 1` turns it off | ✅ Forest at 1080p: as fast as without (530–585 presents/s, GPU-bound) |
 | Render scale | `--render-scale <x>` renders at x times the window (EFB copies, so shadows and bloom, follow) and reduces with an area (box) filter, so every rendered pixel counts; at 1× the frame goes straight to the present | ✅ Interpolation renders every present, so the cost scales with the present rate: forest at 1080p ×2 with MSAA ~120 presents/s, without ~270, ×1.5 ~210 |
 | Alpha-to-coverage | Unblended alpha-test cutouts (the forest's ferns and leaves) become coverage under MSAA: the edge spreads over about a pixel's samples instead of a hard discard. Only where the EFB keeps no alpha, as in all of NiGHTS | ✅ No measurable cost (forest ~450 presents/s either way) |
 | Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ✅ |
