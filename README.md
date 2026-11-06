@@ -114,7 +114,7 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `--no-vsync` | Present without vsync, paced by a timer |
 | `--hidden` | Never show the window; everything still renders (scripted runs, which `scripts/automation.py` starts this way) |
 | `--present-rate <hz>` | With `--no-vsync`: the present rate (default: the display's refresh rate) |
-| `--msaa <1\|2\|4\|8>` | Multisample anti-aliasing (default 4), capped at the GPU's most |
+| `--msaa <1\|2\|4\|8>` | Multisample anti-aliasing (default 8), capped at the GPU's most |
 | `--render-scale <x>` | Render at x times the window (0.25–4, default 1), reduced by an area filter |
 | `--unthrottled` | Run the game as fast as it goes (turns interpolation off) |
 | `--window <w>x<h>` | Initial window size |
@@ -293,7 +293,7 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ✅ Functions, direct calls, live cycle counter, safepoints, registers as locals where they pay (no speed gained in the forest, see below) |
 | 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
-| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 4×, render scale with an area filter, 16× anisotropic |
+| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 8× (default), render scale with an area filter, 16× anisotropic |
 | 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | 🟡 Layer over both APIs done and tested against each other under their validation layers; the GX generator and the ubershader in HLSL compile offline for both (578 sources, 13 s); the game runs on both without Dawn, with interpolation, ImGui and texture replacement: in all six test scenes D3D12 matches Dawn's frames but for at most 0.1% of pixels off by more than 2 of 255, at the same speed, and both backends run clean under validation; Vulkan ran about 8% slower uncapped until its upload buffers moved from CPU-visible VRAM to system memory, as on D3D12; both now run the forest at about 600% uncapped. Dawn is out of the build. The seed's shaders and aurora's own (copies, palettes, present, ImGui) ship compiled for both backends (`aurora_shader_pack`, 786 shaders each, 14 s at build time), so a first start builds all pipelines, ubershaders included, in about 50 ms on D3D12 and 200 ms on Vulkan and never runs DXC. Machines keep what they compile in `Cache/NativeGX/shaders_<backend>.bin`. MSAA goes up to 8×, at the same speed as 4× (the game's thread is the limit uncapped; the render thread idles a quarter of the time, so `handle_draw` was left alone), and an optimized depth clear value measured no gain even GPU-bound (3× scale, 8×), so targets keep none. GX at the API is next, if measured worth it |
 
 What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
@@ -328,7 +328,7 @@ render scale):
 
 | Step | What changes | Status |
 |---|---|---|
-| MSAA | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. 4× by default, up to 8× (`--msaa 8`); `--msaa 1` turns it off | ✅ Forest at 1080p uncapped: 4× and 8× as fast as each other (about 590% on D3D12) |
+| MSAA | Multisampled render targets, resolved for EFB copies and the present; depth copies read sample 0. 8× by default, capped at what the GPU does; `--msaa 1` turns it off | ✅ Forest at 1080p uncapped: 4× and 8× as fast as each other (about 590% on D3D12) |
 | Render scale | `--render-scale <x>` renders at x times the window (EFB copies, so shadows and bloom, follow) and reduces with an area (box) filter, so every rendered pixel counts; at 1× the frame goes straight to the present | ✅ Interpolation renders every present, so the cost scales with the present rate: forest at 1080p ×2 with MSAA ~120 presents/s, without ~270, ×1.5 ~210 |
 | Alpha-to-coverage | Unblended alpha-test cutouts (the forest's ferns and leaves) become coverage under MSAA: the edge spreads over about a pixel's samples instead of a hard discard. Only where the EFB keeps no alpha, as in all of NiGHTS | ✅ No measurable cost (forest ~450 presents/s either way) |
 | Anisotropic filtering | 16× on every mipmapped texture, not only where the game asks | ✅ |
