@@ -3,7 +3,7 @@
 //   DualizeRecomp --game <extracted disc>
 //       [--user <dir>] [--load-state <file>] [--automation-dir <dir>]
 //       [--unthrottled] [--no-vsync] [--no-interpolation] [--present-rate <hz>]
-//       [--window <width>x<height>] [--msaa <1|2|4|8>] [--render-scale <x>] [--idle-pc <hex>]
+//       [--window <width>x<height>] [--msaa <1|2|4|8>] [--render-scale <x>] [--no-ao] [--idle-pc <hex>]
 //       [--hash-every <fields>] [--record-input <file>] [--replay-input <file>]
 //       [--log-entries <file>] [--hidden]
 //
@@ -242,7 +242,7 @@ int Usage()
   std::fprintf(stderr, "usage: DualizeRecomp --game <dir> [--user <dir>] "
                        "[--load-state <file>] [--automation-dir <dir>] [--unthrottled] "
                        "[--no-vsync] [--no-interpolation] [--present-rate <hz>] [--window <w>x<h>] "
-                       "[--msaa <1|2|4|8>] [--render-scale <x>] [--idle-pc <hex>] [--hash-every <fields>] "
+                       "[--msaa <1|2|4|8>] [--render-scale <x>] [--no-ao] [--idle-pc <hex>] [--hash-every <fields>] "
                        "[--record-input <file>] [--replay-input <file>] [--log-entries <file>] [--hidden]\n");
   return 2;
 }
@@ -282,6 +282,8 @@ int main(int argc, char** argv)
       config.vsync = false;
     else if (arg == "--no-interpolation")
       config.interpolate = false;
+    else if (arg == "--no-ao")
+      config.ambient_occlusion = false;
     else if (arg == "--present-rate" && (v = value()))
       config.present_rate = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
     else if (arg == "--window" && (v = value()) && std::sscanf(v, "%ux%u", &config.width, &config.height) == 2)
