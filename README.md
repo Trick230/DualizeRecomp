@@ -293,11 +293,11 @@ by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
 | 4. Interpolation | Render between game ticks at the display's rate | ✅ 240 Hz; the game names its cameras, skinned draws pair by their bones |
 | 5. Own runtime | One CMake project with the recompiler, Aurora and our runtime | ✅ |
 | 6. Per-function recompiler | XenonRecomp-style functions: registers as locals, direct calls, hooks by symbol | ✅ Functions, direct calls, live cycle counter, safepoints, registers as locals where they pay (no speed gained in the forest, see below) |
-| 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | 🟡 Native interrupt entry, guest calls from the host, IOS and WUD at the SDK, dispatch cache; the rest below |
-| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | 🟡 MSAA 8× (default), render scale with an area filter, 16× anisotropic, GTAO ambient occlusion (on by default, `--no-ao`; fades into the game's fog; 1.5 ms a frame GPU-bound at 3× scale and 8×, down from 4.2; with 8× and interpolation an RTX 4060 keeps 240 presents a second at 1920×1080, at 94%; resolving the EFB only for color copies took 1 ms a frame off at 3×, and replays that skip the copies nothing in their frame samples took the GPU from 94% to 85% there) |
-| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | 🟡 Layer over both APIs done and tested against each other under their validation layers; the GX generator and the ubershader in HLSL compile offline for both (578 sources, 13 s); the game runs on both without Dawn, with interpolation, ImGui and texture replacement: in all six test scenes D3D12 matches Dawn's frames but for at most 0.1% of pixels off by more than 2 of 255, at the same speed, and both backends run clean under validation; Vulkan ran about 8% slower uncapped until its upload buffers moved from CPU-visible VRAM to system memory, as on D3D12; both now run the forest at about 600% uncapped. Dawn is out of the build. The seed's shaders and aurora's own (copies, palettes, present, ImGui) ship compiled for both backends (`aurora_shader_pack`, 786 shaders each, 14 s at build time), so a first start builds all pipelines, ubershaders included, in about 50 ms on D3D12 and 200 ms on Vulkan and never runs DXC. Machines keep what they compile in `Cache/NativeGX/shaders_<backend>.bin`. MSAA goes up to 8×, at the same speed as 4× (the game's thread is the limit uncapped; the render thread idles a quarter of the time, so `handle_draw` was left alone), and an optimized depth clear value measured no gain even GPU-bound (3× scale, 8×), so targets keep none. The matrix and light loads are GX at the API (below) |
+| 7. HLE runtime | The OS, IOS, WPAD and every device the game drives at the SDK boundary instead of the hardware: no register models left | ✅ Native interrupt entry, guest calls from the host, every device at the SDK, dispatch cache; the steps below |
+| 8. Image quality | Anti-aliasing, texture filtering and rendering above the display's resolution | ✅ MSAA 8× (default), render scale with an area filter, 16× anisotropic, GTAO ambient occlusion (on by default, `--no-ao`; fades into the game's fog; 1.5 ms a frame GPU-bound at 3× scale and 8×, down from 4.2; with 8× and interpolation an RTX 4060 keeps 240 presents a second at 1920×1080, at 94%; resolving the EFB only for color copies took 1 ms a frame off at 3×, and replays that skip the copies nothing in their frame samples took the GPU from 94% to 85% there) |
+| 9. Native renderer | Aurora on D3D12 and Vulkan directly instead of through Dawn (WebGPU), as UnleashedRecomp's plume does | ✅ Layer over both APIs done and tested against each other under their validation layers; the GX generator and the ubershader in HLSL compile offline for both (578 sources, 13 s); the game runs on both without Dawn, with interpolation, ImGui and texture replacement: in all six test scenes D3D12 matches Dawn's frames but for at most 0.1% of pixels off by more than 2 of 255, at the same speed, and both backends run clean under validation; Vulkan ran about 8% slower uncapped until its upload buffers moved from CPU-visible VRAM to system memory, as on D3D12; both now run the forest at about 600% uncapped. Dawn is out of the build. The seed's shaders and aurora's own (copies, palettes, present, ImGui) ship compiled for both backends (`aurora_shader_pack`, 786 shaders each, 14 s at build time), so a first start builds all pipelines, ubershaders included, in about 50 ms on D3D12 and 200 ms on Vulkan and never runs DXC. Machines keep what they compile in `Cache/NativeGX/shaders_<backend>.bin`. MSAA goes up to 8×, at the same speed as 4× (the game's thread is the limit uncapped; the render thread idles a quarter of the time, so `handle_draw` was left alone), and an optimized depth clear value measured no gain even GPU-bound (3× scale, 8×), so targets keep none. The matrix and light loads are GX at the API (below) |
 
-What phase 7 did and what is left of it (🔸 steps are architecture only: measured in the forest, they win no speed, so phase 6 comes first):
+What phase 7 did:
 
 | Step | What changes | Status |
 |---|---|---|
@@ -341,7 +341,7 @@ render scale):
 
 Phase 9, the native renderer: Aurora's backend on D3D12 and Vulkan without Dawn,
 with the same features on both, and the TEV shaders as one HLSL source that DXC
-compiles to DXIL and SPIR-V. Dawn stays until the numbers match. It lifts WebGPU's limits (MSAA 8×) and drops a layer
+compiles to DXIL and SPIR-V. Dawn stayed until the numbers matched. It lifts WebGPU's limits (MSAA 8×) and drops a layer
 between Aurora and the driver.
 
 Registers as locals, measured in the forest uncapped: the old code reached
@@ -351,7 +351,8 @@ on the context with or without locals ~624%. A register now gets a local only
 where it is touched well more often than it has to move, and that wins no speed
 either; guest RAM hashes match the old code's in the gate and the forest.
 
-Next: phase 9. The interpreter stays as the
+Next: an in-game graphics menu, a playthrough of every stage (bugs, and the
+seed pipeline cache) and interpolated FMVs. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,
