@@ -1166,6 +1166,13 @@ void Cpu::GatherPipeWrite(uint64_t value, uint32_t size)
   FlushGatherPipe();
 }
 
+void Cpu::GatherPipeAppend(const uint8_t* data, size_t size)
+{
+  std::memcpy(m_gather_ptr, data, size);
+  m_gather_ptr += size;
+  FlushGatherPipe();
+}
+
 void Cpu::FlushGatherPipe()
 {
   const size_t count = CurrentGatherSize();

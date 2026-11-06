@@ -126,6 +126,9 @@ public:
   // Gather pipe: the module appends short stores itself; a store that fills a
   // burst comes through HookExternalWrite.
   void GatherPipeWrite(uint64_t value, uint32_t size);
+  // Host bytes for the GX stream, where a run of stores to the pipe would put
+  // them (at most 96 at a time).
+  void GatherPipeAppend(const uint8_t* data, size_t size);
   void ResetGatherPipe() { m_gather_ptr = m_gather; }
   bool GatherPipeEmpty() const { return CurrentGatherSize() == 0; }
 
