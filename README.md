@@ -319,7 +319,7 @@ After phase 6, before the stage modules:
 
 | Step | What changes | Status |
 |---|---|---|
-| GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | 🟡 `GXLoadPosMtxImm`, `GXLoadNrmMtxImm`, `GXLoadTexMtxImm` and `GXLoadLightObjImm` are natives that put one host packet with the call and its data in the stream (aurora's README, "GX calls from the host"); a check mode that let the game's own packet follow each one matched it word for word over ~240,000 calls in four scenes. Forest uncapped 624% → 634%. The state setters would need the SDK's own state block kept exact and gain less: the game's GX functions were ~2–3% of the CPU thread, and vertex writes and display lists stay FIFO streams anyway |
+| GX at the API | `GXBegin`, the vertex writes, matrix loads and state setters call Aurora directly; no FIFO encoding and decoding | ✅ Done as far as it pays: `GXLoadPosMtxImm`, `GXLoadNrmMtxImm`, `GXLoadTexMtxImm` and `GXLoadLightObjImm` are natives that put one host packet with the call and its data in the stream (aurora's README, "GX calls from the host"); a check mode that let the game's own packet follow each one matched it word for word over ~240,000 calls in four scenes. Forest uncapped 624% → 634%. What is left of the game's GX library is 1.0% of the CPU thread (was 2.2%), spread over dozens of functions; the state setters would need the SDK's own state block kept exact for that, and vertex writes (the game's own stores) and display lists stay FIFO streams anyway, so they stay as they are |
 | AX mixing off the CPU thread | Each AX command list is mixed on a thread of its own while the game runs on; the DSP's mails arrive half a millisecond of DSP time later | ✅ Mixing from ~1.3% of the CPU thread to ~0.6% (the mailbox and the hand-off) |
 | AX at the SDK | `__DSP_boot_task` starts the host's mixer with no upload, `__AXOutNewFrame` hands it the command list, and `__DSPHandler` resumes the task at a mix's end, all with no mail to or from the guest in a frame. AX's voice and command list code stays the game's, and the mixer stays the ucode's model behind the DSP interrupt. Quitting or switching tasks still goes through the mailbox | ✅ |
 
@@ -351,7 +351,7 @@ on the context with or without locals ~624%. A register now gets a local only
 where it is touched well more often than it has to move, and that wins no speed
 either; guest RAM hashes match the old code's in the gate and the forest.
 
-Next, in order: phase 9 and the rest of GX at the API. The interpreter stays as the
+Next: phase 9. The interpreter stays as the
 safety net: in play nothing runs on it (the gate and the forest interpret
 nothing), but code the tables don't cover, an entry point inside a function
 and the system instructions the emitter leaves to it (`mtspr`, `mfspr`,
