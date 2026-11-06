@@ -4,7 +4,7 @@
 
 **NiGHTS: Journey of Dreams (Wii), statically recompiled to native PC code**
 
-Native CPU · native Wii runtime · WebGPU renderer · interpolated up to your refresh rate
+Native CPU · native Wii runtime · D3D12 / Vulkan renderer · interpolated up to your refresh rate
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x86__64-0078d4)
 ![Game](https://img.shields.io/badge/game-R7EE8P%20(USA)-7b3fe4)
@@ -37,14 +37,17 @@ between are **interpolated** at the display's refresh rate.
   [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) is laid out.
 - **High refresh gameplay.** 30 Hz game logic, presented at 60, 144 or 240 Hz
   with interpolated matrices, camera, lights and projected textures.
-- **5× headroom.** Uncapped gameplay runs at 550–600% of the Wii's speed
-  (~165–180 game frames a second), up from ~32 FPS at the start of the
-  native port.
-- **Modern host stack.** Aurora on Dawn (D3D12 / Vulkan / Metal) for video,
-  SDL3 for audio and gamepads. The fork keeps only what the game runs: its
-  Dolphin SDK layer, input, card/DVD, rmlui, Tracy, the D3D11/OpenGL backends
-  and every path the GX stream never reaches are gone (39k lines). ImGui stays
-  for in-game menus and costs nothing while none is open.
+- **6× headroom.** Uncapped gameplay runs at about 620% of the Wii's speed
+  (~187 game frames a second), up from ~32 FPS at the start of the native
+  port.
+- **Modern host stack.** Aurora on its own thin layer over D3D12 and Vulkan
+  for video (no Dawn or WebGPU in between), SDL3 for audio and gamepads. The
+  fork keeps only what the game runs: its Dolphin SDK layer, input, card/DVD,
+  rmlui, Tracy, the D3D11/OpenGL backends and every path the GX stream never
+  reaches are gone (39k lines). ImGui stays for in-game menus and costs
+  nothing while none is open.
+- **Image quality.** MSAA 8×, a render scale above the window's size,
+  16× anisotropic filtering and GTAO ambient occlusion.
 - **HD textures.** DDS or PNG packs named like Dolphin's dumps (`tex1_...`)
   go in `Load/Textures` in the user folder; `DUALIZE_DUMP_TEXTURES=1` writes
   the textures no pack replaces, to make one.
@@ -56,11 +59,11 @@ between are **interpolated** at the display's refresh rate.
 | **Version** | NiGHTS: Journey of Dreams, USA (`R7EE8P`) |
 | **Playable** | Cold boot, intro, Story Select and gameplay |
 | **Frame rate** | Game at 30 Hz, steady pacing (33.4 ms, σ ≈ 0.4 ms); shown at the display's refresh rate |
-| **Video** | Native renderer, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
+| **Video** | Native renderer on D3D12 (default) or Vulkan, 16:9 or 4:3 from the console's setting, letterboxed when the window doesn't match |
 | **Audio** | Native DSP/AX, the same samples as Dolphin's HLE, mixed on its own thread and out through SDL3 |
 | **Input** | SDL3 gamepads as GameCube pads, with their button prompts, or Classic Controllers (Xbox, PlayStation and Switch layouts) |
 | **Tested on** | Windows 11, MSYS2 UCRT64, Clang 22, i5-9600KF + RTX 4060, 240 Hz display |
-| **Untested** | Linux and macOS |
+| **Untested** | Linux (Vulkan); macOS has no backend |
 
 **Known issues**
 
@@ -73,7 +76,8 @@ between are **interpolated** at the display's refresh rate.
 
 ### Requirements
 
-- CMake 3.25+, Ninja, Git
+- CMake 3.25+, Ninja, Git; the configure step downloads SDL3, DXC, the
+  Vulkan headers, volk and the D3D12 and Vulkan memory allocators
 - Clang with lld (ThinLTO links the game's code); on Windows, MSYS2 UCRT64
   with `mingw-w64-ucrt-x86_64-clang`, `-lld`, `-cmake` and `-ninja`
 - A 64-bit host and your own NiGHTS: Journey of Dreams (USA) disc image
@@ -132,6 +136,8 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 
 | Variable | Effect |
 |---|---|
+| `AURORA_BACKEND=vulkan` | Render with Vulkan instead of D3D12 |
+| `RHI_VALIDATION=1` | Run under the API's validation layer |
 | `DUALIZE_GX_STATS=1` | Log the renderer once per second: FPS, draws, FIFO, render-thread time split, frame interval mean/σ/max, interpolated presents and their cost |
 | `AURORA_FRAME_DUMP=<dir>` | Write each frame's hash to `hashes.txt` there and every 30th frame's pixels, to compare renderers by numbers (`scripts/frame_compare.py`) |
 | `DUALIZE_PROFILE=<file>` | Sample the CPU and render threads' call stacks every millisecond and write them at exit; `scripts/profile.py <file> <exe> [--thread gx\|cpu] [--callers <name>]` reports per-function times (Windows) |
@@ -143,6 +149,9 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 | `DUALIZE_DUMP_TEXTURES=1` | Write each texture no HD pack replaces to `Cache/NativeGX/texture_dumps` in the user folder |
 | `AURORA_INTERP_NOBLEND=1` | Debug: replay frames without blending, to compare |
 | `AURORA_INTERP_CHECK=<dir>` | Debug: write PPM pairs that must match (older frame at t = 1, newer frame at t = 0) |
+
+Aurora's other switches (the ubershader, synchronous pipelines, HLSL dumps)
+are in [its README](https://github.com/Trick230/aurora/tree/dualize#configuration).
 
 </details>
 
@@ -185,7 +194,7 @@ work the same way (Xbox names below).
  │   GX FIFO decode ─► Aurora (TEV shaders) ─► frame record                        │
  │                                               │                                 │
  │  present pacer (refresh rate)                 ▼                                 │
- │   replay newest frame, blended toward it ─► Dawn ─► D3D12 / Vulkan / Metal      │
+ │   replay newest frame, blended toward it ─► RHI ─► D3D12 / Vulkan               │
  └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -277,8 +286,8 @@ them pixel by pixel with the frames the game produced.
 ## Performance
 
 Uncapped gameplay (`--unthrottled --no-vsync --no-interpolation`) in a
-forest stage runs at 550–600% of the Wii's speed, about
-165–180 game frames a second, on an i5-9600KF + RTX 4060. The guest CPU
+forest stage runs at about 620% of the Wii's speed, about 187 game frames a
+second, on an i5-9600KF + RTX 4060 (MSAA 8× and ambient occlusion on). The guest CPU
 thread sets that rate; at the game's 30 FPS it idles most of the time, and
 240 Hz interpolation costs ~0.5 ms of CPU a present. How it got there, step
 by step, is in [docs/HISTORY.md](docs/HISTORY.md#performance-by-step).
@@ -388,7 +397,7 @@ what DolRecomp and Aurora upstream have that the forks don't.
 
 ```
 tools/DolRecomp/      submodule, our fork: the PowerPC → C recompiler and the CPU core its output compiles with
-thirdparty/aurora/    submodule, our fork: GX on WebGPU (Dawn), SDL3, the GX FIFO's render thread
+thirdparty/aurora/    submodule, our fork: GX on D3D12 and Vulkan, SDL3, the GX FIFO's render thread
 DualizeRecompLib/     the game's code: recompiler config, natives' signatures, generated sources
 DualizeRecomp/        the runtime and the executable (cpu, kernel, hw, apu, hid, sdk)
 tests/                the runtime's unit tests (-DDUALIZE_BUILD_TESTS=ON)
@@ -404,8 +413,12 @@ iso/ extracted/ build/ extern/   your disc, its extraction, builds, downloads (g
   project started
 - [UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) and
   XenonRecomp, whose structure this follows
-- [Aurora](https://github.com/encounter/aurora) and Google's
-  [Dawn](https://dawn.googlesource.com/dawn)
+- [Aurora](https://github.com/encounter/aurora), and Google's
+  [Dawn](https://dawn.googlesource.com/dawn), which it ran on until phase 9
+- Microsoft's [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler),
+  AMD's [D3D12 Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator)
+  and [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator),
+  and [volk](https://github.com/zeux/volk)
 - [SDL3](https://libsdl.org/)
 - The [Dolphin](https://dolphin-emu.org/) team, whose hardware research the
   runtime follows
