@@ -110,11 +110,12 @@ To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 
 ## Running
 
-In the game's Options screen, the aspect ratio check row opens the
-runtime's own graphics settings instead:
-anti-aliasing, render scale, frame interpolation, vsync and ambient
-occlusion. They are saved to `graphics.ini` in the user directory and
-take effect at the next start; the flags below override them for one run.
+In the game's Options screen, the aspect ratio check row becomes
+**Graphics Settings** and opens the runtime's own settings, drawn with
+the screen's own art read from the disc: anti-aliasing, render scale,
+frame interpolation, vsync and ambient occlusion. They are saved to
+`graphics.ini` in the user directory and take effect at the next start;
+the flags below override them for one run.
 
 | Flag | Effect |
 |---|---|
