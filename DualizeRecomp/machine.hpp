@@ -40,7 +40,7 @@ struct MachineConfig
   uint32_t present_rate = 0;  // without vsync; 0 = the display's refresh rate
   uint32_t width = 1280, height = 960;
   uint32_t msaa = 8;          // samples a pixel: 1, 2, 4 or 8 (capped at the GPU's most)
-  bool ambient_occlusion = true; // GTAO over the 3D world
+  bool ambient_occlusion = false; // GTAO over the 3D world (off: the models' layers and baked shading leave it little to add)
   // NiGHTS' models are built of layers (hair over a head, brows over a
   // face) about a tenth of a unit apart: lower occluders draw lines along
   // them, and a higher minimum takes the characters' own occlusion away.
