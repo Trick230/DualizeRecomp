@@ -1,0 +1,12 @@
+# NiGHTS' own code with host hooks in DualizeRecomp/sdk/nights_options.cpp
+# (format in DolRecomp's src/app/natives.h). The title module's code, linked
+# with the DOL at the address the game loads it to.
+
+# ModeOption (the Options screen): its update.
+@ModeOption_Update ADC 9421FE30 9414093684938896
+
+nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
+# A on the "Check Aspect Ratio" row, as the update begins its test screen.
+nights_ModeOptionAspect 4 3C800000 2222E61E074892A9 at @ModeOption_Update+290 jump
+# Where the update ends when nothing was chosen.
+define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8

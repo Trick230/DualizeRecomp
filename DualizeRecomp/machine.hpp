@@ -15,6 +15,7 @@
 #include "kernel/ios/disc.hpp"
 #include "kernel/ios_kernel.hpp"
 #include "sdk/wud.hpp"
+#include "ui/graphics_menu.hpp"
 
 #include <array>
 #include <atomic>
@@ -107,6 +108,8 @@ public:
   void SetGcRumble(int port, bool on);
   // Applies what the render thread signalled, with everything written done.
   void SyncGpu();
+  // The graphics settings over the game (CPU thread, from the Options hook).
+  void OpenGraphicsMenu() { m_menu.Open(); }
 
   const MachineConfig config;
   Memory memory;
@@ -143,6 +146,7 @@ private:
   apu::AudioOut m_audio;
   hid::Gamepads m_gamepads;
   hid::InputMovie m_movie;
+  GraphicsMenu m_menu;
   bool ReadHostGcPad(int port, GcPadInput* input);
   bool m_gx_started = false;
 
@@ -163,6 +167,7 @@ private:
   uint64_t m_gx_bytes = 0, m_report_gx_bytes = 0;
 
   bool ReadAutomationPad(int port, AutomationPad* pad);
+  uint32_t AutomationMenuButtons();
   std::array<AutomationPad, AUTOMATION_PORTS> m_automation_pads;
   std::array<std::atomic<bool>, AUTOMATION_PORTS> m_automation_active{};
   std::mutex m_automation_mutex;

@@ -184,7 +184,10 @@ float DisplayAspect(ios::Nand& nand)
 
 Machine::Machine(MachineConfig config_)
     : config(std::move(config_)), cpu(*this, memory, scheduler), pi(*this), vi(*this), exi(*this), ai(*this),
-      gfx(*this), hollywood(*this), ios(*this), wud(*this)
+      gfx(*this), hollywood(*this), ios(*this), wud(*this),
+      m_menu(m_gamepads, [this] { return AutomationMenuButtons(); }, [] { return PadDrivesClassic(); },
+             config.user / "graphics.ini",
+             GraphicsSettings::FromConfig(config))
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
   m_dsp_interrupt_event = scheduler.Register(DspInterruptEvent, this);
@@ -278,6 +281,7 @@ bool Machine::Start(std::string* error)
       .token = GxToken,
       .quit = GxQuit,
       .thread_started = [](void*) { profiler::RegisterThisThread("gx"); },
+      .draw_ui = [](void* user) { MachineOf(user).m_menu.Draw(); },
   };
   if (!aurora_fifo_start(&gx_config, &gx_host))
   {
@@ -388,14 +392,40 @@ float Merge(float a, float b)
 {
   return std::fabs(b) > std::fabs(a) ? b : a;
 }
+
+// Host pad buttons and the GameCube pad's.
+constexpr std::pair<uint32_t, uint16_t> GC_MAP[] = {
+    {hid::PAD_SOUTH, 0x0100}, {hid::PAD_WEST, 0x0200},  {hid::PAD_EAST, 0x0400},
+    {hid::PAD_NORTH, 0x0800}, {hid::PAD_START, 0x1000}, {hid::PAD_RIGHT_SHOULDER, 0x0010},
+    {hid::PAD_DPAD_UP, 0x0008}, {hid::PAD_DPAD_DOWN, 0x0004}, {hid::PAD_DPAD_LEFT, 0x0001},
+    {hid::PAD_DPAD_RIGHT, 0x0002},
+};
 }  // namespace
+
+// The automation's GameCube buttons as host pad buttons, for the graphics menu.
+uint32_t Machine::AutomationMenuButtons()
+{
+  uint32_t buttons = 0;
+  AutomationPad automation;
+  for (int port = 0; port < AUTOMATION_PORTS; ++port)
+  {
+    if (!ReadAutomationPad(port, &automation) || !automation.gc)
+      continue;
+    for (const auto& [from, to] : GC_MAP)
+    {
+      if (automation.gc_buttons & to)
+        buttons |= from;
+    }
+  }
+  return buttons;
+}
 
 void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
 {
   Machine& m = MachineOf(user);
   input->classic = true;
   hid::PadState pad;
-  if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad))
+  if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad) && !m.m_menu.IsOpen())
   {
     for (const auto& [from, to] : CLASSIC_MAP)
     {
@@ -414,7 +444,7 @@ void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
     input->right_trigger = pad.right_trigger;
   }
   AutomationPad automation;
-  if (m.ReadAutomationPad(index, &automation))
+  if (!m.m_menu.IsOpen() && m.ReadAutomationPad(index, &automation))
   {
     const ios::WiimoteInput& a = automation.wii;
     input->buttons |= a.buttons;
@@ -447,9 +477,12 @@ bool Machine::ReadHostGcPad(int port, GcPadInput* input)
 {
   hid::PadState pad;
   const bool plugged = PadDrivesGc() && m_gamepads.Read(port, &pad);
+  // The graphics menu has the pads while it is open.
+  if (m_menu.IsOpen())
+    pad = {};
   AutomationPad automation;
   const bool automated = ReadAutomationPad(port, &automation) && automation.gc;
-  if (!automated)
+  if (!automated || m_menu.IsOpen())
     automation = {};
   // Unplugged as long as nothing drives the port.
   if (!plugged && !automated)
@@ -459,13 +492,7 @@ bool Machine::ReadHostGcPad(int port, GcPadInput* input)
   const auto axis = [](float v) { return static_cast<uint8_t>(std::clamp(0x80 + std::lround(v * 127.0f), 0L, 255L)); };
   const auto trigger = [](float v) { return static_cast<uint8_t>(std::clamp(std::lround(v * 255.0f), 0L, 255L)); };
   uint16_t buttons = automation.gc_buttons;
-  constexpr std::pair<uint32_t, uint16_t> map[] = {
-      {hid::PAD_SOUTH, 0x0100}, {hid::PAD_WEST, 0x0200},  {hid::PAD_EAST, 0x0400},
-      {hid::PAD_NORTH, 0x0800}, {hid::PAD_START, 0x1000}, {hid::PAD_RIGHT_SHOULDER, 0x0010},
-      {hid::PAD_DPAD_UP, 0x0008}, {hid::PAD_DPAD_DOWN, 0x0004}, {hid::PAD_DPAD_LEFT, 0x0001},
-      {hid::PAD_DPAD_RIGHT, 0x0002},
-  };
-  for (const auto& [from, to] : map)
+  for (const auto& [from, to] : GC_MAP)
   {
     if (pad.buttons & from)
       buttons |= to;

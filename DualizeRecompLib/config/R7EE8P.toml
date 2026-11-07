@@ -7,7 +7,7 @@ cpu = "broadway"
 # Functions with host implementations in DualizeRecomp/sdk, found by
 # signature. Each matches only the SDK build it was written for; the
 # recompiler writes what it found to natives.txt.
-natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs"]
+natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs", "nights.sigs"]
 # Fixed number of generated sources, so the build can list them up front.
 shards = 64
 

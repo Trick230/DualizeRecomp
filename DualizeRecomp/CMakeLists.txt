@@ -32,7 +32,9 @@ add_executable(DualizeRecomp
     sdk/rvl_gx.cpp
     sdk/rvl_nand.cpp
     sdk/rvl_vi.cpp
-    sdk/rvl_wud.cpp)
+    sdk/rvl_wud.cpp
+    sdk/nights_options.cpp
+    ui/graphics_menu.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

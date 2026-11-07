@@ -50,6 +50,7 @@ add_custom_command(
     COMMAND $<TARGET_FILE:dolrecomp> "${CONFIG}" "${DUALIZE_GAME_DIR}" "${PPC_DIR}"
     DEPENDS dolrecomp "${CONFIG}" "${CMAKE_CURRENT_SOURCE_DIR}/config/mwcc.sigs"
         "${CMAKE_CURRENT_SOURCE_DIR}/config/rvl.sigs" "${CMAKE_CURRENT_SOURCE_DIR}/config/sdk.sigs"
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/nights.sigs"
         ${GAME_INPUTS}
     COMMENT "Recompiling ${GAME_ID}"
     USES_TERMINAL)

@@ -39,6 +39,7 @@ namespace
 {
 namespace fs = std::filesystem;
 using dualize::Machine;
+using dualize::GraphicsSettings;
 using dualize::MachineConfig;
 
 fs::path Utf8Path(std::string_view text)
@@ -259,6 +260,17 @@ int main(int argc, char** argv)
   config.idle_pc = IDLE_PC;
   config.rso_list = RSO_LIST;
   fs::path load_state, automation;
+  // The graphics menu's settings, from the user directory; flags override them.
+  for (int i = 1; i + 1 < argc; ++i)
+  {
+    if (std::string_view(argv[i]) == "--user")
+      config.user = Utf8Path(argv[i + 1]);
+  }
+  {
+    GraphicsSettings settings = GraphicsSettings::FromConfig(config);
+    if (settings.Load(config.user / "graphics.ini"))
+      settings.ApplyTo(config);
+  }
   for (int i = 1; i < argc; ++i)
   {
     const std::string arg = argv[i];
