@@ -228,6 +228,7 @@ bool Machine::Start(std::string* error)
     return false;
 
   m_boot_time = LocalTimeNow();
+  StartNightsWeather(config.record_input.empty() && config.replay_input.empty() && config.hash_every == 0);
   ios::Config ios_config;
   ios_config.nand_root = config.user / "Wii";
   ios_config.disc = disc;

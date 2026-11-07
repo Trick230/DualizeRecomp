@@ -10,3 +10,17 @@ nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
 nights_ModeOptionAspect 4 3C800000 2222E61E074892A9 at @ModeOption_Update+290 jump
 # Where the update ends when nothing was chosen.
 define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
+
+# The Forecast Channel reader My Dream's weather comes from (it reads the
+# channel's files off the NAND): its load and the calls the game makes after
+# it, answered with the host's current weather instead.
+nights_WeatherLoad 27C 9421FF50 4A86FCA2048F7AFB
+nights_WeatherForecast 3B8 9421FFD0 97338BC1D012FA4D
+nights_WeatherCurrent 238 3CA00000 05248EA8D2856300
+nights_WeatherLocation 130 3CA00000 BFE2BD0CF695F255
+# Three getters alike but for a field: found by where they sit.
+nights_WeatherCity 30 800D0000 11EC9682997C292F at nights_WeatherLoad+86C
+nights_WeatherCount 30 800D0000 11EC9682997C292F at nights_WeatherLoad+9CC
+nights_WeatherVersion 30 800D0000 11EC9682997C292F at nights_WeatherLoad+9FC
+# The reader's "loaded" flag, which its close clears.
+define NIGHTS_WEATHER_LOADED_SDA imm(nights_WeatherLoad+18)

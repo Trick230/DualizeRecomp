@@ -187,4 +187,7 @@ inline Machine& GetMachine(Cpu& cpu)
 
 // The game's files the disc serves changed (sdk/nights_options.cpp).
 void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game);
+// My Dream's weather from the host's (sdk/nights_weather.cpp); off, the game
+// keeps its own calendar of weather (what input movies and RAM hashes need).
+void StartNightsWeather(bool live);
 }  // namespace dualize
