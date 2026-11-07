@@ -486,8 +486,10 @@ bool Machine::ReadHostGcPad(int port, GcPadInput* input)
   const bool automated = ReadAutomationPad(port, &automation) && automation.gc;
   if (!automated || m_menu.IsOpen())
     automation = {};
-  // Unplugged as long as nothing drives the port.
-  if (!plugged && !automated)
+  // Unplugged as long as nothing drives the port, but for the first while the
+  // pads play the GameCube's: the game picks its button prompts from what is
+  // plugged in, and a pad turned on late would leave them the Wii's.
+  if (!plugged && !automated && !(PadDrivesGc() && port == 0))
     return false;
   if (!plugged)
     pad = {};
