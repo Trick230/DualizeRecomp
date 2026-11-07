@@ -71,6 +71,7 @@ private:
   std::atomic<bool> m_open{false};
   bool m_shown = false;  // ImGui active and drawing
   bool m_closing = false;  // closed, holding the pads until their buttons are up
+  double m_open_time = -1, m_close_time = 0;  // ImGui time, for the animations
   int m_row = 0;
   uint32_t m_held = 0;  // buttons down last frame, for edges
   bool m_saved_notice = false;

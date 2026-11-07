@@ -111,9 +111,10 @@ enum Sheet
   SHEET_PILL,    // the value box's half
   SHEET_ICONS,   // the rows' icons
   SHEET_FILL,    // a white rounded square, tinted
+  SHEET_LABELS,  // the list's labels and values, grey on black (made a white mask)
   SHEET_COUNT,
 };
-constexpr std::array<uint32_t, SHEET_COUNT> SHEET_IMAGES{0, 2, 3, 4, 16};
+constexpr std::array<uint32_t, SHEET_COUNT> SHEET_IMAGES{0, 2, 3, 4, 16, 6};
 struct Piece
 {
   Sheet sheet;
@@ -128,9 +129,34 @@ constexpr Piece FRAME{SHEET_PARTS, 80, 0, 160, 96};
 constexpr Piece PILL{SHEET_PILL, 75, 32, 128, 128};
 constexpr Piece ICON_TV{SHEET_ICONS, 0, 0, 128, 128};
 constexpr Piece FILL{SHEET_FILL, 0, 0, 64, 64};
+constexpr Piece VALUE_ON{SHEET_LABELS, 26, 194, 53, 209};
+constexpr Piece VALUE_OFF{SHEET_LABELS, 103, 194, 140, 209};
 
 // Button icons in the game's font (its messages write them as Greek letters).
-constexpr char32_t GLYPH_DPAD = 0x397, GLYPH_B = 0x399, GLYPH_CLASSIC_X = 0x39C, GLYPH_CLASSIC_Y = 0x39D;
+constexpr char32_t GLYPH_DPAD = 0x397, GLYPH_B = 0x399;
+
+// The Options screen's own timings (at 30 frames a second): its list slides
+// in from the right as it fades in, the help line after it; leaving, the
+// whole screen fades out.
+constexpr double OPEN_SECONDS = 0.13, HELP_DELAY = 0.1, FADE_SECONDS = 0.1, CLOSE_SECONDS = 0.2;
+constexpr float SLIDE = 190.0f;
+
+float Clamp01(double v)
+{
+  return static_cast<float>(std::clamp(v, 0.0, 1.0));
+}
+
+// What was drawn since `first` faded by `alpha` and moved across by `dx` pixels.
+void Adjust(ImDrawList* draw, int first, float alpha, float dx = 0)
+{
+  for (int i = first; i < draw->VtxBuffer.Size; ++i)
+  {
+    ImDrawVert& v = draw->VtxBuffer[i];
+    v.pos.x += dx;
+    const uint32_t a = static_cast<uint32_t>((v.col >> IM_COL32_A_SHIFT & 0xFF) * std::clamp(alpha, 0.0f, 1.0f));
+    v.col = (v.col & ~IM_COL32_A_MASK) | a << IM_COL32_A_SHIFT;
+  }
+}
 
 std::u32string Utf32(std::string_view text)
 {
@@ -151,9 +177,17 @@ struct GraphicsMenu::Assets
     loaded = true;
     for (int i = 0; i < SHEET_COUNT; ++i)
     {
-      const auto image = LoadTplImage(game / OPTION_TEXTURES, SHEET_IMAGES[i]);
+      auto image = LoadTplImage(game / OPTION_TEXTURES, SHEET_IMAGES[i]);
       if (!image)
         return;
+      if (i == SHEET_LABELS)
+      {
+        for (size_t p = 0; p < image->rgba.size(); p += 4)
+        {
+          image->rgba[p + 3] = image->rgba[p];
+          image->rgba[p] = image->rgba[p + 1] = image->rgba[p + 2] = 255;
+        }
+      }
       sheets[i] = aurora_imgui_add_texture(image->rgba.data(), image->width, image->height);
       sizes[i] = {static_cast<float>(image->width), static_cast<float>(image->height)};
     }
@@ -351,6 +385,7 @@ void GraphicsMenu::Close()
   m_settings.Save(m_settings_path);
   // The game gets the pads back once the button that closed the menu is up.
   m_closing = true;
+  m_close_time = ImGui::GetTime();
 }
 
 void GraphicsMenu::Change(int row, int direction)
@@ -416,7 +451,7 @@ void GraphicsMenu::Navigate()
 
   if (m_closing)
   {
-    if (buttons == 0)
+    if (buttons == 0 && ImGui::GetTime() - m_close_time >= CLOSE_SECONDS)
     {
       m_closing = false;
       m_open.store(false, std::memory_order_release);
@@ -447,14 +482,23 @@ void GraphicsMenu::Draw()
     m_shown = open;
     // What opened the menu (the game's A) is still down: wait for a release.
     m_held = ~0u;
+    m_open_time = -1;
   }
   ImGuiContext* context = ImGui::GetCurrentContext();
   if (!open || context == nullptr || !context->WithinFrameScope)
     return;
 
+  if (m_open_time < 0)
+    m_open_time = ImGui::GetTime();
   Navigate();
-  if (m_closing || !IsOpen())
+  if (!IsOpen())
     return;
+  const double since = ImGui::GetTime() - m_open_time;
+  const float closing = m_closing ? 1.0f - Clamp01((ImGui::GetTime() - m_close_time) / CLOSE_SECONDS) : 1.0f;
+  const float screen_alpha = Clamp01(since / FADE_SECONDS) * closing;
+  const float list_t = Clamp01(since / OPEN_SECONDS);
+  const float list_eased = 1.0f - (1.0f - list_t) * (1.0f - list_t) * (1.0f - list_t);
+  const float help_alpha = Clamp01((since - HELP_DELAY) / FADE_SECONDS) * closing;
 
   if (!m_assets->loaded)
     m_assets->Load(m_game);
@@ -463,6 +507,7 @@ void GraphicsMenu::Draw()
   const Canvas canvas{ImGui::GetForegroundDrawList(), *m_assets,
                       {(display.x - 1280.0f * scale) * 0.5f, (display.y - 720.0f * scale) * 0.5f}, scale};
   ImDrawList* draw = canvas.draw;
+  const int first_vertex = draw->VtxBuffer.Size;
 
   // The Options screen dims under the menu, its list and help line all but
   // hidden (bands that fade out at their ends).
@@ -485,6 +530,7 @@ void GraphicsMenu::Draw()
                                ValueText(m_settings, row);
       draw->AddText(nullptr, 30.0f * scale, canvas.At(400, 220.0f + row * 60.0f), Rgba(255, 255, 255), line.c_str());
     }
+    Adjust(draw, first_vertex, screen_alpha);
     return;
   }
 
@@ -494,6 +540,8 @@ void GraphicsMenu::Draw()
   canvas.NineSlice(FILL, 266, 299, 483, 516, 16, 1.0f, Rgba(108, 0, 206));
   canvas.NineSlice(FRAME, 257, 290, 492, 525, 20, 1.45f, IM_COL32_WHITE, true);
   canvas.Sprite(ICON_TV, 375, 407, 1.62f);
+  Adjust(draw, first_vertex, screen_alpha);
+  const int list_vertex = draw->VtxBuffer.Size;
 
   constexpr float ROW_PITCH = 74.0f, BAR_HALF = 32.0f;
   for (int row = 0; row < ROW_COUNT; ++row)
@@ -508,9 +556,14 @@ void GraphicsMenu::Draw()
     canvas.Sprite(MOON_RIGHT, 1029, cy, 1.3f);
     canvas.Text(Utf32(ROWS[row].name), 572, cy, 33, selected ? Rgba(255, 255, 255) : Rgba(222, 222, 255));
 
-    const std::u32string value = Utf32(ValueText(m_settings, row));
-    canvas.NineSlice(FILL, 902, cy - 22, 1010, cy + 22, 16, 0.75f, selected ? Rgba(96, 166, 255) : Rgba(64, 128, 238));
-    canvas.TextCentered(value, 956, cy, 32, Rgba(255, 255, 255), false);
+    // The value in a box of the game's lighter blue, the bar showing through;
+    // ON and OFF in the labels' own lettering.
+    const std::string value = ValueText(m_settings, row);
+    canvas.NineSlice(FILL, 902, cy - 22, 1010, cy + 22, 16, 0.75f, Rgba(72, 136, 255, selected ? 0.9f : 0.8f));
+    if (value == "ON" || value == "OFF")
+      canvas.Sprite(value == "ON" ? VALUE_ON : VALUE_OFF, 956, cy, 1.5f);
+    else
+      canvas.TextCentered(Utf32(value), 956, cy, 30, Rgba(255, 255, 255), false);
     if (selected)
     {
       // Left and right change the value.
@@ -521,13 +574,17 @@ void GraphicsMenu::Draw()
     }
   }
 
+  Adjust(draw, list_vertex, list_t * closing, (1.0f - list_eased) * SLIDE * scale);
+
+  // Help and the buttons, with the GameCube pad's icons.
+  const int help_vertex = draw->VtxBuffer.Size;
   const char* help = SameAs(m_settings, m_running) ? ROWS[m_row].help : "Changes apply the next time the game starts";
   canvas.TextCentered(Utf32(help), 640, 610, 28, Rgba(255, 255, 255));
-  const bool classic = m_classic && m_classic();
   std::u32string guide{GLYPH_DPAD};
   guide += U": Change      ";
-  guide += classic ? std::u32string{GLYPH_CLASSIC_X, U'/', GLYPH_CLASSIC_Y} : std::u32string{GLYPH_B};
+  guide += GLYPH_B;
   guide += U": Back";
   canvas.TextCentered(guide, 640, 664, 28, Rgba(255, 255, 255));
+  Adjust(draw, help_vertex, help_alpha);
 }
 }  // namespace dualize
