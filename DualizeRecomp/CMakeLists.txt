@@ -34,6 +34,7 @@ add_executable(DualizeRecomp
     sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp
     sdk/nights_options.cpp
+    ui/game_assets.cpp
     ui/graphics_menu.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 
 namespace dualize
 {
@@ -40,7 +41,12 @@ public:
   // play a Classic Controller (its A and B sit elsewhere than the GameCube pad's). Both
   // are read on the render thread.
   GraphicsMenu(const hid::Gamepads& gamepads, std::function<uint32_t()> extra_buttons,
-               std::function<bool()> classic, std::filesystem::path settings_path, GraphicsSettings running);
+               std::function<bool()> classic, std::filesystem::path game, std::filesystem::path settings_path,
+               GraphicsSettings running);
+  ~GraphicsMenu();
+
+  // The game's art the menu draws with, loaded on its first draw.
+  struct Assets;
 
   // CPU thread, from the Options screen's hook.
   void Open();
@@ -57,6 +63,8 @@ private:
   const hid::Gamepads& m_gamepads;
   const std::function<uint32_t()> m_extra_buttons;
   const std::function<bool()> m_classic;
+  const std::filesystem::path m_game;
+  std::unique_ptr<Assets> m_assets;
   const std::filesystem::path m_settings_path;
   const GraphicsSettings m_running;  // what this run started with
   GraphicsSettings m_settings;       // what the menu shows

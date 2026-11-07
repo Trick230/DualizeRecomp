@@ -1,6 +1,7 @@
 #include "ui/graphics_menu.hpp"
 
 #include "machine.hpp"
+#include "ui/game_assets.hpp"
 
 #include <aurora/imgui.h>
 #include <imgui_internal.h>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace dualize
 {
@@ -98,19 +100,169 @@ ImU32 Rgba(int r, int g, int b, float a = 1.0f)
   return IM_COL32(r, g, b, static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f));
 }
 
-// The text centered vertically at y, from x, at a size in canvas units.
-void Text(ImDrawList* draw, float size, ImVec2 pos, ImU32 color, const char* text, bool shadow = true)
+// Where the art is on the disc (the Options screen's textures and the font
+// its help line uses), and the pieces of it the menu draws, in texels.
+constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
+constexpr const char* FONT = "files/fontJapan";
+enum Sheet
 {
-  ImFont* font = ImGui::GetFont();
-  if (shadow)
-    draw->AddText(font, size, {pos.x + size * 0.06f, pos.y + size * 0.06f}, Rgba(0, 0, 30, 0.6f), text);
-  draw->AddText(font, size, pos, color, text);
-}
+  SHEET_TITLES,  // the screens' script titles
+  SHEET_PARTS,   // row bars, moons, the icon frame
+  SHEET_PILL,    // the value box's half
+  SHEET_ICONS,   // the rows' icons
+  SHEET_FILL,    // a white rounded square, tinted
+  SHEET_COUNT,
+};
+constexpr std::array<uint32_t, SHEET_COUNT> SHEET_IMAGES{0, 2, 3, 4, 16};
+struct Piece
+{
+  Sheet sheet;
+  float x0, y0, x1, y1;
+};
+constexpr Piece TITLE_OPTIONS{SHEET_TITLES, 4, 6, 254, 40};
+constexpr Piece BAR{SHEET_PARTS, 166, 71, 251, 121};
+constexpr Piece BAR_LIT{SHEET_PARTS, 164, 3, 252, 63};
+constexpr Piece MOON_LEFT{SHEET_PARTS, 0, 69, 37, 125};
+constexpr Piece MOON_RIGHT{SHEET_PARTS, 40, 69, 78, 125};
+constexpr Piece FRAME{SHEET_PARTS, 80, 0, 160, 96};
+constexpr Piece PILL{SHEET_PILL, 75, 32, 128, 128};
+constexpr Piece ICON_TV{SHEET_ICONS, 0, 0, 128, 128};
+constexpr Piece FILL{SHEET_FILL, 0, 0, 64, 64};
 
-ImVec2 TextSize(float size, const char* text)
+// Button icons in the game's font (its messages write them as Greek letters).
+constexpr char32_t GLYPH_DPAD = 0x397, GLYPH_B = 0x399, GLYPH_CLASSIC_X = 0x39C, GLYPH_CLASSIC_Y = 0x39D;
+
+std::u32string Utf32(std::string_view text)
 {
-  return ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+  return {text.begin(), text.end()};
 }
+}  // namespace
+
+struct GraphicsMenu::Assets
+{
+  bool loaded = false, ok = false;
+  std::array<ImTextureID, SHEET_COUNT> sheets{};
+  std::array<ImVec2, SHEET_COUNT> sizes{};
+  BitmapFont font;
+  ImTextureID font_texture{};
+
+  void Load(const std::filesystem::path& game)
+  {
+    loaded = true;
+    for (int i = 0; i < SHEET_COUNT; ++i)
+    {
+      const auto image = LoadTplImage(game / OPTION_TEXTURES, SHEET_IMAGES[i]);
+      if (!image)
+        return;
+      sheets[i] = aurora_imgui_add_texture(image->rgba.data(), image->width, image->height);
+      sizes[i] = {static_cast<float>(image->width), static_cast<float>(image->height)};
+    }
+    if (!font.Load(game / FONT))
+      return;
+    font_texture = aurora_imgui_add_texture(font.Atlas().rgba.data(), font.Atlas().width, font.Atlas().height);
+    ok = true;
+  }
+};
+
+GraphicsMenu::~GraphicsMenu() = default;
+
+namespace
+{
+// Drawing on a 1280x720 canvas, scaled to fit the window and centered.
+struct Canvas
+{
+  ImDrawList* draw;
+  const GraphicsMenu::Assets& assets;
+  ImVec2 origin;
+  float scale;
+
+  ImVec2 At(float x, float y) const { return {origin.x + x * scale, origin.y + y * scale}; }
+
+  // A piece stretched over the canvas rectangle; u0/u1 pick part of it across.
+  void Image(const Piece& p, float x0, float y0, float x1, float y1, ImU32 tint = IM_COL32_WHITE, float u0 = -1,
+             float u1 = -1) const
+  {
+    const ImVec2 size = assets.sizes[p.sheet];
+    const float pu0 = u0 >= 0 ? u0 : p.x0, pu1 = u1 >= 0 ? u1 : p.x1;
+    draw->AddImage(assets.sheets[p.sheet], At(x0, y0), At(x1, y1), {pu0 / size.x, p.y0 / size.y},
+                   {pu1 / size.x, p.y1 / size.y}, tint);
+  }
+
+  // A piece at its texel size times `factor`, centered at (cx, cy).
+  void Sprite(const Piece& p, float cx, float cy, float factor, ImU32 tint = IM_COL32_WHITE) const
+  {
+    const float w = (p.x1 - p.x0) * factor, h = (p.y1 - p.y0) * factor;
+    Image(p, cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f, tint);
+  }
+
+  // Stretched across, its `cap` texels at each end kept in proportion.
+  void ThreeSlice(const Piece& p, float x0, float y0, float x1, float y1, float cap,
+                  ImU32 tint = IM_COL32_WHITE) const
+  {
+    const float c = cap * (y1 - y0) / (p.y1 - p.y0);
+    Image(p, x0, y0, x0 + c, y1, tint, p.x0, p.x0 + cap);
+    Image(p, x0 + c, y0, x1 - c, y1, tint, p.x0 + cap, p.x1 - cap);
+    Image(p, x1 - c, y0, x1, y1, tint, p.x1 - cap, p.x1);
+  }
+
+  // Stretched both ways, its `cap` texels at each edge drawn `factor` times as big.
+  void NineSlice(const Piece& p, float x0, float y0, float x1, float y1, float cap, float factor,
+                 ImU32 tint = IM_COL32_WHITE, bool hollow = false) const
+  {
+    const ImVec2 size = assets.sizes[p.sheet];
+    const float c = cap * factor;
+    const float xs[] = {x0, x0 + c, x1 - c, x1}, ys[] = {y0, y0 + c, y1 - c, y1};
+    const float us[] = {p.x0, p.x0 + cap, p.x1 - cap, p.x1}, vs[] = {p.y0, p.y0 + cap, p.y1 - cap, p.y1};
+    for (int j = 0; j < 3; ++j)
+    {
+      for (int i = 0; i < 3; ++i)
+        if (!hollow || i != 1 || j != 1)
+          draw->AddImage(assets.sheets[p.sheet], At(xs[i], ys[j]), At(xs[i + 1], ys[j + 1]),
+                         {us[i] / size.x, vs[j] / size.y}, {us[i + 1] / size.x, vs[j + 1] / size.y}, tint);
+    }
+  }
+
+  // Text in the game's font, `size` canvas pixels a cell.
+  float TextWidth(std::u32string_view text, float size) const
+  {
+    const float k = size / assets.font.CellSize();
+    float width = 0;
+    for (char32_t c : text)
+    {
+      if (const BitmapFont::Glyph* g = assets.font.Find(c))
+        width += (g->x1 - g->x0 + 2) * k;
+    }
+    return width;
+  }
+
+  void Text(std::u32string_view text, float x, float cy, float size, ImU32 color, bool shadow = true) const
+  {
+    const float k = size / assets.font.CellSize();
+    const ImVec2 atlas{static_cast<float>(assets.font.Atlas().width), static_cast<float>(assets.font.Atlas().height)};
+    for (int pass = shadow ? 0 : 1; pass < 2; ++pass)
+    {
+      const float offset = pass == 0 ? 1.5f : 0.0f;
+      const ImU32 tint = pass == 0 ? Rgba(0, 0, 20, 0.55f) : color;
+      float pen = x;
+      for (char32_t c : text)
+      {
+        const BitmapFont::Glyph* g = assets.font.Find(c);
+        if (g == nullptr)
+          continue;
+        const float w = (g->x1 - g->x0) * k, h = (g->y1 - g->y0) * k;
+        draw->AddImage(assets.font_texture, At(pen + k + offset, cy - h * 0.5f + offset),
+                       At(pen + k + w + offset, cy + h * 0.5f + offset), {g->x0 / atlas.x, g->y0 / atlas.y},
+                       {g->x1 / atlas.x, g->y1 / atlas.y}, tint);
+        pen += w + 2 * k;
+      }
+    }
+  }
+
+  void TextCentered(std::u32string_view text, float cx, float cy, float size, ImU32 color, bool shadow = true) const
+  {
+    Text(text, cx - TextWidth(text, size) * 0.5f, cy, size, color, shadow);
+  }
+};
 }  // namespace
 
 GraphicsSettings GraphicsSettings::FromConfig(const MachineConfig& config)
@@ -179,10 +331,10 @@ bool GraphicsSettings::Save(const std::filesystem::path& path) const
 }
 
 GraphicsMenu::GraphicsMenu(const hid::Gamepads& gamepads, std::function<uint32_t()> extra_buttons,
-                           std::function<bool()> classic, std::filesystem::path settings_path,
-                           GraphicsSettings running)
+                           std::function<bool()> classic, std::filesystem::path game,
+                           std::filesystem::path settings_path, GraphicsSettings running)
     : m_gamepads(gamepads), m_extra_buttons(std::move(extra_buttons)), m_classic(std::move(classic)),
-      m_settings_path(std::move(settings_path)), m_running(running), m_settings(running)
+      m_game(std::move(game)), m_assets(std::make_unique<Assets>()), m_settings_path(std::move(settings_path)), m_running(running), m_settings(running)
 {
   GraphicsSettings saved = running;
   if (saved.Load(m_settings_path))
@@ -229,8 +381,9 @@ void GraphicsMenu::Navigate()
   // The game's A and B where the game reads them: the GameCube pad's sit
   // bottom and left, the Classic Controller's right and bottom.
   const bool classic = m_classic && m_classic();
-  const uint32_t accept = classic ? hid::PAD_EAST : hid::PAD_SOUTH;
-  const uint32_t back = classic ? hid::PAD_SOUTH : hid::PAD_WEST;
+  // The game's own: on the Classic Controller a and b accept, x and y go back.
+  const uint32_t accept = classic ? hid::PAD_EAST | hid::PAD_SOUTH : hid::PAD_SOUTH;
+  const uint32_t back = classic ? hid::PAD_NORTH | hid::PAD_WEST : hid::PAD_WEST;
   hid::PadState pad;
   uint32_t buttons = m_extra_buttons ? m_extra_buttons() : 0;
   for (int port = 0; port < hid::Gamepads::MAX_PORTS; ++port)
@@ -303,81 +456,78 @@ void GraphicsMenu::Draw()
   if (m_closing || !IsOpen())
     return;
 
-  // A 1280x720 canvas, scaled to fit the window and centered.
+  if (!m_assets->loaded)
+    m_assets->Load(m_game);
   const ImVec2 display = ImGui::GetIO().DisplaySize;
   const float scale = std::min(display.x / 1280.0f, display.y / 720.0f);
-  const ImVec2 origin{(display.x - 1280.0f * scale) * 0.5f, (display.y - 720.0f * scale) * 0.5f};
-  const auto at = [&](float x, float y) { return ImVec2{origin.x + x * scale, origin.y + y * scale}; };
-  ImDrawList* draw = ImGui::GetForegroundDrawList();
+  const Canvas canvas{ImGui::GetForegroundDrawList(), *m_assets,
+                      {(display.x - 1280.0f * scale) * 0.5f, (display.y - 720.0f * scale) * 0.5f}, scale};
+  ImDrawList* draw = canvas.draw;
 
-  // Dim the game's Options screen under the menu.
-  draw->AddRectFilled({0, 0}, display, Rgba(4, 6, 30, 0.72f));
+  // The Options screen dims under the menu, its list and help line all but
+  // hidden (bands that fade out at their ends).
+  draw->AddRectFilled({0, 0}, display, Rgba(2, 4, 24, 0.9f));
+  const auto band = [&](float x0, float y0, float x1, float y1) {
+    const ImU32 solid = Rgba(2, 4, 24, 0.92f), clear = Rgba(2, 4, 24, 0.0f);
+    const float fade = 60.0f;
+    draw->AddRectFilledMultiColor(canvas.At(x0 - fade, y0), canvas.At(x0, y1), clear, solid, solid, clear);
+    draw->AddRectFilled(canvas.At(x0, y0), canvas.At(x1, y1), solid);
+    draw->AddRectFilledMultiColor(canvas.At(x1, y0), canvas.At(x1 + fade, y1), solid, clear, clear, solid);
+  };
+  band(520, 222, 1055, 596);
+  band(300, 588, 980, 690);
+  if (!m_assets->ok)
+  {
+    // Without the game's art (a different disc layout): plain text.
+    for (int row = 0; row < ROW_COUNT; ++row)
+    {
+      const std::string line = std::string(row == m_row ? "> " : "  ") + ROWS[row].name + ": " +
+                               ValueText(m_settings, row);
+      draw->AddText(nullptr, 30.0f * scale, canvas.At(400, 220.0f + row * 60.0f), Rgba(255, 255, 255), line.c_str());
+    }
+    return;
+  }
 
-  // Title, in the game's gold.
-  const char* title = "Graphics Settings";
-  const float title_size = 52.0f * scale;
-  const ImVec2 title_extent = TextSize(title_size, title);
-  Text(draw, title_size, {origin.x + (1280.0f * scale - title_extent.x) * 0.5f, at(0, 92).y}, Rgba(236, 214, 140),
-       title);
-  draw->AddLine(at(450, 152), at(830, 152), Rgba(214, 186, 110, 0.9f), 2.0f * scale);
+  // As the Options screen lays its list out: the title, the selected row's
+  // icon in its frame on the left, the rows on the right, help and buttons below.
+  canvas.Sprite(TITLE_OPTIONS, 640, 122, 1.48f);
+  canvas.NineSlice(FILL, 266, 299, 483, 516, 16, 1.0f, Rgba(108, 0, 206));
+  canvas.NineSlice(FRAME, 257, 290, 492, 525, 20, 1.45f, IM_COL32_WHITE, true);
+  canvas.Sprite(ICON_TV, 375, 407, 1.62f);
 
-  // The rows, as the Options screen draws them: a blue band with the value in
-  // a lighter box at its right end, the selected one lit.
-  const float row_x = 330.0f, row_w = 620.0f, row_h = 66.0f, row_gap = 18.0f;
-  const float rows_y = 190.0f;
+  constexpr float ROW_PITCH = 74.0f, BAR_HALF = 32.0f;
   for (int row = 0; row < ROW_COUNT; ++row)
   {
     const bool selected = row == m_row;
-    const float y = rows_y + row * (row_h + row_gap);
-    const ImVec2 min = at(row_x, y), max = at(row_x + row_w, y + row_h);
-    const float round = row_h * 0.5f * scale;
+    const float cy = 409.0f + (row - ROW_COUNT / 2) * ROW_PITCH;
     if (selected)
-      draw->AddRectFilled({min.x - 6 * scale, min.y - 6 * scale}, {max.x + 6 * scale, max.y + 6 * scale},
-                          Rgba(120, 200, 255, 0.35f), round + 6 * scale);
-    draw->AddRectFilledMultiColor(min, max, selected ? Rgba(70, 120, 235) : Rgba(36, 54, 170),
-                                  selected ? Rgba(70, 120, 235) : Rgba(36, 54, 170),
-                                  selected ? Rgba(30, 60, 190) : Rgba(18, 22, 110),
-                                  selected ? Rgba(30, 60, 190) : Rgba(18, 22, 110));
-    draw->AddRect(min, max, selected ? Rgba(200, 235, 255) : Rgba(214, 186, 110, 0.9f), 0.0f, 0,
-                  2.0f * scale);
-    // The crescent caps at both ends.
-    for (const float cx : {min.x, max.x})
-    {
-      draw->AddCircleFilled({cx, (min.y + max.y) * 0.5f}, row_h * 0.52f * scale, Rgba(214, 186, 110), 24);
-      draw->AddCircleFilled({cx + (cx == min.x ? 9.0f : -9.0f) * scale, (min.y + max.y) * 0.5f},
-                            row_h * 0.46f * scale, selected ? Rgba(50, 90, 215) : Rgba(27, 38, 140), 24);
-    }
-    const float text_size = 30.0f * scale;
-    Text(draw, text_size, {at(row_x + 44, 0).x, (min.y + max.y - text_size) * 0.5f},
-         selected ? Rgba(255, 255, 255) : Rgba(205, 215, 255), ROWS[row].name);
+      canvas.ThreeSlice(BAR_LIT, 535, cy - BAR_HALF * 1.2f, 1025, cy + BAR_HALF * 1.2f, 16);
+    else
+      canvas.ThreeSlice(BAR, 540, cy - BAR_HALF, 1020, cy + BAR_HALF, 16);
+    canvas.Sprite(MOON_LEFT, 546, cy, 1.3f);
+    canvas.Sprite(MOON_RIGHT, 1029, cy, 1.3f);
+    canvas.Text(Utf32(ROWS[row].name), 572, cy, 33, selected ? Rgba(255, 255, 255) : Rgba(222, 222, 255));
 
-    const std::string value = ValueText(m_settings, row);
-    const ImVec2 box_min = at(row_x + row_w - 150, y + 10), box_max = at(row_x + row_w - 28, y + row_h - 10);
-    draw->AddRectFilled(box_min, box_max, selected ? Rgba(90, 170, 255) : Rgba(60, 120, 230), 8.0f * scale);
-    const ImVec2 value_extent = TextSize(text_size, value.c_str());
-    Text(draw, text_size,
-         {(box_min.x + box_max.x - value_extent.x) * 0.5f, (box_min.y + box_max.y - value_extent.y) * 0.5f},
-         Rgba(255, 255, 255), value.c_str(), false);
+    const std::u32string value = Utf32(ValueText(m_settings, row));
+    canvas.NineSlice(FILL, 902, cy - 22, 1010, cy + 22, 16, 0.75f, selected ? Rgba(96, 166, 255) : Rgba(64, 128, 238));
+    canvas.TextCentered(value, 956, cy, 32, Rgba(255, 255, 255), false);
     if (selected)
     {
-      // Arrows on the value box for left and right.
-      const float ay = (box_min.y + box_max.y) * 0.5f, s = 8.0f * scale;
-      draw->AddTriangleFilled({box_min.x - 4 * scale, ay}, {box_min.x + s - 4 * scale, ay - s},
-                              {box_min.x + s - 4 * scale, ay + s}, Rgba(255, 255, 255));
-      draw->AddTriangleFilled({box_max.x + 4 * scale, ay}, {box_max.x - s + 4 * scale, ay - s},
-                              {box_max.x - s + 4 * scale, ay + s}, Rgba(255, 255, 255));
+      // Left and right change the value.
+      const ImVec2 l = canvas.At(894, cy), r = canvas.At(1018, cy);
+      const float s = 7.0f * scale;
+      draw->AddTriangleFilled(l, {l.x + s, l.y - s}, {l.x + s, l.y + s}, Rgba(255, 255, 255));
+      draw->AddTriangleFilled(r, {r.x - s, r.y - s}, {r.x - s, r.y + s}, Rgba(255, 255, 255));
     }
   }
 
-  // Help line and button guide, as at the bottom of the Options screen.
-  const float help_size = 28.0f * scale;
   const char* help = SameAs(m_settings, m_running) ? ROWS[m_row].help : "Changes apply the next time the game starts";
-  const ImVec2 help_extent = TextSize(help_size, help);
-  Text(draw, help_size, {origin.x + (1280.0f * scale - help_extent.x) * 0.5f, at(0, 612).y}, Rgba(255, 255, 255),
-       help);
-  const char* guide = "(<)(>): Change     (B): Back";
-  const ImVec2 guide_extent = TextSize(help_size, guide);
-  Text(draw, help_size, {origin.x + (1280.0f * scale - guide_extent.x) * 0.5f, at(0, 652).y}, Rgba(255, 255, 255),
-       guide);
+  canvas.TextCentered(Utf32(help), 640, 610, 28, Rgba(255, 255, 255));
+  const bool classic = m_classic && m_classic();
+  std::u32string guide{GLYPH_DPAD};
+  guide += U": Change      ";
+  guide += classic ? std::u32string{GLYPH_CLASSIC_X, U'/', GLYPH_CLASSIC_Y} : std::u32string{GLYPH_B};
+  guide += U": Back";
+  canvas.TextCentered(guide, 640, 664, 28, Rgba(255, 255, 255));
 }
 }  // namespace dualize

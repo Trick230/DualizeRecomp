@@ -186,7 +186,7 @@ Machine::Machine(MachineConfig config_)
     : config(std::move(config_)), cpu(*this, memory, scheduler), pi(*this), vi(*this), exi(*this), ai(*this),
       gfx(*this), hollywood(*this), ios(*this), wud(*this),
       m_menu(m_gamepads, [this] { return AutomationMenuButtons(); }, [] { return PadDrivesClassic(); },
-             config.user / "graphics.ini",
+             config.game, config.user / "graphics.ini",
              GraphicsSettings::FromConfig(config))
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
