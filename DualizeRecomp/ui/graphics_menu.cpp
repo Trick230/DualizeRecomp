@@ -137,11 +137,87 @@ constexpr Piece VALUE_OFF{SHEET_LABELS, 103, 194, 140, 209};
 // Button icons in the game's font (its messages write them as Greek letters).
 constexpr char32_t GLYPH_DPAD = 0x397, GLYPH_B = 0x399;
 
-// The Options screen's own timings (at 30 frames a second): its list slides
-// in from the right as it fades in, the help line after it; leaving, the
-// whole screen fades out.
-constexpr double OPEN_SECONDS = 0.13, HELP_DELAY = 0.1, FADE_SECONDS = 0.1, CLOSE_SECONDS = 0.2;
-constexpr float SLIDE = 190.0f;
+// The Options screen's own entrance (at 30 frames a second): the icon in its
+// frame slides in from the right, then the list slides in as it fades in,
+// then the help line; leaving, the whole screen fades out.
+constexpr double FADE_SECONDS = 0.1, ICON_SECONDS = 0.2, LIST_DELAY = 0.17, LIST_SECONDS = 0.13, HELP_DELAY = 0.3,
+                 CLOSE_SECONDS = 0.2;
+constexpr float ICON_SLIDE = 400.0f, LIST_SLIDE = 190.0f;
+
+float EaseOut(float t)
+{
+  return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+}
+
+float FigureAdvance(char c, float h)
+{
+  const float w = 0.56f * h;
+  switch (c)
+  {
+  case '1':
+    return 0.62f * w;
+  case '.':
+    return 0.2f * h;
+  case 'x':
+    return 0.62f * h;
+  default:
+    return w;
+  }
+}
+
+// Figures and the x, which the labels' lettering lacks, stroked in its
+// geometric style: `h` its capital height, `thick` its stroke.
+void Figure(ImDrawList* draw, char c, ImVec2 at, float h, float thick, ImU32 color)
+{
+  const float x = at.x, top = at.y, w = 0.56f * h, pi = 3.14159265f;
+  const auto line = [&](std::initializer_list<ImVec2> points) {
+    for (const ImVec2& p : points)
+      draw->PathLineTo(p);
+    draw->PathStroke(color, 0, thick);
+  };
+  switch (c)
+  {
+  case '1':
+    line({{x + 0.1f * w, top + 0.2f * h}, {x + 0.5f * w, top}, {x + 0.5f * w, top + h}});
+    return;
+  case '2':
+    draw->PathArcTo({x + w * 0.5f, top + w * 0.5f}, w * 0.5f, pi, 2.0f * pi + 0.55f, 16);
+    draw->PathLineTo({x, top + h});
+    draw->PathLineTo({x + w, top + h});
+    draw->PathStroke(color, 0, thick);
+    return;
+  case '3':
+    draw->PathArcTo({x + w * 0.5f, top + 0.23f * h}, 0.23f * h, pi + 0.5f, 2.5f * pi, 16);
+    draw->PathStroke(color, 0, thick);
+    draw->PathArcTo({x + w * 0.5f, top + 0.72f * h}, 0.27f * h, -0.5f * pi, pi - 0.45f, 18);
+    draw->PathStroke(color, 0, thick);
+    return;
+  case '4':
+    line({{x + 0.74f * w, top + h}, {x + 0.74f * w, top}, {x, top + 0.7f * h}, {x + w, top + 0.7f * h}});
+    return;
+  case '5':
+    draw->PathLineTo({x + 0.9f * w, top});
+    draw->PathLineTo({x + 0.2f * w, top});
+    draw->PathLineTo({x + 0.12f * w, top + 0.44f * h});
+    draw->PathArcTo({x + 0.48f * w, top + 0.68f * h}, 0.31f * h, -2.3f, pi - 0.4f, 20);
+    draw->PathStroke(color, 0, thick);
+    return;
+  case '8':
+    draw->AddCircle({x + w * 0.5f, top + 0.22f * h}, 0.22f * h, color, 16, thick);
+    draw->AddCircle({x + w * 0.5f, top + 0.72f * h}, 0.28f * h, color, 20, thick);
+    return;
+  case '.':
+    draw->AddCircleFilled({x + 0.1f * h, top + h - thick * 0.6f}, thick * 0.75f, color);
+    return;
+  case 'x':
+  {
+    const float xh = 0.64f * h, xw = 0.62f * h;
+    line({{x, top + h - xh}, {x + xw, top + h}});
+    line({{x + xw, top + h - xh}, {x, top + h}});
+    return;
+  }
+  }
+}
 
 float Clamp01(double v)
 {
@@ -612,8 +688,7 @@ void GraphicsMenu::Draw()
   const double since = ImGui::GetTime() - m_open_time;
   const float closing = m_closing ? 1.0f - Clamp01((ImGui::GetTime() - m_close_time) / CLOSE_SECONDS) : 1.0f;
   const float screen_alpha = Clamp01(since / FADE_SECONDS) * closing;
-  const float list_t = Clamp01(since / OPEN_SECONDS);
-  const float list_eased = 1.0f - (1.0f - list_t) * (1.0f - list_t) * (1.0f - list_t);
+  const float icon_t = Clamp01(since / ICON_SECONDS), list_t = Clamp01((since - LIST_DELAY) / LIST_SECONDS);
   const float help_alpha = Clamp01((since - HELP_DELAY) / FADE_SECONDS) * closing;
 
   if (!m_assets->loaded)
@@ -653,10 +728,12 @@ void GraphicsMenu::Draw()
   // As the Options screen lays its list out: the title, the selected row's
   // icon in its frame on the left, the rows on the right, help and buttons below.
   canvas.Sprite(TITLE_OPTIONS, 640, 122, 1.48f);
+  Adjust(draw, first_vertex, screen_alpha);
+  const int icon_vertex = draw->VtxBuffer.Size;
   canvas.NineSlice(FILL, 266, 299, 483, 516, 16, 1.0f, Rgba(108, 0, 206));
   canvas.NineSlice(FRAME, 257, 290, 492, 525, 20, 1.45f, IM_COL32_WHITE, true);
   canvas.Sprite(ICON_TV, 375, 407, 1.62f);
-  Adjust(draw, first_vertex, screen_alpha);
+  Adjust(draw, icon_vertex, Clamp01(since / FADE_SECONDS) * closing, (1.0f - EaseOut(icon_t)) * ICON_SLIDE * scale);
   const int list_vertex = draw->VtxBuffer.Size;
 
   // The Options screen's rows at its own size (the art 1.48 times as big,
@@ -694,7 +771,20 @@ void GraphicsMenu::Draw()
     if (value == "ON" || value == "OFF")
       canvas.Sprite(value == "ON" ? VALUE_ON : VALUE_OFF, 956, cy, LETTERING);
     else
-      canvas.TextCentered(Utf32(value), 956, cy, 30, Rgba(255, 255, 255), false);
+    {
+      // Figures drawn at the lettering's size: capitals 14 texels high.
+      constexpr float CAPITAL = 14.0f * LETTERING, STROKE = 2.7f, GAP = 2.5f;
+      float width = 0;
+      for (char c : value)
+        width += FigureAdvance(c, CAPITAL) + GAP;
+      float pen = 956 - (width - GAP) * 0.5f;
+      for (char c : value)
+      {
+        const ImVec2 at = canvas.At(pen, cy - CAPITAL * 0.5f);
+        Figure(draw, c, at, CAPITAL * scale, STROKE * scale, Rgba(255, 255, 255));
+        pen += FigureAdvance(c, CAPITAL) + GAP;
+      }
+    }
     if (selected)
     {
       // Left and right change the value.
@@ -705,7 +795,7 @@ void GraphicsMenu::Draw()
     }
   }
 
-  Adjust(draw, list_vertex, list_t * closing, (1.0f - list_eased) * SLIDE * scale);
+  Adjust(draw, list_vertex, list_t * closing, (1.0f - EaseOut(list_t)) * LIST_SLIDE * scale);
 
   // Help and the buttons, with the GameCube pad's icons.
   const int help_vertex = draw->VtxBuffer.Size;
