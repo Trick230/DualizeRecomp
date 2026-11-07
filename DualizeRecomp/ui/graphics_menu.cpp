@@ -103,6 +103,7 @@ ImU32 Rgba(int r, int g, int b, float a = 1.0f)
 // Where the art is on the disc (the Options screen's textures and the font
 // its help line uses), and the pieces of it the menu draws, in texels.
 constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
+constexpr const char* OPTION_TEXTURES_FRENCH = "files/csd/textures/option_allfr.tls";
 constexpr const char* FONT = "files/fontJapan";
 enum Sheet
 {
@@ -112,9 +113,10 @@ enum Sheet
   SHEET_ICONS,   // the rows' icons
   SHEET_FILL,    // a white rounded square, tinted
   SHEET_LABELS,  // the list's labels and values, grey on black (made a white mask)
+  SHEET_NAMES,   // the rows' names, made from the labels' letters (a white mask)
   SHEET_COUNT,
 };
-constexpr std::array<uint32_t, SHEET_COUNT> SHEET_IMAGES{0, 2, 3, 4, 16, 6};
+constexpr std::array<uint32_t, SHEET_COUNT> SHEET_IMAGES{0, 2, 3, 4, 16, 6, 6};
 struct Piece
 {
   Sheet sheet;
@@ -146,6 +148,20 @@ float Clamp01(double v)
   return static_cast<float>(std::clamp(v, 0.0, 1.0));
 }
 
+// What was drawn since `first` (white) coloured from `top` at screen height
+// `y0` to `bottom` at `y1`.
+void Shade(ImDrawList* draw, int first, float y0, float y1, ImU32 top, ImU32 bottom)
+{
+  const ImVec4 a = ImGui::ColorConvertU32ToFloat4(top), b = ImGui::ColorConvertU32ToFloat4(bottom);
+  for (int i = first; i < draw->VtxBuffer.Size; ++i)
+  {
+    ImDrawVert& v = draw->VtxBuffer[i];
+    const float t = std::clamp((v.pos.y - y0) / (y1 - y0), 0.0f, 1.0f);
+    v.col = ImGui::ColorConvertFloat4ToU32(
+        {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t});
+  }
+}
+
 // What was drawn since `first` faded by `alpha` and moved across by `dx` pixels.
 void Adjust(ImDrawList* draw, int first, float alpha, float dx = 0)
 {
@@ -162,6 +178,92 @@ std::u32string Utf32(std::string_view text)
 {
   return {text.begin(), text.end()};
 }
+
+// The labels' lettering: a 24-texel line each, the baseline under row 18.
+// Where each letter the rows' names need is (the French labels have the V and
+// a v), the I being the l's bar and the y a v with its right stroke carried
+// on down.
+constexpr uint32_t LABEL_LINE = 24, NAME_GAP = 2, NAME_SPACE = 7;
+struct Letter
+{
+  char c;
+  bool french;
+  uint32_t top, x0, x1;
+};
+constexpr std::array<Letter, 24> LETTERS{{
+    {'A', false, 24, 72, 89},   {'n', false, 0, 27, 37},    {'t', false, 24, 175, 182}, {'i', false, 0, 152, 155},
+    {'-', false, 144, 130, 136}, {'l', false, 144, 56, 58}, {'a', false, 0, 15, 24},    {'s', false, 24, 89, 97},
+    {'g', false, 0, 39, 51},    {'R', false, 24, 151, 162}, {'e', false, 24, 32, 43},   {'o', false, 24, 189, 201},
+    {'u', false, 0, 54, 63},    {'S', false, 0, 111, 122},  {'c', false, 24, 45, 55},   {'F', false, 120, 52, 62},
+    {'r', false, 48, 131, 137}, {'m', false, 168, 136, 152}, {'I', false, 144, 56, 58}, {'p', false, 24, 99, 111},
+    {'V', true, 24, 1, 11},     {'v', true, 72, 30, 38},    {'b', false, 144, 42, 54},  {'O', false, 189, 103, 118},
+}};
+
+struct NameMaker
+{
+  const Image& us;
+  const Image& french;
+  Image out;
+
+  // The letter's columns, grey; empty when the labels lack it.
+  std::vector<std::array<uint8_t, LABEL_LINE>> Columns(char c) const
+  {
+    std::vector<std::array<uint8_t, LABEL_LINE>> columns;
+    if (c == 'y')
+    {
+      columns = Columns('v');
+      const auto v = columns;
+      for (uint32_t y = 19; y < 23; ++y)
+      {
+        for (size_t x = 0; x + 4 < v.size(); ++x)
+          columns[x][y] = std::max(columns[x][y], v[x + 4][y - 8]);
+      }
+      return columns;
+    }
+    for (const Letter& l : LETTERS)
+    {
+      if (l.c != c)
+        continue;
+      const Image& image = l.french ? french : us;
+      for (uint32_t x = l.x0; x < l.x1; ++x)
+      {
+        auto& column = columns.emplace_back();
+        for (uint32_t y = 0; y < LABEL_LINE; ++y)
+          column[y] = image.rgba[(static_cast<size_t>(l.top + y) * image.width + x) * 4];
+      }
+      // An accent cuts off the V's right arm's top: it mirrors the left one.
+      if (c == 'V')
+        columns.push_back(columns.front());
+      break;
+    }
+    return columns;
+  }
+
+  // `name` on line `line` of the output; its width in texels.
+  uint32_t Write(std::string_view name, uint32_t line)
+  {
+    uint32_t pen = 0;
+    for (char c : name)
+    {
+      if (c == ' ')
+      {
+        pen += NAME_SPACE;
+        continue;
+      }
+      for (const auto& column : Columns(c))
+      {
+        for (uint32_t y = 0; y < LABEL_LINE && pen < out.width; ++y)
+        {
+          uint8_t* p = &out.rgba[(static_cast<size_t>(line * LABEL_LINE + y) * out.width + pen) * 4];
+          p[0] = p[1] = p[2] = std::max(p[0], column[y]);
+        }
+        ++pen;
+      }
+      pen += NAME_GAP;
+    }
+    return std::min(pen, out.width);
+  }
+};
 }  // namespace
 
 struct GraphicsMenu::Assets
@@ -169,6 +271,7 @@ struct GraphicsMenu::Assets
   bool loaded = false, ok = false;
   std::array<ImTextureID, SHEET_COUNT> sheets{};
   std::array<ImVec2, SHEET_COUNT> sizes{};
+  std::array<uint32_t, ROW_COUNT> name_widths{};
   BitmapFont font;
   ImTextureID font_texture{};
 
@@ -180,11 +283,24 @@ struct GraphicsMenu::Assets
       auto image = LoadTplImage(game / OPTION_TEXTURES, SHEET_IMAGES[i]);
       if (!image)
         return;
-      if (i == SHEET_LABELS)
+      if (i == SHEET_NAMES)
+      {
+        const auto french = LoadTplImage(game / OPTION_TEXTURES_FRENCH, SHEET_IMAGES[i]);
+        if (!french || image->width != 256 || french->width != 256)
+          return;
+        NameMaker maker{*image, *french, {256, LABEL_LINE * ROW_COUNT, {}}};
+        maker.out.rgba.assign(static_cast<size_t>(maker.out.width) * maker.out.height * 4, 0);
+        for (int row = 0; row < ROW_COUNT; ++row)
+          name_widths[row] = maker.Write(ROWS[row].name, row);
+        image = std::move(maker.out);
+      }
+      if (i == SHEET_LABELS || i == SHEET_NAMES)
       {
         for (size_t p = 0; p < image->rgba.size(); p += 4)
         {
-          image->rgba[p + 3] = image->rgba[p];
+          // Edges filled out a little: the game draws its lettering fuller.
+          image->rgba[p + 3] =
+              static_cast<uint8_t>(std::lround(255.0 * std::pow(image->rgba[p] / 255.0, 0.6)));
           image->rgba[p] = image->rgba[p + 1] = image->rgba[p + 2] = 255;
         }
       }
@@ -519,7 +635,7 @@ void GraphicsMenu::Draw()
     draw->AddRectFilled(canvas.At(x0, y0), canvas.At(x1, y1), solid);
     draw->AddRectFilledMultiColor(canvas.At(x1, y0), canvas.At(x1 + fade, y1), solid, clear, clear, solid);
   };
-  band(520, 222, 1055, 596);
+  band(520, 196, 1060, 600);
   band(300, 588, 980, 690);
   if (!m_assets->ok)
   {
@@ -543,32 +659,47 @@ void GraphicsMenu::Draw()
   Adjust(draw, first_vertex, screen_alpha);
   const int list_vertex = draw->VtxBuffer.Size;
 
-  constexpr float ROW_PITCH = 74.0f, BAR_HALF = 32.0f;
+  // The Options screen's rows at its own size (the art 1.48 times as big,
+  // the lettering 1.5); it has four, so the five here sit closer.
+  constexpr float ROW_PITCH = 80.0f, LIST_CENTER = 396.0f, ART = 1.48f, LETTERING = 1.5f;
   for (int row = 0; row < ROW_COUNT; ++row)
   {
     const bool selected = row == m_row;
-    const float cy = 409.0f + (row - ROW_COUNT / 2) * ROW_PITCH;
-    if (selected)
-      canvas.ThreeSlice(BAR_LIT, 535, cy - BAR_HALF * 1.2f, 1025, cy + BAR_HALF * 1.2f, 16);
-    else
-      canvas.ThreeSlice(BAR, 540, cy - BAR_HALF, 1020, cy + BAR_HALF, 16);
-    canvas.Sprite(MOON_LEFT, 546, cy, 1.3f);
-    canvas.Sprite(MOON_RIGHT, 1029, cy, 1.3f);
-    canvas.Text(Utf32(ROWS[row].name), 572, cy, 33, selected ? Rgba(255, 255, 255) : Rgba(222, 222, 255));
+    const float cy = LIST_CENTER + (row - ROW_COUNT / 2) * ROW_PITCH;
+    const Piece& bar = selected ? BAR_LIT : BAR;
+    const float half = (bar.y1 - bar.y0) * ART * 0.5f, grow = selected ? 3.0f : 0.0f;
+    canvas.ThreeSlice(bar, 541 - grow, cy - half, 1019 + grow, cy + half, 16);
+    canvas.Sprite(MOON_LEFT, 553, cy, 1.46f);
+    canvas.Sprite(MOON_RIGHT, 1022, cy, 1.46f);
+    // The name with the game's soft violet glow around it.
+    const uint32_t width = m_assets->name_widths[row];
+    const Piece name{SHEET_NAMES, 0, static_cast<float>(row * LABEL_LINE), static_cast<float>(width),
+                     static_cast<float>((row + 1) * LABEL_LINE)};
+    const float top = cy - 18.5f, bottom = top + LABEL_LINE * LETTERING, right = 572 + width * LETTERING;
+    for (const ImVec2 d : {ImVec2{-1.5f, 0}, ImVec2{1.5f, 0}, ImVec2{0, -1.5f}, ImVec2{0, 1.5f}})
+      canvas.Image(name, 572 + d.x, top + d.y, right + d.x, bottom + d.y, Rgba(170, 110, 255, 0.3f));
+    canvas.Image(name, 572, top, right, bottom, selected ? Rgba(255, 255, 255) : Rgba(255, 214, 255));
 
-    // The value in a box of the game's lighter blue, the bar showing through;
-    // ON and OFF in the labels' own lettering.
+    // The value in the game's box: a blue that lightens downwards, cyan on the
+    // selected row (its bar showing through); ON and OFF in the labels' lettering.
     const std::string value = ValueText(m_settings, row);
-    canvas.NineSlice(FILL, 902, cy - 22, 1010, cy + 22, 16, 0.75f, Rgba(72, 136, 255, selected ? 0.9f : 0.8f));
+    const int box_vertex = draw->VtxBuffer.Size;
+    canvas.NineSlice(FILL, 900, cy - 21.5f, 1012, cy + 21.5f, 16, 0.75f, IM_COL32_WHITE);
+    if (selected)
+      Shade(draw, box_vertex, canvas.At(0, cy - 21.5f).y, canvas.At(0, cy + 21.5f).y, Rgba(104, 222, 255, 0.93f),
+            Rgba(84, 190, 255, 0.93f));
+    else
+      Shade(draw, box_vertex, canvas.At(0, cy - 21.5f).y, canvas.At(0, cy + 21.5f).y, Rgba(36, 106, 255),
+            Rgba(66, 140, 255));
     if (value == "ON" || value == "OFF")
-      canvas.Sprite(value == "ON" ? VALUE_ON : VALUE_OFF, 956, cy, 1.5f);
+      canvas.Sprite(value == "ON" ? VALUE_ON : VALUE_OFF, 956, cy, LETTERING);
     else
       canvas.TextCentered(Utf32(value), 956, cy, 30, Rgba(255, 255, 255), false);
     if (selected)
     {
       // Left and right change the value.
-      const ImVec2 l = canvas.At(894, cy), r = canvas.At(1018, cy);
-      const float s = 7.0f * scale;
+      const ImVec2 l = canvas.At(905, cy), r = canvas.At(1007, cy);
+      const float s = 5.0f * scale;
       draw->AddTriangleFilled(l, {l.x + s, l.y - s}, {l.x + s, l.y + s}, Rgba(255, 255, 255));
       draw->AddTriangleFilled(r, {r.x - s, r.y - s}, {r.x - s, r.y + s}, Rgba(255, 255, 255));
     }
