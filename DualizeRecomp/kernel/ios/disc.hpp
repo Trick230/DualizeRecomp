@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <vector>
 
 namespace dualize::ios
 {
@@ -23,5 +25,15 @@ public:
   virtual bool HasWiiHashes() const = 0;
   // One past the last readable offset (the physical disc size).
   virtual uint64_t EndOffset() const = 0;
+
+  // Serves a file of the disc (a path under the extracted disc) from `bytes`
+  // instead, before the game reads it; the size must stay. False when the
+  // disc can't (not one of its files, another size, an image).
+  virtual bool OverrideFile(const std::filesystem::path& path, std::vector<uint8_t> bytes)
+  {
+    (void)path;
+    (void)bytes;
+    return false;
+  }
 };
 }  // namespace dualize::ios

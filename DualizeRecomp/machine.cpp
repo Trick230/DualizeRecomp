@@ -214,9 +214,11 @@ bool Machine::Start(std::string* error)
     *error = "cannot reserve the guest address space";
     return false;
   }
-  disc = ios::OpenDirectoryDisc(config.game, error);
-  if (!disc)
+  std::shared_ptr<ios::Disc> opened = ios::OpenDirectoryDisc(config.game, error);
+  if (!opened)
     return false;
+  PatchNightsDisc(*opened, config.game);
+  disc = std::move(opened);
   if (!cpu.AttachModule(config.idle_pc, config.rso_list, error))
     return false;
   if (!config.log_entries.empty())

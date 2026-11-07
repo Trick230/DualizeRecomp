@@ -1,6 +1,8 @@
 #include "ui/game_assets.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <charconv>
 #include <cstring>
 #include <fstream>
@@ -149,6 +151,14 @@ int ParseInt(std::string_view& text)
 std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t index)
 {
   const std::vector<uint8_t> data = ReadFile(path);
+  auto decoded = DecodeTplImage(data, index);
+  if (!decoded)
+    return std::nullopt;
+  return std::move(decoded->image);
+}
+
+std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index)
+{
   if (data.size() < 12 || Be32(data.data()) != 0x0020AF30)
     return std::nullopt;
   const uint32_t count = Be32(&data[4]), table = Be32(&data[8]);
@@ -157,7 +167,8 @@ std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t in
   const uint32_t header = Be32(&data[table + 8 * index]);
   if (header + 12 > data.size())
     return std::nullopt;
-  Image image;
+  TplImage tpl;
+  Image& image = tpl.image;
   image.height = Be16(&data[header]);
   image.width = Be16(&data[header + 2]);
   const uint32_t format = Be32(&data[header + 4]), offset = Be32(&data[header + 8]);
@@ -180,7 +191,65 @@ std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t in
     for (uint32_t x = 0; x < blocks_x; ++x, src += f->block_bytes)
       DecodeBlock(*f, src, image, x * f->block_w, y * f->block_h);
   }
-  return image;
+  tpl.format = format;
+  tpl.offset = offset;
+  return tpl;
+}
+
+void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data)
+{
+  const auto grey565 = [](int v) {
+    const int r = (v * 31 + 127) / 255, g = (v * 63 + 127) / 255;
+    return static_cast<uint16_t>(r << 11 | g << 5 | r);
+  };
+  const uint32_t blocks_x = (image.width + 7) / 8;
+  for (uint32_t by = y0 / 8; by < (y1 + 7) / 8 && by * 8 < image.height; ++by)
+  {
+    for (uint32_t bx = 0; bx < blocks_x; ++bx)
+    {
+      uint8_t* block = data + (static_cast<size_t>(by) * blocks_x + bx) * 32;
+      for (uint32_t sub = 0; sub < 4; ++sub)
+      {
+        const uint32_t sx = bx * 8 + sub % 2 * 4, sy = by * 8 + sub / 2 * 4;
+        std::array<int, 16> grey{};
+        int lo = 255, hi = 0;
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+          const uint32_t x = std::min(sx + i % 4, image.width - 1), y = std::min(sy + i / 4, image.height - 1);
+          grey[i] = image.rgba[(static_cast<size_t>(y) * image.width + x) * 4];
+          lo = std::min(lo, grey[i]);
+          hi = std::max(hi, grey[i]);
+        }
+        const uint16_t c0 = grey565(hi), c1 = grey565(lo);
+        // The levels the GPU decodes them to (four when c0 > c1).
+        const int a = Rgb565(c0)[0], b = Rgb565(c1)[0];
+        const std::array<int, 4> levels{a, b, (2 * a + b) / 3, (a + 2 * b) / 3};
+        uint32_t bits = 0;
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+          uint32_t best = 0;
+          if (c0 > c1)
+          {
+            for (uint32_t k = 1; k < 4; ++k)
+            {
+              if (std::abs(levels[k] - grey[i]) < std::abs(levels[best] - grey[i]))
+                best = k;
+            }
+          }
+          bits |= best << (30 - 2 * i);
+        }
+        uint8_t* s = block + sub * 8;
+        s[0] = static_cast<uint8_t>(c0 >> 8);
+        s[1] = static_cast<uint8_t>(c0);
+        s[2] = static_cast<uint8_t>(c1 >> 8);
+        s[3] = static_cast<uint8_t>(c1);
+        s[4] = static_cast<uint8_t>(bits >> 24);
+        s[5] = static_cast<uint8_t>(bits >> 16);
+        s[6] = static_cast<uint8_t>(bits >> 8);
+        s[7] = static_cast<uint8_t>(bits);
+      }
+    }
+  }
 }
 
 // <base>.inf is text: "bitmapSize : W H", "fontSize : N N", a palette of four

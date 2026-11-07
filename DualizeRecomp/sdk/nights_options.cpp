@@ -5,14 +5,23 @@
 //
 // Found by their code in config/nights.sigs; ModeOption's update and where it
 // leaves come from the defines there (ppc_natives.h).
+//
+// The row's label is no message but a line of a texture with all the
+// list's labels; the disc serves that texture with the line redrawn.
 
 #include "core/cpu.h"
 #include "ppc_natives.h"
 
 #include "cpu/cpu.hpp"
+#include "kernel/ios/disc.hpp"
 #include "machine.hpp"
+#include "ui/game_assets.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -88,11 +97,161 @@ void RenameMessages(const Memory& memory)
     }
   }
 }
+
+// The Options list's labels: image 6 of its textures, a 256x256 CMPR of grey
+// text on black, a 24-texel line per label. The aspect row's line (the
+// second) is redrawn as "Graphics Settings" from the other lines' letters,
+// the G from a C.
+constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
+constexpr uint32_t LABELS_IMAGE = 6, LINE = 24, ASPECT_LINE = 1;
+
+struct Cut
+{
+  int line, x0, x1;  // texels
+};
+constexpr Cut CUT_C{1, 3, 18}, CUT_E{1, 32, 43}, CUT_SETTINGS{0, 111, 193};
+constexpr std::array<Cut, 7> CUT_RAPHICS{{
+    {2, 131, 137},  // r, of Controller
+    {0, 15, 24},    // a, of Language
+    {1, 99, 111},   // p, of Aspect
+    {1, 20, 30},    // h, of Check
+    {0, 152, 155},  // i, of Settings
+    {1, 45, 55},    // c, of Check
+    {1, 89, 97},    // s, of Aspect
+}};
+
+using Glyph = std::array<std::array<uint8_t, 32>, LINE>;  // rows of up to 32 texels
+
+struct Labels
+{
+  dualize::Image& image;
+
+  uint8_t& At(uint32_t x, uint32_t y) { return image.rgba[(static_cast<size_t>(y) * image.width + x) * 4]; }
+
+  Glyph Take(const Cut& cut, int* width)
+  {
+    Glyph glyph{};
+    *width = cut.x1 - cut.x0;
+    for (uint32_t y = 0; y < LINE; ++y)
+    {
+      for (int x = 0; x < *width; ++x)
+        glyph[y][x] = At(cut.x0 + x, cut.line * LINE + y);
+    }
+    return glyph;
+  }
+
+  // A C with a G's bar (as thick as an e's) and the spur down its right end.
+  Glyph MakeG(int* width)
+  {
+    int w = 0, e_w = 0;
+    Glyph g = Take(CUT_C, &w);
+    const Glyph e = Take(CUT_E, &e_w);
+    int top = LINE, bottom = 0;
+    for (int y = 0; y < static_cast<int>(LINE); ++y)
+    {
+      for (int x = 0; x < w; ++x)
+      {
+        if (g[y][x] > 128)
+        {
+          top = std::min(top, y);
+          bottom = std::max(bottom, y);
+        }
+      }
+    }
+    const int mid = (top + bottom) / 2 + 1;
+    int bar = 8, best = -1;
+    for (int y = 8; y < 18; ++y)
+    {
+      int sum = 0;
+      for (int x = 0; x < e_w; ++x)
+        sum += e[y][x];
+      if (sum > best)
+      {
+        best = sum;
+        bar = y;
+      }
+    }
+    for (int k = 0; k < 3; ++k)
+    {
+      uint8_t level = 0;
+      for (int x = 2; x < e_w - 2; ++x)
+        level = std::max(level, e[bar - 1 + k][x]);
+      for (int x = w / 2 + 1; x < w; ++x)
+        g[mid - 1 + k][x] = std::max(g[mid - 1 + k][x], level);
+    }
+    for (int j = 0; j < 4; ++j)
+    {
+      uint8_t level = 0;
+      for (int y = mid; y <= bottom; ++y)
+        level = std::max(level, g[y][w - 4 + j]);
+      for (int y = mid; y <= bottom; ++y)
+        g[y][w - 4 + j] = std::max(g[y][w - 4 + j], level);
+    }
+    *width = w + 1;
+    return g;
+  }
+
+  void Redraw()
+  {
+    std::array<std::array<uint8_t, 256>, LINE> line{};
+    int pen = 3;
+    const auto put = [&](const Glyph& glyph, int width) {
+      for (uint32_t y = 0; y < LINE; ++y)
+      {
+        for (int x = 0; x < width && pen + x < 256; ++x)
+          line[y][pen + x] = glyph[y][x];
+      }
+      pen += width;
+    };
+    int width = 0;
+    put(MakeG(&width), width);
+    for (const Cut& cut : CUT_RAPHICS)
+    {
+      pen += 2;
+      put(Take(cut, &width), width);
+    }
+    pen += 8;
+    for (int x = CUT_SETTINGS.x0; x < CUT_SETTINGS.x1; x += 32)
+    {
+      const Cut part{CUT_SETTINGS.line, x, std::min(x + 32, CUT_SETTINGS.x1)};
+      put(Take(part, &width), width);
+    }
+    for (uint32_t y = 0; y < LINE; ++y)
+    {
+      for (uint32_t x = 0; x < 256; ++x)
+      {
+        uint8_t* p = &image.rgba[(static_cast<size_t>(ASPECT_LINE * LINE + y) * image.width + x) * 4];
+        p[0] = p[1] = p[2] = line[y][x];
+      }
+    }
+  }
+};
+}  // namespace
+
+namespace dualize
+{
+void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
+{
+  const std::filesystem::path path = game / OPTION_TEXTURES;
+  std::ifstream file(path, std::ios::binary);
+  std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
+  if (!labels || labels->format != 14 || labels->image.width != 256 || labels->image.height < 2 * LINE)
+    return;
+  Labels{labels->image}.Redraw();
+  EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (ASPECT_LINE + 1) * LINE, bytes.data() + labels->offset);
+  disc.OverrideFile(path, std::move(bytes));
+}
+}  // namespace dualize
+
+namespace
+{
+using dualize::Cpu;
+using dualize::GetMachine;
 }  // namespace
 
 // ModeOption's constructor: the screen's help line is copied from the
-// messages when the cursor moves, so renaming them here reaches it. The rows'
-// labels were built before this, from the messages as they were (still to do).
+// messages when the cursor moves, so renaming them here reaches it.
 // Declines: the game's code goes on.
 extern "C" bool nights_ModeOptionCtor(CPUState* ctx)
 {

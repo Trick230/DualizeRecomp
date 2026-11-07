@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 namespace dualize::ios
@@ -306,6 +307,18 @@ public:
       return false;
     return m_partition.Read(offset, size, out, read_file);
   }
+  bool OverrideFile(const fs::path& path, std::vector<uint8_t> bytes) override
+  {
+    std::error_code error;
+    for (size_t i = 0; i < m_files.size(); ++i)
+    {
+      if (!fs::equivalent(m_files[i], path, error) || fs::file_size(m_files[i], error) != bytes.size())
+        continue;
+      m_overrides[static_cast<int32_t>(i)] = std::move(bytes);
+      return true;
+    }
+    return false;
+  }
   uint64_t GamePartition() const override { return GAME_PARTITION; }
   bool HasWiiHashes() const override { return m_wii_hashes; }
   uint64_t EndOffset() const override { return m_end_offset; }
@@ -383,6 +396,13 @@ private:
   // A few files stay open: reads come in runs from the same file.
   bool ReadFile(int32_t index, uint64_t offset, uint32_t size, uint8_t* out) const
   {
+    if (const auto it = m_overrides.find(index); it != m_overrides.end())
+    {
+      if (offset + size > it->second.size())
+        return false;
+      std::memcpy(out, it->second.data() + offset, size);
+      return true;
+    }
     OpenFile* slot = nullptr;
     for (OpenFile& open : m_open)
     {
@@ -421,6 +441,7 @@ private:
   Space m_raw;
   Space m_partition;
   std::vector<fs::path> m_files;
+  std::unordered_map<int32_t, std::vector<uint8_t>> m_overrides;
   mutable std::array<OpenFile, 8> m_open{};
   mutable size_t m_next_slot = 0;
   bool m_wii_hashes = true;

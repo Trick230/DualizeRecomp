@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -22,6 +23,18 @@ struct Image
 // One image of a TPL file, decoded to RGBA8; empty on a missing file or an
 // unknown format.
 std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t index);
+
+// The same from the file's bytes, with where the image's data starts and its GX format.
+struct TplImage
+{
+  Image image;
+  uint32_t format = 0, offset = 0;
+};
+std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index);
+
+// Encodes the rows [y0, y1) of an opaque grey image (rounded out to whole
+// blocks) as CMPR into `data`, the image's encoded bytes.
+void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);
 
 // The game's bitmap font: an atlas of 2-bit glyphs and, per character, its
 // box in the atlas.

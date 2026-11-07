@@ -184,4 +184,7 @@ inline Machine& GetMachine(Cpu& cpu)
 {
   return static_cast<Machine&>(cpu.Host());
 }
+
+// The game's files the disc serves changed (sdk/nights_options.cpp).
+void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game);
 }  // namespace dualize
