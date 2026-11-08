@@ -238,8 +238,9 @@ bool Machine::Start(std::string* error)
       .slots = 1,
       .read = ReadWiimote,
       .rumble = [](void* user, int index, bool on) {
+        Machine& machine = MachineOf(user);
         if (PadDrivesClassic())
-          MachineOf(user).m_gamepads.SetRumble(index, on ? 1.0f : 0.0f);
+          machine.m_gamepads.SetRumble(index, on && machine.m_rumble_allowed.load() ? 1.0f : 0.0f);
       },
       .speaker = SpeakerEnabled() ? WiimoteSpeaker : nullptr,
   };
@@ -523,7 +524,16 @@ bool Machine::ReadHostGcPad(int port, GcPadInput* input)
 void Machine::SetGcRumble(int port, bool on)
 {
   if (PadDrivesGc())
-    m_gamepads.SetRumble(port, on ? 1.0f : 0.0f);
+    m_gamepads.SetRumble(port, on && m_rumble_allowed.load() ? 1.0f : 0.0f);
+}
+
+void Machine::AllowRumble(bool allowed)
+{
+  if (m_rumble_allowed.exchange(allowed) && !allowed)
+  {
+    for (int port = 0; port < hid::Gamepads::MAX_PORTS; ++port)
+      m_gamepads.SetRumble(port, 0.0f);
+  }
 }
 
 // --- MMIO ---------------------------------------------------------------------

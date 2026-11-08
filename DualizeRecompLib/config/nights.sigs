@@ -14,25 +14,6 @@ define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
 # the animation starts halfway, past the icons it moves out.
 nights_ModeOptionListOpen 4 38610138 2F7AC93C4A3B8283 at @ModeOption_Update+74 jump
 define NIGHTS_MODE_OPTION_LIST_OPEN_NEXT @ModeOption_Update+78
-# The list's cursor, moved: it skips the controller window's row (the row
-# is hidden, see nights_ModeOptionValues).
-nights_ModeOptionCursor 4 801E00A4 469F74AA257D2E57 at @ModeOption_Update+184 jump
-define NIGHTS_MODE_OPTION_CURSOR_NEXT @ModeOption_Update+188
-
-# The list's value boxes, set from the options: the calls a screen makes on
-# its CSD layout, a node looked up by name in a scene (a handle on the
-# stack), the node a handle holds, the handle released.
-@ModeOption_Values 15C 9421FFC0 5ACC7E18E24014C2
-nights_ModeOptionValues 4 9421FFC0 D9FC020F5E07F021 at @ModeOption_Values jump
-define NIGHTS_MODE_OPTION_VALUES_BODY @ModeOption_Values+4
-define CSD_SCENE_NODE call(@ModeOption_Values+28)
-define CSD_FIND_NODE call(@ModeOption_Values+38)
-define CSD_RELEASE_HANDLE call(@ModeOption_Values+54)
-# CSD node methods SetPosition(node, f1 x, f2 y) and SetHideFlag(node, hide)
-# forward to the node's member; these are the members' own.
-@CsdNode_Method 48 9421FFE0 EA9BE812956F5BFC
-define CSD_CAST_SET_POSITION call(@CsdNode_Method+4C)
-define CSD_CAST_SET_HIDE call(@CsdNode_Method+B8)
 
 # ModeOption's top level (the Wi-Fi globe and the Wii settings icons): on
 # entry the screen goes straight to the settings list instead (the list's
@@ -90,7 +71,8 @@ nights_WeatherVersion 30 800D0000 11EC9682997C292F at nights_WeatherLoad+9FC
 define NIGHTS_WEATHER_LOADED_SDA imm(nights_WeatherLoad+18)
 
 # The controller window (the guide shown while playing) is off for good:
-# the two places play reads its option read 0.
+# the two places play reads its option read 0, and pass the option on as
+# the rumble's switch (its Options row reads Enable Rumble).
 @ControllerWindow_Shown DC 9421FFD0 CA155F751274576B
 nights_ControllerWindowShown 4 886300B0 F0C599EB84A199CC at @ControllerWindow_Shown+BC jump
 define NIGHTS_CONTROLLER_WINDOW_SHOWN_NEXT @ControllerWindow_Shown+C0

@@ -49,6 +49,7 @@ constexpr Message MESSAGES[] = {
     {u"Check Aspect Ratio", u"Graphics Settings"},
     {u"Check the height/width ratio of your screen", u"Change the resolution and image quality"},
     {u"Change Nintendo Wi-Fi Connection and settings", u"Change the game's settings"},
+    {u"Turn the control window display on/off", u"Turn the controller's rumble on/off"},
 };
 
 std::u16string BigEndian(std::u16string_view text)
@@ -125,6 +126,32 @@ constexpr std::array<Cut, 7> CUT_RAPHICS{{
     {1, 89, 97},    // s, of Aspect
 }};
 
+// The controller window row's line (the third), whose setting now turns the
+// controller's rumble on and off: "Enable Rumble", the word Enable as the
+// Weather Link row has it.
+constexpr uint32_t RUMBLE_LINE = 2;
+constexpr Cut CUT_ENABLE{3, 3, 69};
+constexpr std::array<Cut, 6> CUT_RUMBLE{{
+    {4, 2, 12},     // R, of Register
+    {0, 54, 63},    // u, of Language
+    {7, 136, 152},  // m, of Chime
+    {3, 39, 50},    // b, of Enable
+    {3, 53, 55},    // l, of Enable
+    {3, 57, 68},    // e, of Enable
+}};
+
+// The 2P Race window's description: image 13 of the 2P select textures, a
+// 512x128 CMPR of grey text on black. Its last two lines (rows 47-82) invite
+// play over Nintendo Wi-Fi Connection; the rows from 40 to 88 hold only them.
+constexpr const char* MODE_2P_TEXTURES = "files/csd/textures/mode2Pselectus.tls";
+constexpr uint32_t RACE_TEXT_IMAGE = 13, RACE_WIFI_Y0 = 40, RACE_WIFI_Y1 = 88;
+
+std::vector<uint8_t> ReadFile(const std::filesystem::path& path)
+{
+  std::ifstream file(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
 using Glyph = std::array<std::array<uint8_t, 32>, LINE>;  // rows of up to 32 texels
 
 struct Labels
@@ -196,39 +223,71 @@ struct Labels
     return g;
   }
 
-  void Redraw()
+  // A label line being composed left to right.
+  struct Line
   {
-    std::array<std::array<uint8_t, 256>, LINE> line{};
+    std::array<std::array<uint8_t, 256>, LINE> rows{};
     int pen = 3;
-    const auto put = [&](const Glyph& glyph, int width) {
+
+    void Put(const Glyph& glyph, int width)
+    {
       for (uint32_t y = 0; y < LINE; ++y)
       {
         for (int x = 0; x < width && pen + x < 256; ++x)
-          line[y][pen + x] = glyph[y][x];
+          rows[y][pen + x] = glyph[y][x];
       }
       pen += width;
-    };
+    }
+  };
+
+  // A cut wider than a glyph (a whole word), in glyph-sized parts.
+  void PutWide(Line& line, const Cut& cut)
+  {
     int width = 0;
-    put(MakeG(&width), width);
-    for (const Cut& cut : CUT_RAPHICS)
-    {
-      pen += 2;
-      put(Take(cut, &width), width);
-    }
-    pen += 8;
-    for (int x = CUT_SETTINGS.x0; x < CUT_SETTINGS.x1; x += 32)
-    {
-      const Cut part{CUT_SETTINGS.line, x, std::min(x + 32, CUT_SETTINGS.x1)};
-      put(Take(part, &width), width);
-    }
+    for (int x = cut.x0; x < cut.x1; x += 32)
+      line.Put(Take({cut.line, x, std::min(x + 32, cut.x1)}, &width), width);
+  }
+
+  void Store(uint32_t index, const Line& line)
+  {
     for (uint32_t y = 0; y < LINE; ++y)
     {
       for (uint32_t x = 0; x < 256; ++x)
       {
-        uint8_t* p = &image.rgba[(static_cast<size_t>(ASPECT_LINE * LINE + y) * image.width + x) * 4];
-        p[0] = p[1] = p[2] = line[y][x];
+        uint8_t* p = &image.rgba[(static_cast<size_t>(index * LINE + y) * image.width + x) * 4];
+        p[0] = p[1] = p[2] = line.rows[y][x];
       }
     }
+  }
+
+  void Redraw()
+  {
+    Line line;
+    int width = 0;
+    line.Put(MakeG(&width), width);
+    for (const Cut& cut : CUT_RAPHICS)
+    {
+      line.pen += 2;
+      line.Put(Take(cut, &width), width);
+    }
+    line.pen += 8;
+    PutWide(line, CUT_SETTINGS);
+    Store(ASPECT_LINE, line);
+  }
+
+  // Reads only lines the aspect redraw leaves alone (0, 3, 4 and 7).
+  void RedrawRumble()
+  {
+    Line line;
+    int width = 0;
+    PutWide(line, CUT_ENABLE);
+    line.pen += 6;
+    for (const Cut& cut : CUT_RUMBLE)
+    {
+      line.Put(Take(cut, &width), width);
+      line.pen += 2;
+    }
+    Store(RUMBLE_LINE, line);
   }
 };
 }  // namespace
@@ -237,15 +296,31 @@ namespace dualize
 {
 void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
 {
-  const std::filesystem::path path = game / OPTION_TEXTURES;
-  std::ifstream file(path, std::ios::binary);
-  std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-  auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
-  if (!labels || labels->format != 14 || labels->image.width != 256 || labels->image.height < 2 * LINE)
-    return;
-  Labels{labels->image}.Redraw();
-  EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (ASPECT_LINE + 1) * LINE, bytes.data() + labels->offset);
-  disc.OverrideFile(path, std::move(bytes));
+  {
+    const std::filesystem::path path = game / OPTION_TEXTURES;
+    std::vector<uint8_t> bytes = ReadFile(path);
+    auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
+    if (labels && labels->format == 14 && labels->image.width == 256 && labels->image.height >= 8 * LINE)
+    {
+      Labels{labels->image}.Redraw();
+      Labels{labels->image}.RedrawRumble();
+      static_assert(RUMBLE_LINE == ASPECT_LINE + 1);
+      EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (RUMBLE_LINE + 1) * LINE, bytes.data() + labels->offset);
+      disc.OverrideFile(path, std::move(bytes));
+    }
+  }
+  {
+    const std::filesystem::path path = game / MODE_2P_TEXTURES;
+    std::vector<uint8_t> bytes = ReadFile(path);
+    auto text = DecodeTplImage(bytes, RACE_TEXT_IMAGE);
+    if (text && text->format == 14 && text->image.width == 512 && text->image.height == 128)
+    {
+      for (uint32_t y = RACE_WIFI_Y0; y < RACE_WIFI_Y1; ++y)
+        std::fill_n(&text->image.rgba[static_cast<size_t>(y) * text->image.width * 4], text->image.width * 4, 0);
+      EncodeGreyCmpr(text->image, RACE_WIFI_Y0, RACE_WIFI_Y1, bytes.data() + text->offset);
+      disc.OverrideFile(path, std::move(bytes));
+    }
+  }
 }
 }  // namespace dualize
 
@@ -253,6 +328,7 @@ namespace
 {
 using dualize::Cpu;
 using dualize::GetMachine;
+using dualize::Machine;
 }  // namespace
 
 // ModeOption's constructor: the screen's help line is copied from the
@@ -304,100 +380,11 @@ void SeekAnimation(CPUState* ctx, uint32_t holder, float fraction, float step)
 // The settings list's state 0 (r30 the screen), its "setting_open" begun:
 // its first half moves the top level's icons out, the second fades the list
 // in, so it starts halfway. Then the instruction hooked (addi r3, r1, 0x138).
-// A screen's CSD layout through the game's own calls, made from a native on
-// scratch room below the stack pointer (a node handle, a name, and a member
-// pointing at a cast for the cast methods).
-class Layout
-{
-public:
-  Layout(Cpu& cpu, CPUState* ctx, uint32_t holder)
-      : m_cpu(cpu), m_memory(GetMachine(cpu).memory), m_ctx(ctx), m_sp(ctx->gpr[1])
-  {
-    ctx->gpr[1] = m_sp - SCRATCH;
-    m_scene = cpu.CallGuest(CSD_SCENE_NODE, {holder});
-  }
-  ~Layout() { m_ctx->gpr[1] = m_sp; }
-  Layout(const Layout&) = delete;
-  Layout& operator=(const Layout&) = delete;
-
-  // The cast named `name` (its runtime object), 0 if the scene has none.
-  uint32_t Cast(std::string_view name)
-  {
-    const uint32_t handle = m_sp - HANDLE, text = m_sp - NAME;
-    uint8_t* bytes = m_memory.Effective(text, static_cast<uint32_t>(name.size()) + 1);
-    std::memcpy(bytes, name.data(), name.size());
-    bytes[name.size()] = 0;
-    m_cpu.CallGuest(CSD_FIND_NODE, {handle, m_scene, text});
-    uint32_t cast = 0;
-    if (const uint32_t node = m_cpu.CallGuest(CSD_SCENE_NODE, {handle}))
-      cast = Load(Load(node + NODE_MEMBER) + MEMBER_CAST);
-    m_cpu.CallGuest(CSD_RELEASE_HANDLE, {handle, 0});
-    return cast;
-  }
-  uint32_t Parent(uint32_t cast) const { return cast != 0 ? Load(cast + CAST_PARENT) : 0; }
-  float Y(uint32_t cast) const { return std::bit_cast<float>(Load(cast + CAST_Y)); }
-  float X(uint32_t cast) const { return std::bit_cast<float>(Load(cast + CAST_X)); }
-
-  void Hide(uint32_t cast) { m_cpu.CallGuest(CSD_CAST_SET_HIDE, {Member(cast), 1}); }
-  void Move(uint32_t cast, float x, float y)
-  {
-    m_ctx->fpr[1] = x;
-    m_ctx->fpr[2] = y;
-    m_cpu.CallGuest(CSD_CAST_SET_POSITION, {Member(cast)});
-  }
-
-private:
-  static constexpr uint32_t SCRATCH = 0x100, HANDLE = 0x80, NAME = 0x60, MEMBER = 0x30;
-  // A node holds a member, the member its cast; a cast its current position
-  // and its parent in the layout's tree.
-  static constexpr uint32_t NODE_MEMBER = 0x34, MEMBER_CAST = 0xC, CAST_X = 0x2C, CAST_Y = 0x30, CAST_PARENT = 0x80;
-
-  uint32_t Load(uint32_t address) const { return dualize::Load32(m_memory.Effective(address, 4)); }
-  uint32_t Member(uint32_t cast)
-  {
-    const uint32_t member = m_sp - MEMBER;
-    dualize::Store32(m_memory.Effective(member + MEMBER_CAST, 4), cast);
-    return member;
-  }
-
-  Cpu& m_cpu;
-  Memory& m_memory;
-  CPUState* m_ctx;
-  uint32_t m_sp, m_scene = 0;
-};
-
-// The settings list's rows: the controller window's (the third) is hidden, its
-// option being off for good, and the weather link's takes its place.
-constexpr uint32_t CONTROLLER_ROW = 2;
-
 extern "C" bool nights_ModeOptionListOpen(CPUState* ctx)
 {
   SeekAnimation(ctx, ctx->gpr[30] + 0x74, 0.5f, 0.001f);
   ctx->gpr[3] = ctx->gpr[1] + 0x138;
   ctx->pc = NIGHTS_MODE_OPTION_LIST_OPEN_NEXT;
-  return true;
-}
-
-// The list's value boxes, set each frame it is up (r3 the screen): the layout
-// changes go with them. Then the hooked stwu r1, -0x40(r1).
-extern "C" bool nights_ModeOptionValues(CPUState* ctx)
-{
-  Cpu& cpu = CpuOf(ctx);
-  {
-    // Each row's buttons hang off its own group (the names the groups have
-    // are the network list's too, so they are found through a button).
-    Layout layout(cpu, ctx, ctx->gpr[3] + 0x74);
-    const uint32_t controller = layout.Parent(layout.Cast("setting_btn02"));
-    const uint32_t weather = layout.Parent(layout.Cast("setting_btn03"));
-    if (controller != 0 && weather != 0)
-    {
-      layout.Hide(controller);
-      layout.Move(weather, layout.X(controller), layout.Y(controller));
-    }
-  }
-  dualize::Store32(GetMachine(cpu).memory.Effective(ctx->gpr[1] - 0x40, 4), ctx->gpr[1]);
-  ctx->gpr[1] -= 0x40;
-  ctx->pc = NIGHTS_MODE_OPTION_VALUES_BODY;
   return true;
 }
 
@@ -493,27 +480,13 @@ extern "C" bool nights_Mode2PResume(CPUState* ctx)
   return true;
 }
 
-// The settings list's cursor, moved (r30 the screen): it steps over the hidden
-// controller window row, on in the direction it came from. Then the hooked
-// lwz r0, 0xa4(r30) (the row it is on).
-extern "C" bool nights_ModeOptionCursor(CPUState* ctx)
-{
-  uint8_t* screen = GetMachine(CpuOf(ctx)).memory.Effective(ctx->gpr[30], 0xF4);
-  uint32_t row = dualize::Load32(screen + 0xA4);
-  if (row == CONTROLLER_ROW)
-  {
-    row = dualize::Load32(screen + 0xF0) > CONTROLLER_ROW ? CONTROLLER_ROW - 1 : CONTROLLER_ROW + 1;
-    dualize::Store32(screen + 0xA4, row);
-  }
-  ctx->gpr[0] = row;
-  ctx->pc = NIGHTS_MODE_OPTION_CURSOR_NEXT;
-  return true;
-}
-
 // Play's reads of the controller window option (lbz r3 and lbz r0, 0xb0 of the
-// options): the window is off for good, whatever the save holds.
+// options), each frame: the option is the rumble's now (its row reads Enable
+// Rumble), and the window is off for good.
 extern "C" bool nights_ControllerWindowShown(CPUState* ctx)
 {
+  Machine& machine = GetMachine(CpuOf(ctx));
+  machine.AllowRumble(*machine.memory.Effective(ctx->gpr[3] + 0xB0, 1) != 0);
   ctx->gpr[3] = 0;
   ctx->pc = NIGHTS_CONTROLLER_WINDOW_SHOWN_NEXT;
   return true;
@@ -521,6 +494,8 @@ extern "C" bool nights_ControllerWindowShown(CPUState* ctx)
 
 extern "C" bool nights_ControllerWindowUpdate(CPUState* ctx)
 {
+  Machine& machine = GetMachine(CpuOf(ctx));
+  machine.AllowRumble(*machine.memory.Effective(ctx->gpr[4] + 0xB0, 1) != 0);
   ctx->gpr[0] = 0;
   ctx->pc = NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT;
   return true;

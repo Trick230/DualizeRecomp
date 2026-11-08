@@ -106,6 +106,8 @@ public:
   // The host's GameCube pad on a port; false while nothing drives it.
   bool ReadGcPad(int port, GcPadInput* input);
   void SetGcRumble(int port, bool on);
+  // The game's rumble option: while off, no host pad rumbles.
+  void AllowRumble(bool allowed);
   // Applies what the render thread signalled, with everything written done.
   void SyncGpu();
   // The graphics settings over the game (CPU thread, from the Options hook).
@@ -145,6 +147,7 @@ private:
 
   apu::AudioOut m_audio;
   hid::Gamepads m_gamepads;
+  std::atomic<bool> m_rumble_allowed{true};
   hid::InputMovie m_movie;
   GraphicsMenu m_menu;
   bool ReadHostGcPad(int port, GcPadInput* input);
