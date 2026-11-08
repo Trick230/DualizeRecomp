@@ -379,10 +379,13 @@ void SeekAnimation(CPUState* ctx, uint32_t holder, float fraction, float step)
 
 // The settings list's state 0 (r30 the screen), its "setting_open" begun:
 // its first half moves the top level's icons out, the second fades the list
-// in, so it starts halfway. Then the instruction hooked (addi r3, r1, 0x138).
+// in, so it starts halfway. The big icon still showed the top level's (the
+// Wii) until the animation ended and the list set the row's; it is set now.
+// Then the instruction hooked (addi r3, r1, 0x138).
 extern "C" bool nights_ModeOptionListOpen(CPUState* ctx)
 {
   SeekAnimation(ctx, ctx->gpr[30] + 0x74, 0.5f, 0.001f);
+  CpuOf(ctx).CallGuest(NIGHTS_MODE_OPTION_ROW_ICON, {ctx->gpr[30]});
   ctx->gpr[3] = ctx->gpr[1] + 0x138;
   ctx->pc = NIGHTS_MODE_OPTION_LIST_OPEN_NEXT;
   return true;
@@ -397,6 +400,14 @@ extern "C" bool nights_ModeOptionTopClose(CPUState* ctx)
   SeekAnimation(ctx, ctx->gpr[31] + 0x74, 0.0f, -0.001f);
   ctx->gpr[3] = ctx->gpr[1] + 0x40;
   ctx->pc = NIGHTS_MODE_OPTION_TOP_CLOSE_NEXT;
+  return true;
+}
+
+// The top level's cancel path, its cancel sound (li r3, 2 then the call):
+// skipped, B on the list having played it.
+extern "C" bool nights_ModeOptionTopCancelSound(CPUState* ctx)
+{
+  ctx->pc = NIGHTS_MODE_OPTION_TOP_CANCEL_SOUND_NEXT;
   return true;
 }
 
