@@ -430,6 +430,35 @@ extern "C" bool nights_ModeOptionTop(CPUState* ctx)
   return true;
 }
 
+// The 2P menu's top update, each frame (r3 the menu): the main menu leaves
+// with the screen fading to black over half a second, and the 2P menu starts
+// drawing its stage before that ends, so the stage showed and dimmed before
+// the menu faded in. While the menu is still starting (its state 0), it waits
+// for the screen to be black. Otherwise the hooked stwu r1, -0x80(r1).
+constexpr uint32_t MENU_STATE = 0x68, SCREEN_FADER = 0x44, FADER_VALUE = 0x20, FADER_TARGET = 0x24;
+
+extern "C" bool nights_Mode2PTop(CPUState* ctx)
+{
+  Memory& memory = GetMachine(CpuOf(ctx)).memory;
+  const uint32_t manager = dualize::Load32(memory.Effective(NIGHTS_MODE_MANAGER, 4));
+  const bool starting = dualize::Load32(memory.Effective(ctx->gpr[3] + MENU_STATE, 4)) == 0;
+  const uint32_t fader = starting && manager != 0 ? dualize::Load32(memory.Effective(manager + SCREEN_FADER, 4)) : 0;
+  if (fader != 0)
+  {
+    const uint8_t* state = memory.Effective(fader, FADER_TARGET + 4);
+    const float value = std::bit_cast<float>(dualize::Load32(state + FADER_VALUE));
+    if (std::bit_cast<float>(dualize::Load32(state + FADER_TARGET)) == 1.0f && value < 1.0f)
+    {
+      ctx->pc = ctx->lr;
+      return true;
+    }
+  }
+  dualize::Store32(memory.Effective(ctx->gpr[1] - 0x80, 4), ctx->gpr[1]);
+  ctx->gpr[1] -= 0x80;
+  ctx->pc = NIGHTS_MODE_2P_TOP_BODY;
+  return true;
+}
+
 // Mode2P's update, Start chosen on the race or battle window: the opponent
 // list in between offers only Nearby offline, so the update takes its Nearby
 // path (which plays the decide sound) and the list never shows.
@@ -500,3 +529,4 @@ extern "C" bool nights_ControllerWindowUpdate(CPUState* ctx)
   ctx->pc = NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT;
   return true;
 }
+

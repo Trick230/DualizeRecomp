@@ -30,6 +30,13 @@ define NIGHTS_MODE_OPTION_TOP_CANCEL @ModeOption_Top+2A8
 nights_ModeOptionTopClose 4 38610040 2F777B3C4A38C822 at @ModeOption_Top+2DC jump
 define NIGHTS_MODE_OPTION_TOP_CLOSE_NEXT @ModeOption_Top+2E0
 
+# The 2P menu's top update: starting, it waits for the screen fader (the mode
+# manager's, which the main menu starts toward black) to reach black.
+@Mode2P_Top 328 9421FF80 784EDC1103A6FA6F
+nights_Mode2PTop 4 9421FF80 D9FBC20F5E078361 at @Mode2P_Top jump
+define NIGHTS_MODE_2P_TOP_BODY @Mode2P_Top+4
+define NIGHTS_MODE_MANAGER addr(@Mode2P_Top+14,1C)
+
 # Mode2P (the 2P game menu): its update. Start on the race or battle window
 # goes straight to the local game, as Nearby on the opponent list does (the
 # list's other two choices are Wi-Fi play); the window then closes as Quit
@@ -79,3 +86,4 @@ define NIGHTS_CONTROLLER_WINDOW_SHOWN_NEXT @ControllerWindow_Shown+C0
 @ControllerWindow_Update C4 9421FFF0 407A57003C805DE3
 nights_ControllerWindowUpdate 4 880400B0 27AA5EED56B951A1 at @ControllerWindow_Update+1C jump
 define NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT @ControllerWindow_Update+20
+
