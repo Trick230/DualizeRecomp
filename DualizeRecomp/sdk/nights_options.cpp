@@ -76,9 +76,12 @@ void RenameMessages(const Memory& memory)
     uint8_t* at = data;
     while (static_cast<size_t>(end - at) >= bytes + 2)
     {
-      at = static_cast<uint8_t*>(std::memchr(at, needle[0], static_cast<size_t>(end - at) - bytes - 1));
-      if (at == nullptr)
+      // Keyed on the first character's low byte: the high byte of big-endian
+      // UTF-16 text is 0, as is most of MEM2, so a search for it stops everywhere.
+      uint8_t* low = static_cast<uint8_t*>(std::memchr(at + 1, needle[1], static_cast<size_t>(end - at) - bytes - 2));
+      if (low == nullptr)
         break;
+      at = low - 1;
       // Messages are 2-byte aligned; the line ends at a terminator or a newline.
       const bool line_end = at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A);
       if ((reinterpret_cast<uintptr_t>(at) & 1) != 0 || !line_end || std::memcmp(at, needle, bytes) != 0)
