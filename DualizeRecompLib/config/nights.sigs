@@ -10,6 +10,70 @@ nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
 nights_ModeOptionAspect 4 3C800000 2222E61E074892A9 at @ModeOption_Update+290 jump
 # Where the update ends when nothing was chosen.
 define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
+# The settings list as it opens (its "setting_open" animation just begun):
+# the animation starts halfway, past the icons it moves out.
+nights_ModeOptionListOpen 4 38610138 2F7AC93C4A3B8283 at @ModeOption_Update+74 jump
+define NIGHTS_MODE_OPTION_LIST_OPEN_NEXT @ModeOption_Update+78
+# The list's cursor, moved: it skips the controller window's row (the row
+# is hidden, see nights_ModeOptionValues).
+nights_ModeOptionCursor 4 801E00A4 469F74AA257D2E57 at @ModeOption_Update+184 jump
+define NIGHTS_MODE_OPTION_CURSOR_NEXT @ModeOption_Update+188
+
+# The list's value boxes, set from the options: the calls a screen makes on
+# its CSD layout, a node looked up by name in a scene (a handle on the
+# stack), the node a handle holds, the handle released.
+@ModeOption_Values 15C 9421FFC0 5ACC7E18E24014C2
+nights_ModeOptionValues 4 9421FFC0 D9FC020F5E07F021 at @ModeOption_Values jump
+define NIGHTS_MODE_OPTION_VALUES_BODY @ModeOption_Values+4
+define CSD_SCENE_NODE call(@ModeOption_Values+28)
+define CSD_FIND_NODE call(@ModeOption_Values+38)
+define CSD_RELEASE_HANDLE call(@ModeOption_Values+54)
+# CSD node methods SetPosition(node, f1 x, f2 y) and SetHideFlag(node, hide)
+# forward to the node's member; these are the members' own.
+@CsdNode_Method 48 9421FFE0 EA9BE812956F5BFC
+define CSD_CAST_SET_POSITION call(@CsdNode_Method+4C)
+define CSD_CAST_SET_HIDE call(@CsdNode_Method+B8)
+
+# ModeOption's top level (the Wi-Fi globe and the Wii settings icons): on
+# entry the screen goes straight to the settings list instead (the list's
+# update, ModeOption_Update, the same frame), and its entrance, reached when
+# the list comes back, leaves through its cancel path.
+@ModeOption_Top 37C 9421FF80 BDE8AE0A659CE2E2
+nights_ModeOptionTopEnter 4 9421FF80 D9FBC20F5E078361 at @ModeOption_Top jump
+nights_ModeOptionTop 4 3C800000 2222E61E074892A9 at @ModeOption_Top+44 jump
+define NIGHTS_MODE_OPTION_TOP_BODY @ModeOption_Top+4
+define NIGHTS_MODE_OPTION_LIST_UPDATE @ModeOption_Update
+define NIGHTS_MODE_OPTION_TOP_CANCEL @ModeOption_Top+2A8
+# The cancel path, its icons' exit animation just begun in reverse: the list
+# has already faded out, so the animation starts at its end, icons hidden.
+nights_ModeOptionTopClose 4 38610040 2F777B3C4A38C822 at @ModeOption_Top+2DC jump
+define NIGHTS_MODE_OPTION_TOP_CLOSE_NEXT @ModeOption_Top+2E0
+
+# Mode2P (the 2P game menu): its update. Start on the race or battle window
+# goes straight to the local game, as Nearby on the opponent list does (the
+# list's other two choices are Wi-Fi play); the window then closes as Quit
+# closes it (its decide sound and closing animation), since the list's own
+# exit animation would show the list.
+@Mode2P_Update 764 9421FEB0 8E66B9726776857E
+nights_Mode2PStart 4 38600001 3820B53C4F20585A at @Mode2P_Update+254 jump
+nights_Mode2PNearby 4 809E0000 9B5C90AC997BD9EB at @Mode2P_Update+44C jump
+nights_Mode2PClosing 4 38000003 4D50133CEC202A54 at @Mode2P_Update+324 jump
+define NIGHTS_MODE_2P_NEARBY @Mode2P_Update+434
+define NIGHTS_MODE_2P_CLOSE @Mode2P_Update+2D8
+define NIGHTS_MODE_2P_DONE @Mode2P_Update+74C
+
+# Mode2P's update on the controller screen: B there goes back to the
+# opponent list; past its switch back (state 1) the menu reopens the race or
+# battle window instead.
+@Mode2P_Controllers 64C 9421FEE0 519A8644811B9F43
+nights_Mode2PControllersBack 4 809E0000 9B5C90AC997BD9EB at @Mode2P_Controllers+2E8 jump
+define NIGHTS_MODE_2P_CONTROLLERS_DONE @Mode2P_Controllers+634
+
+# Mode2P's resume, back from a 2P game: it reopens the opponent list, so it
+# opens the race or battle window instead.
+@Mode2P_Resume F0 9421FFD0 98D9214CD720959D
+nights_Mode2PResume 4 3C800000 2222E61E074892A9 at @Mode2P_Resume+64 jump
+define NIGHTS_MODE_2P_RESUME_DONE @Mode2P_Resume+D0
 
 # The Forecast Channel reader My Dream's weather comes from (it reads the
 # channel's files off the NAND): its load and the calls the game makes after
@@ -24,3 +88,12 @@ nights_WeatherCount 30 800D0000 11EC9682997C292F at nights_WeatherLoad+9CC
 nights_WeatherVersion 30 800D0000 11EC9682997C292F at nights_WeatherLoad+9FC
 # The reader's "loaded" flag, which its close clears.
 define NIGHTS_WEATHER_LOADED_SDA imm(nights_WeatherLoad+18)
+
+# The controller window (the guide shown while playing) is off for good:
+# the two places play reads its option read 0.
+@ControllerWindow_Shown DC 9421FFD0 CA155F751274576B
+nights_ControllerWindowShown 4 886300B0 F0C599EB84A199CC at @ControllerWindow_Shown+BC jump
+define NIGHTS_CONTROLLER_WINDOW_SHOWN_NEXT @ControllerWindow_Shown+C0
+@ControllerWindow_Update C4 9421FFF0 407A57003C805DE3
+nights_ControllerWindowUpdate 4 880400B0 27AA5EED56B951A1 at @ControllerWindow_Update+1C jump
+define NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT @ControllerWindow_Update+20
