@@ -14,12 +14,16 @@ struct MachineConfig;
 
 struct GraphicsSettings
 {
+  // The window's width out of fullscreen (its height keeps the game's aspect).
+  uint32_t window_width = 1280;
+  bool fullscreen = false;  // borderless over the whole display
   float render_scale = 1.0f;
   bool vsync = true;
   // Frames shown a second: 30 is the game's own (no interpolation), 0 as
   // many as the display or, without vsync, the GPU allows.
   uint32_t frame_rate = 0;
   uint32_t msaa = 8;
+  bool transparency_aa = true;
   bool ambient_occlusion = false;
 
   static GraphicsSettings FromConfig(const MachineConfig& config);
@@ -34,10 +38,13 @@ struct GraphicsSettings
 // The graphics page's options, top to bottom.
 enum class GraphicsOption
 {
+  WindowSize,
+  Fullscreen,
   ResolutionScale,
   VSync,
   FrameRate,
   AntiAliasing,
+  TransparencyAA,
   AmbientOcclusion,
   Count,
 };

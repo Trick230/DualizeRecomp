@@ -185,7 +185,7 @@ float DisplayAspect(ios::Nand& nand)
 Machine::Machine(MachineConfig config_)
     : config(std::move(config_)), cpu(*this, memory, scheduler), pi(*this), vi(*this), exi(*this), ai(*this),
       gfx(*this), hollywood(*this), ios(*this), wud(*this),
-      m_graphics_running(GraphicsSettings::FromConfig(config)), m_graphics(m_graphics_running)
+      m_graphics(GraphicsSettings::FromConfig(config))
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
   m_dsp_interrupt_event = scheduler.Register(DspInterruptEvent, this);
@@ -275,6 +275,8 @@ bool Machine::Start(std::string* error)
       .hidden = config.hidden,
       .ambient_occlusion = config.ambient_occlusion,
       .ambient_occlusion_min_height = config.ambient_occlusion_min_height,
+      .fullscreen = config.fullscreen,
+      .alpha_to_coverage = config.alpha_to_coverage,
   };
   const AuroraFifoHost gx_host{
       .user = this,
@@ -507,6 +509,21 @@ void Machine::SetGraphics(const GraphicsSettings& settings)
 {
   m_graphics = settings;
   m_graphics.Save(config.user / "graphics.ini");
+  MachineConfig video = config;
+  settings.ApplyTo(video);
+  const AuroraVideoSettings live{
+      .vsync = video.vsync,
+      .frameInterpolation = video.interpolate && video.throttle,
+      .presentRate = video.present_rate,
+      .msaa = video.msaa,
+      .renderScale = video.render_scale,
+      .ambientOcclusion = video.ambient_occlusion,
+      .alphaToCoverage = video.alpha_to_coverage,
+      .fullscreen = video.fullscreen,
+      .windowWidth = video.width,
+      .windowHeight = video.height,
+  };
+  aurora_fifo_set_video(&live);
 }
 
 void Machine::AllowRumble(bool allowed)

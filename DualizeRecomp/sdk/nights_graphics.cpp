@@ -546,8 +546,7 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
   const uint32_t screen = ctx->gpr[30];
   const int row = static_cast<int>(Load(memory, screen + SCREEN_ROW));
   const int option = std::clamp(g_page.top + row, 0, dualize::GRAPHICS_OPTION_COUNT - 1);
-  ShowHelp(ctx, machine.GraphicsPending() ? "Applies the next time the game starts"
-                                          : dualize::OptionHelp(static_cast<GraphicsOption>(option)));
+  ShowHelp(ctx, dualize::OptionHelp(static_cast<GraphicsOption>(option)));
   ctx->pc = NIGHTS_MODE_OPTION_UPDATE_DONE;
   if (cpu.CallGuest(NIGHTS_MODE_OPTION_BUSY, {screen}) != 0)
     return true;

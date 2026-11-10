@@ -38,8 +38,10 @@ struct MachineConfig
   bool vsync = true;
   bool hidden = false;  // never show the window (scripted runs)
   bool interpolate = true;    // only while throttled to the game's rate
-  uint32_t present_rate = 0;  // without vsync; 0 = the display's refresh rate
+  uint32_t present_rate = 0;  // without vsync; 0 = the display's refresh rate, ~0u no limit
   uint32_t width = 1280, height = 960;
+  bool fullscreen = false;    // borderless over the whole display
+  bool alpha_to_coverage = true;  // antialiased cut edges (leaves, fences) while multisampling
   uint32_t msaa = 8;          // samples a pixel: 1, 2, 4 or 8 (capped at the GPU's most)
   bool ambient_occlusion = false; // GTAO over the 3D world (off: the models' layers and baked shading leave it little to add)
   // NiGHTS' models are built of layers (hair over a head, brows over a
@@ -111,12 +113,10 @@ public:
   // Applies what the render thread signalled, with everything written done.
   void SyncGpu();
   // The graphics settings the Options screen's graphics page changes (CPU
-  // thread), saved to the user directory as they change; the window takes
-  // them the next time the game starts.
+  // thread): the renderer takes them between its next frames, and they are
+  // saved to the user directory.
   const GraphicsSettings& Graphics() const { return m_graphics; }
   void SetGraphics(const GraphicsSettings& settings);
-  // Whether the settings differ from what this run started with.
-  bool GraphicsPending() const { return !(m_graphics == m_graphics_running); }
 
   const MachineConfig config;
   Memory memory;
@@ -154,7 +154,6 @@ private:
   hid::Gamepads m_gamepads;
   std::atomic<bool> m_rumble_allowed{true};
   hid::InputMovie m_movie;
-  const GraphicsSettings m_graphics_running;
   GraphicsSettings m_graphics;
   bool ReadHostGcPad(int port, GcPadInput* input);
   bool m_gx_started = false;
