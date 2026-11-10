@@ -6,10 +6,52 @@
 @ModeOption_Update ADC 9421FE30 9414093684938896
 
 nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
-# A on the "Check Aspect Ratio" row, as the update begins its test screen.
-nights_ModeOptionAspect 4 3C800000 2222E61E074892A9 at @ModeOption_Update+290 jump
 # Where the update ends when nothing was chosen.
 define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
+
+# The list's graphics page (sdk/nights_graphics.cpp). A on the "Check Aspect
+# Ratio" row, as the update begins its test screen: the list leaves as B
+# makes it (its exit animation, then its cancel sound, skipped then) and,
+# where the list ends leaving (state 2's end), opens again on the other page.
+nights_ModeOptionAspect 4 3C800000 2222E61E074892A9 at @ModeOption_Update+290 jump
+define NIGHTS_MODE_OPTION_LEAVE @ModeOption_Update+424
+nights_ModeOptionLeaveSound 4 38600002 3820B43C4F2056A7 at @ModeOption_Update+470 jump
+define NIGHTS_MODE_OPTION_LEAVE_SOUND_NEXT @ModeOption_Update+47C
+nights_ModeOptionLeft 4 38600000 3820B63C4F205A0D at @ModeOption_Update+AB4 jump
+# The list's state 1 (r30 the screen), each frame: the call setting its value
+# boxes begins it; then the help line (the help object, the call setting a
+# message on it), a check that something else has the screen, and the input.
+nights_ModeOptionList 4 48000001 4BA5D7D7DCEB1B0A at @ModeOption_Update+138 jump
+define NIGHTS_MODE_OPTION_HELP addr(@ModeOption_Update+140,144)
+define NIGHTS_SET_HELP call(@ModeOption_Update+14C)
+define NIGHTS_MODE_OPTION_BUSY call(@ModeOption_Update+154)
+define NIGHTS_PLAY_SOUND call(@ModeOption_Update+19C)
+# The value boxes, set from the options, and the rows' highlight with the
+# big icon: the graphics page has its own. The calls a screen makes on its CSD
+# layout, a node looked up by name in a scene (a handle on the stack), the
+# node a handle holds, a cast's pattern, the handle released.
+@ModeOption_Values 15C 9421FFC0 5ACC7E18E24014C2
+nights_ModeOptionValues 4 9421FFC0 D9FC020F5E07F021 at @ModeOption_Values jump
+define CSD_SCENE_NODE call(@ModeOption_Values+28)
+define CSD_FIND_NODE call(@ModeOption_Values+38)
+define CSD_SET_PATTERN call(@ModeOption_Values+48)
+define CSD_RELEASE_HANDLE call(@ModeOption_Values+54)
+@ModeOption_Highlight 138 9421FFC0 2831EA44BA48B21F
+nights_ModeOptionHighlight 4 9421FFC0 D9FC020F5E07F021 at @ModeOption_Highlight jump
+define NIGHTS_MODE_OPTION_ROW_NODES addr(@ModeOption_Highlight+8,1C)
+define NIGHTS_MODE_OPTION_ICON addr(@ModeOption_Highlight+B4,C0)
+define NIGHTS_MODE_OPTION_ICON_GLOW addr(@ModeOption_Highlight+F0,FC)
+# CSD node methods SetHideFlag(node, hide) forwards to the node's member;
+# this is the members' own.
+@CsdNode_Method 48 9421FFE0 EA9BE812956F5BFC
+define CSD_CAST_SET_HIDE call(@CsdNode_Method+B8)
+# A menu cursor's update: the input manager (a global), its controller, and
+# whether buttons (a 64-bit mask) were pressed or, held, repeat.
+@MenuCursor 100 9421FFE0 864B1AC517685FAC
+define NIGHTS_INPUT addr(@MenuCursor+8,18)
+define NIGHTS_INPUT_CONTROLLER call(@MenuCursor+20)
+define NIGHTS_INPUT_PRESSED call(@MenuCursor+5C)
+define NIGHTS_INPUT_REPEATED call(@MenuCursor+F8)
 # The settings list as it opens (its "setting_open" animation just begun):
 # the animation starts halfway, past the icons it moves out, and the row's
 # icon and highlight are set at once (the list's own call when it ends).
@@ -34,6 +76,9 @@ define NIGHTS_MODE_OPTION_TOP_CLOSE_NEXT @ModeOption_Top+2E0
 # Its cancel sound: B on the list played one already.
 nights_ModeOptionTopCancelSound 4 38600002 3820B43C4F2056A7 at @ModeOption_Top+2FC jump
 define NIGHTS_MODE_OPTION_TOP_CANCEL_SOUND_NEXT @ModeOption_Top+308
+# The top level's help messages (one an icon, from this id): unused offline,
+# the graphics page writes its help line into them.
+define NIGHTS_MODE_OPTION_TOP_HELP imm(@ModeOption_Top+21C)
 
 # The 2P menu's top update: starting, it waits for the screen fader (the mode
 # manager's, which the main menu starts toward black) to reach black.

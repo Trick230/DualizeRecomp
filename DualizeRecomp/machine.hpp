@@ -15,7 +15,7 @@
 #include "kernel/ios/disc.hpp"
 #include "kernel/ios_kernel.hpp"
 #include "sdk/wud.hpp"
-#include "ui/graphics_menu.hpp"
+#include "ui/graphics_settings.hpp"
 
 #include <array>
 #include <atomic>
@@ -110,8 +110,13 @@ public:
   void AllowRumble(bool allowed);
   // Applies what the render thread signalled, with everything written done.
   void SyncGpu();
-  // The graphics settings over the game (CPU thread, from the Options hook).
-  void OpenGraphicsMenu() { m_menu.Open(); }
+  // The graphics settings the Options screen's graphics page changes (CPU
+  // thread), saved to the user directory as they change; the window takes
+  // them the next time the game starts.
+  const GraphicsSettings& Graphics() const { return m_graphics; }
+  void SetGraphics(const GraphicsSettings& settings);
+  // Whether the settings differ from what this run started with.
+  bool GraphicsPending() const { return !(m_graphics == m_graphics_running); }
 
   const MachineConfig config;
   Memory memory;
@@ -149,7 +154,8 @@ private:
   hid::Gamepads m_gamepads;
   std::atomic<bool> m_rumble_allowed{true};
   hid::InputMovie m_movie;
-  GraphicsMenu m_menu;
+  const GraphicsSettings m_graphics_running;
+  GraphicsSettings m_graphics;
   bool ReadHostGcPad(int port, GcPadInput* input);
   bool m_gx_started = false;
 
@@ -170,7 +176,6 @@ private:
   uint64_t m_gx_bytes = 0, m_report_gx_bytes = 0;
 
   bool ReadAutomationPad(int port, AutomationPad* pad);
-  uint32_t AutomationMenuButtons();
   std::array<AutomationPad, AUTOMATION_PORTS> m_automation_pads;
   std::array<std::atomic<bool>, AUTOMATION_PORTS> m_automation_active{};
   std::mutex m_automation_mutex;

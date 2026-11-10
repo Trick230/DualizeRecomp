@@ -33,10 +33,11 @@ add_executable(DualizeRecomp
     sdk/rvl_nand.cpp
     sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp
+    sdk/nights_graphics.cpp
     sdk/nights_options.cpp
     sdk/nights_weather.cpp
     ui/game_assets.cpp
-    ui/graphics_menu.cpp)
+    ui/graphics_settings.cpp)
 
 target_include_directories(DualizeRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

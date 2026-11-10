@@ -1,7 +1,7 @@
 // NiGHTS' Options screen (the title module's ModeOption): its "Check Aspect
-// Ratio" row opens the runtime's graphics settings instead. The window keeps
-// the console's aspect itself, so the test screen behind that row has nothing
-// left to check.
+// Ratio" row opens a page of graphics settings (nights_graphics.cpp). The
+// window keeps the console's aspect itself, so the test screen behind that
+// row has nothing left to check.
 //
 // Found by their code in config/nights.sigs; ModeOption's update and where it
 // leaves come from the defines there (ppc_natives.h).
@@ -11,6 +11,7 @@
 
 #include "core/cpu.h"
 #include "ppc_natives.h"
+#include "sdk/nights_options.hpp"
 
 #include "cpu/cpu.hpp"
 #include "kernel/ios/disc.hpp"
@@ -21,10 +22,12 @@
 #include <bit>
 #include <array>
 #include <cstring>
+#include <span>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -32,10 +35,7 @@ using dualize::Cpu;
 using dualize::GetMachine;
 using dualize::Memory;
 
-Cpu& CpuOf(CPUState* ctx)
-{
-  return *static_cast<Cpu*>(ctx->external_user_data);
-}
+using dualize::nights::CpuOf;
 
 // One English line, UTF-16BE in the game's message data, swapped for another
 // no longer than it. A message may go on after the line (a newline, then the
@@ -52,44 +52,57 @@ constexpr Message MESSAGES[] = {
     {u"Turn the control window display on/off", u"Turn the controller's rumble on/off"},
 };
 
-std::u16string BigEndian(std::u16string_view text)
-{
-  std::u16string out;
-  for (char16_t c : text)
-    out.push_back(static_cast<char16_t>((c >> 8) | (c << 8)));
-  return out;
-}
+using dualize::nights::BigEndian;
+}  // namespace
 
+namespace dualize::nights
+{
+// Messages are 2-byte aligned; the line ends at a terminator or a newline.
+std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line)
+{
+  std::vector<uint8_t*> found;
+  uint8_t* const data = memory.Effective(0x90000000u, Memory::MEM2_SIZE);
+  if (data == nullptr || line.empty())
+    return found;
+  uint8_t* const end = data + Memory::MEM2_SIZE;
+  const std::u16string text = BigEndian(line);
+  const auto* needle = reinterpret_cast<const uint8_t*>(text.data());
+  const size_t bytes = text.size() * 2;
+  uint8_t* at = data;
+  while (static_cast<size_t>(end - at) >= bytes + 2)
+  {
+    // Keyed on the first character's low byte: the high byte of big-endian
+    // UTF-16 text is 0, as is most of MEM2, so a search for it stops everywhere.
+    uint8_t* low = static_cast<uint8_t*>(std::memchr(at + 1, needle[1], static_cast<size_t>(end - at) - bytes - 2));
+    if (low == nullptr)
+      break;
+    at = low - 1;
+    const bool line_end = at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A);
+    if ((reinterpret_cast<uintptr_t>(at) & 1) == 0 && line_end && std::memcmp(at, needle, bytes) == 0)
+    {
+      found.push_back(at);
+      at += bytes;
+    }
+    else
+      ++at;
+  }
+  return found;
+}
+}  // namespace dualize::nights
+
+namespace
+{
 // Replaces every copy of each message in MEM2, where the game keeps its
 // message data.
 void RenameMessages(const Memory& memory)
 {
-  uint8_t* const data = memory.Effective(0x90000000u, Memory::MEM2_SIZE);
-  if (data == nullptr)
-    return;
-  uint8_t* const end = data + Memory::MEM2_SIZE;
+  uint8_t* const end = memory.Effective(0x90000000u, Memory::MEM2_SIZE) + Memory::MEM2_SIZE;
   for (const Message& message : MESSAGES)
   {
-    const std::u16string from = BigEndian(message.from);
     const std::u16string to = BigEndian(message.to);
-    const auto* needle = reinterpret_cast<const uint8_t*>(from.data());
-    const size_t bytes = from.size() * 2;
-    uint8_t* at = data;
-    while (static_cast<size_t>(end - at) >= bytes + 2)
+    const size_t bytes = message.from.size() * 2;
+    for (uint8_t* at : dualize::nights::FindMessageLines(memory, message.from))
     {
-      // Keyed on the first character's low byte: the high byte of big-endian
-      // UTF-16 text is 0, as is most of MEM2, so a search for it stops everywhere.
-      uint8_t* low = static_cast<uint8_t*>(std::memchr(at + 1, needle[1], static_cast<size_t>(end - at) - bytes - 2));
-      if (low == nullptr)
-        break;
-      at = low - 1;
-      // Messages are 2-byte aligned; the line ends at a terminator or a newline.
-      const bool line_end = at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A);
-      if ((reinterpret_cast<uintptr_t>(at) & 1) != 0 || !line_end || std::memcmp(at, needle, bytes) != 0)
-      {
-        ++at;
-        continue;
-      }
       uint8_t* tail = at + bytes;
       uint8_t* stop = tail;
       while (stop + 1 < end && (stop[0] | stop[1]) != 0)
@@ -99,7 +112,6 @@ void RenameMessages(const Memory& memory)
       std::memcpy(at, to.data(), to_bytes);
       std::memmove(at + to_bytes, tail, tail_bytes);
       std::memset(at + to_bytes + tail_bytes, 0, bytes - to_bytes);
-      at = stop;
     }
   }
 }
@@ -110,6 +122,7 @@ void RenameMessages(const Memory& memory)
 // the G from a C.
 constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
 constexpr uint32_t LABELS_IMAGE = 6, LINE = 24, ASPECT_LINE = 1;
+constexpr size_t LABELS_BYTES = 256 * 256 / 2;  // CMPR, 4 bits a texel
 
 struct Cut
 {
@@ -306,6 +319,7 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
       Labels{labels->image}.RedrawRumble();
       static_assert(RUMBLE_LINE == ASPECT_LINE + 1);
       EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (RUMBLE_LINE + 1) * LINE, bytes.data() + labels->offset);
+      nights::KeepOptionLabels(labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
       disc.OverrideFile(path, std::move(bytes));
     }
   }
@@ -337,17 +351,8 @@ using dualize::Machine;
 extern "C" bool nights_ModeOptionCtor(CPUState* ctx)
 {
   RenameMessages(GetMachine(CpuOf(ctx)).memory);
+  dualize::nights::ResetGraphicsPage();
   return false;
-}
-
-// ModeOption's update, where A on the second row (the aspect test) begins the
-// test screen: the graphics menu opens instead and the update ends as it does
-// when nothing was chosen. The decide sound has already played.
-extern "C" bool nights_ModeOptionAspect(CPUState* ctx)
-{
-  GetMachine(CpuOf(ctx)).OpenGraphicsMenu();
-  ctx->pc = NIGHTS_MODE_OPTION_UPDATE_DONE;
-  return true;
 }
 
 // A screen's layout animation (its holder at `holder`): the animation the

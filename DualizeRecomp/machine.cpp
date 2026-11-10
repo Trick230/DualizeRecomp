@@ -185,9 +185,7 @@ float DisplayAspect(ios::Nand& nand)
 Machine::Machine(MachineConfig config_)
     : config(std::move(config_)), cpu(*this, memory, scheduler), pi(*this), vi(*this), exi(*this), ai(*this),
       gfx(*this), hollywood(*this), ios(*this), wud(*this),
-      m_menu(m_gamepads, [this] { return AutomationMenuButtons(); }, [] { return PadDrivesClassic(); },
-             config.game, config.user / "graphics.ini",
-             GraphicsSettings::FromConfig(config))
+      m_graphics_running(GraphicsSettings::FromConfig(config)), m_graphics(m_graphics_running)
 {
   m_dsp_event = scheduler.Register(DspEvent, this);
   m_dsp_interrupt_event = scheduler.Register(DspInterruptEvent, this);
@@ -285,7 +283,6 @@ bool Machine::Start(std::string* error)
       .token = GxToken,
       .quit = GxQuit,
       .thread_started = [](void*) { profiler::RegisterThisThread("gx"); },
-      .draw_ui = [](void* user) { MachineOf(user).m_menu.Draw(); },
   };
   if (!aurora_fifo_start(&gx_config, &gx_host))
   {
@@ -406,30 +403,12 @@ constexpr std::pair<uint32_t, uint16_t> GC_MAP[] = {
 };
 }  // namespace
 
-// The automation's GameCube buttons as host pad buttons, for the graphics menu.
-uint32_t Machine::AutomationMenuButtons()
-{
-  uint32_t buttons = 0;
-  AutomationPad automation;
-  for (int port = 0; port < AUTOMATION_PORTS; ++port)
-  {
-    if (!ReadAutomationPad(port, &automation) || !automation.gc)
-      continue;
-    for (const auto& [from, to] : GC_MAP)
-    {
-      if (automation.gc_buttons & to)
-        buttons |= from;
-    }
-  }
-  return buttons;
-}
-
 void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
 {
   Machine& m = MachineOf(user);
   input->classic = true;
   hid::PadState pad;
-  if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad) && !m.m_menu.IsOpen())
+  if (PadDrivesClassic() && m.m_gamepads.Read(index, &pad))
   {
     for (const auto& [from, to] : CLASSIC_MAP)
     {
@@ -448,7 +427,7 @@ void Machine::ReadWiimote(void* user, int index, ios::WiimoteInput* input)
     input->right_trigger = pad.right_trigger;
   }
   AutomationPad automation;
-  if (!m.m_menu.IsOpen() && m.ReadAutomationPad(index, &automation))
+  if (m.ReadAutomationPad(index, &automation))
   {
     const ios::WiimoteInput& a = automation.wii;
     input->buttons |= a.buttons;
@@ -481,12 +460,9 @@ bool Machine::ReadHostGcPad(int port, GcPadInput* input)
 {
   hid::PadState pad;
   const bool plugged = PadDrivesGc() && m_gamepads.Read(port, &pad);
-  // The graphics menu has the pads while it is open.
-  if (m_menu.IsOpen())
-    pad = {};
   AutomationPad automation;
   const bool automated = ReadAutomationPad(port, &automation) && automation.gc;
-  if (!automated || m_menu.IsOpen())
+  if (!automated)
     automation = {};
   // Unplugged as long as nothing drives the port, but for the first while the
   // pads play the GameCube's: the game picks its button prompts from what is
@@ -525,6 +501,12 @@ void Machine::SetGcRumble(int port, bool on)
 {
   if (PadDrivesGc())
     m_gamepads.SetRumble(port, on && m_rumble_allowed.load() ? 1.0f : 0.0f);
+}
+
+void Machine::SetGraphics(const GraphicsSettings& settings)
+{
+  m_graphics = settings;
+  m_graphics.Save(config.user / "graphics.ini");
 }
 
 void Machine::AllowRumble(bool allowed)
