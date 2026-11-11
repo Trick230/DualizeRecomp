@@ -60,16 +60,16 @@ using dualize::Memory;
 using dualize::nights::CpuOf;
 using dualize::nights::Language;
 
-// Nunito Sans Light (SIL Open Font License 1.1, resources/fonts/
-// NunitoSans-OFL.txt), cut to Latin-1: the free face closest to the labels',
-// for the letters the game never prints in theirs (digits, X, ß) and the
-// Japanese pages' Latin.
+// Kumbh Sans at weight 325 (SIL Open Font License 1.1, resources/fonts/
+// KumbhSans-OFL.txt), cut to Latin-1: of the free faces, the closest to the
+// game's own letters (scored letter by letter), for the letters the game
+// never prints in its face (digits, X, ß) and the Japanese pages' Latin.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-warning-option"
 #pragma clang diagnostic ignored "-Wc23-extensions"
 #pragma clang diagnostic ignored "-Wc++26-extensions"
 constexpr unsigned char LABEL_FONT[] = {
-#embed "../resources/fonts/NunitoSans-Light.ttf"
+#embed "../resources/fonts/KumbhSans-Book.ttf"
 };
 // Noto Sans JP Black (SIL Open Font License 1.1, resources/fonts/
 // NotoSansJP-OFL.txt), cut to our Japanese texts' characters: the game's

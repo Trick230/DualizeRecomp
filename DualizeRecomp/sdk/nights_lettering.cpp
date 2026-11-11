@@ -19,14 +19,16 @@ using dualize::nights::LetteringSize;
 
 // A line of the face in a texture: a window of 24 rows from `top` (rows above
 // the texture are empty), its first rows cleared when the line above's
-// descenders reach in; its capitals' height, baseline row and press.
+// descenders reach in; its capitals' height, baseline row and press, and how
+// much its strokes are thinned (coverage (c - thin) / (1 - thin)) to the
+// labels' weight, other screens drawing the face heavier.
 struct LetteringSource
 {
   const char* file;
   uint32_t image;
   int32_t top;
   bool clear_top;
-  float cap, baseline, press;
+  float cap, baseline, press, thin;
 };
 
 enum class Make : uint8_t
@@ -376,6 +378,9 @@ std::optional<std::pair<Bitmap, const LetteringSource*>> RawCut(char32_t c, Lett
   auto cut = Cut(g_windows[glyph->source], glyph->x0, glyph->x1);
   if (!cut)
     return std::nullopt;
+  if (const float thin = SOURCES[glyph->source].thin; thin > 0)
+    for (float& ink : cut->ink)
+      ink = std::clamp((ink - thin) / (1 - thin), 0.0f, 1.0f);
   return std::pair{std::move(*cut), &SOURCES[glyph->source]};
 }
 
