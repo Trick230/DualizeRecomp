@@ -45,6 +45,10 @@ define NIGHTS_MODE_OPTION_ICON_GLOW addr(@ModeOption_Highlight+F0,FC)
 # this is the members' own.
 @CsdNode_Method 48 9421FFE0 EA9BE812956F5BFC
 define CSD_CAST_SET_HIDE call(@CsdNode_Method+B8)
+# A CSD node's property copied from another node's; the colour's SetColor
+# (member, const color*): a colour over the one the cast's animation gives.
+@CsdNode_CopyProperty 27C 9421FFC0 EB8C9D716205F4E7
+define CSD_CAST_SET_COLOR call(@CsdNode_CopyProperty+13C)
 # A menu cursor's update: the input manager (a global), its controller, and
 # whether buttons (a 64-bit mask) were pressed or, held, repeat.
 @MenuCursor 100 9421FFE0 864B1AC517685FAC
