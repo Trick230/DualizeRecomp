@@ -285,6 +285,7 @@ bool Machine::Start(std::string* error)
       .token = GxToken,
       .quit = GxQuit,
       .thread_started = [](void*) { profiler::RegisterThisThread("gx"); },
+      .fullscreen_key = [](void* user) { MachineOf(user).RequestFullscreenSwitch(); },
   };
   if (!aurora_fifo_start(&gx_config, &gx_host))
   {
@@ -712,6 +713,12 @@ void Machine::RequestLoad(std::filesystem::path path)
   m_requests = true;
 }
 
+void Machine::RequestFullscreenSwitch()
+{
+  m_switch_fullscreen = true;
+  m_requests = true;
+}
+
 void Machine::ServiceRequests()
 {
   m_requests = false;
@@ -719,6 +726,12 @@ void Machine::ServiceRequests()
   {
     cpu.Stop();
     return;
+  }
+  if (m_switch_fullscreen.exchange(false))
+  {
+    GraphicsSettings settings = m_graphics;
+    settings.fullscreen = !settings.fullscreen;
+    SetGraphics(settings);
   }
   std::filesystem::path save, load;
   {

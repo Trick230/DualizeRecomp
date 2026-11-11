@@ -75,6 +75,8 @@ public:
   // Any thread: performed by the CPU thread at its next event boundary.
   void RequestSave(std::filesystem::path path);
   void RequestLoad(std::filesystem::path path);
+  // Any thread: fullscreen on or off (Alt+Enter), as the graphics settings.
+  void RequestFullscreenSwitch();
 
   // Automation input, merged with the physical gamepad: the Classic
   // Controller on Wii Remote `port` and the GameCube pad on `port`. Any thread;
@@ -182,6 +184,7 @@ private:
 
   std::atomic<bool> m_stop{false};
   std::atomic<bool> m_requests{false};
+  std::atomic<bool> m_switch_fullscreen{false};
   std::mutex m_request_mutex;
   std::filesystem::path m_save_path, m_load_path;
 };
