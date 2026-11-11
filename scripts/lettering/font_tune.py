@@ -4,7 +4,8 @@
 # the game's where measured; then the weight that inks the game's label lines
 # as darkly. Writes DualizeRecomp/resources/fonts/DualizeSans.ttf (OFL 1.1,
 # a modified Kumbh Sans, renamed).
-# python scripts/lettering/font_tune.py <KumbhSans variable .ttf> [weight]
+# python scripts/lettering/font_tune.py <KumbhSans variable .ttf> [weight] [output name]
+# (the Options: 350, DualizeSans.ttf; the message font's Latin: 600, DualizeSans-SemiBold.ttf)
 import io, sys, json, unicodedata
 import numpy as np
 from fontTools.ttLib import TTFont
@@ -125,5 +126,6 @@ if __name__ == '__main__':
     weight = float(sys.argv[2]) if len(sys.argv) > 2 else 350
     path = WORK / 'glyph_widths.json'  # font_widths.py's per-letter widths, when measured
     data = build(weight, json.load(open(path)) if path.exists() else None)
-    open(OUT, 'wb').write(data)
+    out = ROOT / 'DualizeRecomp' / 'resources' / 'fonts' / sys.argv[3] if len(sys.argv) > 3 else OUT
+    open(out, 'wb').write(data)
     print('width', round(WIDTH, 3), 'x-height', round(XH, 3), 'ascender', round(ASC, 3), 'descender', round(DESC, 3), 'weight', weight)
