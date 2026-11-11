@@ -218,8 +218,9 @@ SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
         grey[static_cast<size_t>(y) * w + x] = image.rgba[(static_cast<size_t>(y) * w + x) * 4] / 255.0f / peak[y];
     }
   }
-  // Catmull-Rom weights at each output texel's centre, then a light blur
-  // (sigma a third of a source texel) that hides the 4-level CMPR steps.
+  // Catmull-Rom weights at each output texel's centre, then a blur (sigma
+  // half a source texel) that hides the 4-level CMPR steps and evens the
+  // outlines.
   const auto weights = [scale](uint32_t i, uint32_t n, std::array<int, 4>& at, std::array<float, 4>& wt) {
     const float u = (static_cast<float>(i) + 0.5f) / static_cast<float>(scale) - 0.5f;
     const int base = static_cast<int>(std::floor(u));
@@ -250,7 +251,7 @@ SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
                                            wt[2] * wide[static_cast<size_t>(at[2]) * W + x] +
                                            wt[3] * wide[static_cast<size_t>(at[3]) * W + x];
   }
-  const float sigma = static_cast<float>(scale) / 3.0f;
+  const float sigma = static_cast<float>(scale) / 2.0f;
   const int reach = static_cast<int>(std::ceil(sigma * 3.0f));
   std::vector<float> kernel(static_cast<size_t>(2 * reach + 1));
   float sum = 0.0f;
@@ -268,8 +269,6 @@ SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
              up[static_cast<size_t>(y) * W + static_cast<uint32_t>(std::clamp(static_cast<int>(x) + k, 0, static_cast<int>(W) - 1))];
       blur[static_cast<size_t>(y) * W + x] = v;
     }
-  // Cut at half coverage; the soft edge is about one output texel wide.
-  const float edge = 1.2f / static_cast<float>(scale);
   for (uint32_t y = 0; y < H; ++y)
     for (uint32_t x = 0; x < W; ++x)
     {
@@ -277,8 +276,24 @@ SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
       for (int k = -reach; k <= reach; ++k)
         v += kernel[static_cast<size_t>(k + reach)] *
              blur[static_cast<size_t>(std::clamp(static_cast<int>(y) + k, 0, static_cast<int>(H) - 1)) * W + x];
-      up[static_cast<size_t>(y) * W + x] = std::clamp((v - 0.5f) / edge + 0.5f, 0.0f, 1.0f) * peak[y / scale];
+      up[static_cast<size_t>(y) * W + x] = v;
     }
+  // Cut just under half coverage (the blur thins strokes a little), the soft
+  // edge EDGE output texels wide everywhere: the field over its own slope.
+  constexpr float CUT = 0.44f, EDGE = 1.6f;
+  const auto field = [&](int x, int y) {
+    return up[static_cast<size_t>(std::clamp(y, 0, static_cast<int>(H) - 1)) * W +
+              static_cast<size_t>(std::clamp(x, 0, static_cast<int>(W) - 1))];
+  };
+  for (uint32_t y = 0; y < H; ++y)
+    for (uint32_t x = 0; x < W; ++x)
+    {
+      const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+      const float slope = std::hypot(field(ix + 1, iy) - field(ix - 1, iy), field(ix, iy + 1) - field(ix, iy - 1)) / 2 + 1e-4f;
+      blur[static_cast<size_t>(y) * W + x] =
+          std::clamp((field(ix, iy) - CUT) / (slope * EDGE) + 0.5f, 0.0f, 1.0f) * peak[y / scale];
+    }
+  up.swap(blur);
   // Mips by 2x2 averages, down to one texel.
   std::vector<float> level = std::move(up);
   uint32_t lw = W, lh = H;

@@ -37,8 +37,8 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
 void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);
 
 // A grey mask (text, shapes) drawn `scale` times larger with sharp edges: the
-// coverage interpolated smoothly, then cut at half coverage with a one-texel
-// soft edge, so letters keep their shape and weight; each band of `band` rows
+// coverage interpolated and smoothed, then cut near half coverage with a soft
+// edge of even width, so letters keep their shape and weight; each band of `band` rows
 // is cut at half its own brightest grey (dimmed lines stay dimmed). Opaque
 // grey RGBA8, the full mip chain after the base level.
 struct SharpMask
