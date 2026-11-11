@@ -19,7 +19,6 @@
 
 #include "core/cpu.h"
 #include "ppc_natives.h"
-#include "sdk/nights_lettering.hpp"
 #include "sdk/nights_options.hpp"
 #include "sdk/nights_text.hpp"
 
@@ -61,10 +60,10 @@ using dualize::Memory;
 using dualize::nights::CpuOf;
 using dualize::nights::Language;
 
-// Kumbh Sans at weight 325 (SIL Open Font License 1.1, resources/fonts/
+// Kumbh Sans at weight 350 (SIL Open Font License 1.1, resources/fonts/
 // KumbhSans-OFL.txt), cut to Latin-1: of the free faces, the closest to the
-// game's own letters (scored letter by letter), for the letters the game
-// never prints in its face (digits, X, ß) and the Japanese pages' Latin.
+// game's own labels (scored letter by letter, its weight and spacing fitted
+// to the game's lines), set at whatever size the screen needs.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-warning-option"
 #pragma clang diagnostic ignored "-Wc23-extensions"
@@ -127,13 +126,14 @@ constexpr uint32_t DRAWN_BYTES = DRAWN_LINES * LINE / 8 * TILE_ROW_BYTES;
 // The value boxes' words (lines 8-10), never redrawn: found in guest RAM.
 constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - WORDS_FIRST_TILE_ROW;
 
-// The lettering, as the game's (measured on its labels texture): labels'
-// capitals 14 texels high on a baseline at 19, letters 1.5 texels further apart
-// than the face sets them, ending clear of the value box; values' 13 high,
-// half a texel further apart, centred in a cell 20 texels high (from row 2
+// The lettering, as the game's (measured on its labels texture; the face's
+// weight and spacing fitted to its lines by scripts/lettering/font_fit.py):
+// labels' capitals 14 texels high on a baseline at 19, letters a texel further
+// apart than the face sets them, ending clear of the value box; values' 13
+// high, as far apart for their size, centred in a cell 20 texels high (from row 2
 // of their line) on a baseline 15 down it.
-constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 1.5f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
-constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.5f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
+constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 1.0f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
+constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.9f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
 // A row the other settings lock, drawn dim.
 constexpr uint8_t LOCKED_LEVEL = 110;
 constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;
@@ -165,16 +165,20 @@ public:
   float Tracking() const { return m_tracking; }
 
   // Coverage over what the image has (its red, green and blue alike).
+  // At `scale` times the texture's size (an image that much larger), placed
+  // as at its own.
   void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze = 1.0f,
-            uint8_t level = 255) const
+            uint8_t level = 255, uint32_t scale = 1) const
   {
-    float pen = x;
+    const auto k = static_cast<float>(scale);
+    const int line_rows = static_cast<int>(LINE * scale), width = static_cast<int>(WIDTH * scale);
+    float pen = x * k;
     std::vector<uint8_t> glyph;
     for (size_t i = 0; i < text.size(); ++i)
     {
       const int c = static_cast<int>(text[i]);
       const Face& face = FaceOf(c);
-      const float sx = face.scale_x * squeeze, sy = face.scale_y;
+      const float sx = face.scale_x * squeeze * k, sy = face.scale_y * k;
       const float shift = pen - std::floor(pen);
       int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
       stbtt_GetCodepointBitmapBoxSubpixel(&face.font, c, sx, sy, shift, 0, &x0, &y0, &x1, &y1);
@@ -183,24 +187,24 @@ public:
       {
         glyph.assign(static_cast<size_t>(w) * h, 0);
         stbtt_MakeCodepointBitmapSubpixel(&face.font, glyph.data(), w, h, w, sx, sy, shift, 0, c);
-        const int left = static_cast<int>(std::floor(pen)) + x0, top = static_cast<int>(baseline) + y0;
+        const int left = static_cast<int>(std::floor(pen)) + x0, top = static_cast<int>(baseline * k) + y0;
         for (int gy = 0; gy < h; ++gy)
         {
           const int y = top + gy;
-          if (y < 0 || y >= static_cast<int>(LINE))
+          if (y < 0 || y >= line_rows)
             continue;
           for (int gx = 0; gx < w; ++gx)
           {
             const int px = left + gx;
-            if (px < 0 || px >= static_cast<int>(WIDTH))
+            if (px < 0 || px >= width)
               continue;
-            uint8_t* p = &image.rgba[(static_cast<size_t>(line * LINE + y) * image.width + px) * 4];
+            uint8_t* p = &image.rgba[(static_cast<size_t>(line * line_rows + y) * image.width + px) * 4];
             const auto ink = static_cast<uint8_t>(glyph[static_cast<size_t>(gy) * w + gx] * level / 255);
             p[0] = p[1] = p[2] = std::max(p[0], ink);
           }
         }
       }
-      pen += (Advance(text, i) + Tracking(text[i])) * squeeze;
+      pen += (Advance(text, i) + Tracking(text[i])) * squeeze * k;
     }
   }
 
@@ -494,79 +498,6 @@ const LabelFont& ValueLettering()
   return font;
 }
 
-// Our labels and values in the game's own lettering (sdk/nights_lettering),
-// a letter it never prints in the fallback face, at the same size.
-class GameLettering
-{
-public:
-  GameLettering(dualize::nights::LetteringSize size, const LabelFont& fallback) : m_size(size), m_fallback(fallback) {}
-
-  float Width(std::u32string_view text, float squeeze = 1.0f) const { return Lay(nullptr, 0, 0, text, 0, squeeze, 0); }
-
-  void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze = 1.0f,
-            uint8_t level = 255) const
-  {
-    Lay(&image, line, baseline, text, x, squeeze, level);
-  }
-
-private:
-  // Lays `text` out from `x`, drawing it when there is an image; its width.
-  float Lay(Image* image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze,
-            uint8_t level) const
-  {
-    using namespace dualize::nights;
-    const float press = LetteringPress(m_size) * squeeze, tracking = LetteringTracking(m_size) * squeeze;
-    float pen = x;
-    for (size_t i = 0; i < text.size(); ++i)
-    {
-      const char32_t c = text[i];
-      const float gap = i + 1 < text.size() ? tracking : 0.0f;
-      if (c == U' ')
-      {
-        pen += LetteringSpace(m_size) * squeeze;
-        continue;
-      }
-      if (const Letter* letter = GameLetter(c, m_size, squeeze))
-      {
-        if (image != nullptr)
-          Blit(*image, line, baseline, *letter, static_cast<int>(std::lround(pen + letter->left)), level);
-        pen += letter->left + static_cast<float>(letter->width) + letter->right + gap;
-        continue;
-      }
-      const std::u32string_view one = text.substr(i, 1);
-      if (image != nullptr)
-        m_fallback.Draw(*image, line, baseline, one, pen + m_fallback.Tracking() * press / 2, press, level);
-      pen += m_fallback.Width(one, press) + m_fallback.Tracking() * press + gap;
-    }
-    return pen - x;
-  }
-
-  static void Blit(Image& image, uint32_t line, float baseline, const dualize::nights::Letter& letter, int left,
-                   uint8_t level)
-  {
-    const int shift = static_cast<int>(std::lround(baseline)) - 19;
-    for (int y = 0; y < 24; ++y)
-    {
-      const int row = y + shift;
-      if (row < 0 || row >= static_cast<int>(LINE))
-        continue;
-      for (uint32_t x = 0; x < letter.width; ++x)
-      {
-        const int px = left + static_cast<int>(x);
-        if (px < 0 || px >= static_cast<int>(WIDTH))
-          continue;
-        uint8_t* p = &image.rgba[(static_cast<size_t>(line * LINE + row) * image.width + px) * 4];
-        const auto ink =
-            static_cast<uint8_t>(std::lround(letter.coverage[static_cast<size_t>(y) * letter.width + x] * level));
-        p[0] = p[1] = p[2] = std::max(p[0], ink);
-      }
-    }
-  }
-
-  dualize::nights::LetteringSize m_size;
-  const LabelFont& m_fallback;
-};
-
 // The labels texture of the page's language where the screen loaded it (its
 // first copy; labels_found has them all).
 uint8_t* FindLabels(const Memory& memory)
@@ -790,47 +721,52 @@ void Copy(Image& image, const Image& source, uint32_t x0, uint32_t x1, uint32_t 
   }
 }
 
+// The game's ON and OFF words in each language (the texture's own lettering).
+constexpr std::array<std::array<std::string_view, 2>, dualize::nights::LANGUAGE_COUNT> SWITCH_WORDS{{
+    {"", ""}, {"ON", "OFF"}, {"ACTIVÉ", "DÉSACTIVÉ"}, {"SÍ", "NO"}, {"EIN", "AUS"}, {"SÌ", "NO"}}};
+// The languages' names as the game writes them.
+constexpr std::array<std::string_view, 6> LANGUAGE_NAMES{"日本語", "English", "Français", "Español", "Deutsch", "Italiano"};
+
 // The list's four lines, from option `top` on: each label (pressed narrower
 // when too long), and its value in its value line, centred in the cell its
 // box's word shows (pressed narrower when too long), both in the game's
-// language, in its own lettering where it has the same words. A row with
-// no value has its box hidden.
+// language. The texture gets the game's own lettering where it has the same
+// words; the renderer draws it from a copy SHARP_SCALE times larger, every
+// word set by the face at that size (the Japanese ON and OFF, which it lacks,
+// from the texture's, sharpened). A row with no value has its box hidden.
 void DrawRows(CPUState* ctx, uint32_t screen)
 {
   if (g_page.labels_in_ram == nullptr)
     return;
   const Machine& machine = GetMachine(CpuOf(ctx));
   const Language language = g_page.language;
-  const Image& source = *g_page.labels[static_cast<size_t>(language)];
+  const auto index = static_cast<size_t>(language);
+  const Image& source = *g_page.labels[index];
   Image image = source;
   std::fill_n(image.rgba.begin(), static_cast<size_t>(DRAWN_LINES) * LINE * WIDTH * 4, 0);
-  // The Japanese pages keep the fallback faces (the game's face has no
-  // Japanese); the others letter as the game does: English labels large,
-  // the other languages' labels and every value small.
-  const bool japanese = language == Language::JAPANESE;
-  using dualize::nights::LetteringSize;
-  const GameLettering game_labels(language == Language::ENGLISH ? LetteringSize::LABEL : LetteringSize::SMALL,
-                                  language == Language::ENGLISH ? LabelLettering() : ValueLettering());
-  const GameLettering game_values(LetteringSize::SMALL, ValueLettering());
-  const auto label_width = [&](std::u32string_view text) {
-    return japanese ? LabelLettering().Width(text) : game_labels.Width(text);
-  };
-  const auto draw_label = [&](uint32_t line, std::u32string_view text, float squeeze, uint8_t level) {
-    if (japanese)
-      LabelLettering().Draw(image, line, LABEL_BASELINE, text, LABEL_X, squeeze, level);
-    else
-      game_labels.Draw(image, line, LABEL_BASELINE, text, LABEL_X, squeeze, level);
-  };
-  const auto value_width = [&](std::u32string_view text, float squeeze) {
-    return japanese ? ValueLettering().Width(text, squeeze) : game_values.Width(text, squeeze);
-  };
-  const auto draw_value = [&](uint32_t line, std::u32string_view text, float x, float squeeze, uint8_t level) {
-    if (japanese)
-      ValueLettering().Draw(image, line, VALUE_BASELINE, text, x, squeeze, level);
-    else
-      game_values.Draw(image, line, VALUE_BASELINE, text, x, squeeze, level);
-  };
   const std::array<Row, ROWS> rows = RowsShown(machine);
+  const auto draw_label = [&](Image& target, uint32_t scale, int row, uint8_t level) {
+    const std::u32string label = Utf32(dualize::nights::Translate(rows[row].label, language));
+    const float width = LabelLettering().Width(label), room = LABEL_RIGHT - LABEL_X;
+    LabelLettering().Draw(target, static_cast<uint32_t>(row), LABEL_BASELINE, label, LABEL_X,
+                          width > room ? room / width : 1.0f, level, scale);
+  };
+  const auto draw_value = [&](Image& target, uint32_t scale, int row, std::u32string_view value, uint8_t level) {
+    const float squeeze = std::min(1.0f, VALUE_ROOM / ValueLettering().Width(value));
+    ValueLettering().Draw(target, VALUE_LINE + static_cast<uint32_t>(row), VALUE_BASELINE, value,
+                          (VALUE_WIDTH - ValueLettering().Width(value, squeeze)) / 2, squeeze, level, scale);
+  };
+  // A value's words as the face sets them; none for a word only the texture has.
+  const auto value_text = [&](std::string_view value) -> std::optional<std::u32string> {
+    if (value == "ON" || value == "OFF")
+    {
+      const std::string_view word = SWITCH_WORDS[index][value == "ON" ? 0 : 1];
+      return word.empty() ? std::nullopt : std::optional(Utf32(word));
+    }
+    if (const auto it = std::ranges::find(LANGUAGES, value); it != LANGUAGES.end())
+      return Utf32(LANGUAGE_NAMES[static_cast<size_t>(it - LANGUAGES.begin())]);
+    return Utf32(dualize::nights::Translate(value, language));
+  };
   for (int row = 0; row < ROWS; ++row)
   {
     if (rows[row].label.empty())
@@ -842,11 +778,7 @@ void DrawRows(CPUState* ctx, uint32_t screen)
            static_cast<float>(WIDTH), level);
     }
     else
-    {
-      const std::u32string label = Utf32(dualize::nights::Translate(rows[row].label, language));
-      const float width = label_width(label), label_room = LABEL_RIGHT - LABEL_X;
-      draw_label(static_cast<uint32_t>(row), label, width > label_room ? label_room / width : 1.0f, level);
-    }
+      draw_label(image, 1, row, level);
     if (rows[row].value.empty())
       continue;
     const uint32_t value_y = (VALUE_LINE + static_cast<uint32_t>(row)) * LINE;
@@ -862,9 +794,8 @@ void DrawRows(CPUState* ctx, uint32_t screen)
         continue;
       }
     }
-    const std::u32string value = Utf32(dualize::nights::Translate(rows[row].value, language));
-    const float squeeze = std::min(1.0f, VALUE_ROOM / value_width(value, 1.0f));
-    draw_value(VALUE_LINE + row, value, (VALUE_WIDTH - value_width(value, squeeze)) / 2, squeeze, level);
+    if (const auto value = value_text(rows[row].value))
+      draw_value(image, 1, row, *value, level);
   }
   dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, g_page.labels_in_ram);
   for (uint8_t* copy : g_page.labels_found)
@@ -872,15 +803,36 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     if (copy != g_page.labels_in_ram)
       std::memcpy(copy, g_page.labels_in_ram, DRAWN_BYTES);
   }
-  // The renderer draws the texture from a sharp copy SHARP_SCALE times
-  // larger, cut from the same lettering (every copy has the same bytes).
+  // The sharp copy (every copy of the texture has the same bytes).
   const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, g_page.labels_in_ram);
   if (!g_page.sharp_key || !(*g_page.sharp_key == key))
   {
     if (g_page.sharp_key)
       aurora::texture::remove_memory_replacement(*g_page.sharp_key);
-    const dualize::SharpMask sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
-    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, sharp.mips, sharp.rgba);
+    Image sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
+    const auto clear = [&](uint32_t line) {
+      const size_t from = static_cast<size_t>(line) * LINE * SHARP_SCALE * sharp.width;
+      for (size_t i = from; i < from + static_cast<size_t>(LINE) * SHARP_SCALE * sharp.width; ++i)
+        sharp.rgba[i * 4] = sharp.rgba[i * 4 + 1] = sharp.rgba[i * 4 + 2] = 0;
+    };
+    for (int row = 0; row < ROWS; ++row)
+    {
+      if (rows[row].label.empty())
+        continue;
+      const uint8_t level = rows[row].locked ? LOCKED_LEVEL : 255;
+      clear(static_cast<uint32_t>(row));
+      draw_label(sharp, SHARP_SCALE, row, level);
+      if (rows[row].value.empty())
+        continue;
+      if (const auto value = value_text(rows[row].value))
+      {
+        clear(VALUE_LINE + static_cast<uint32_t>(row));
+        draw_value(sharp, SHARP_SCALE, row, *value, level);
+      }
+    }
+    uint32_t mips = 0;
+    const std::vector<uint8_t> texels = dualize::GreyMipChain(sharp, mips);
+    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, texels);
     g_page.sharp_key = key;
   }
   aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);

@@ -197,10 +197,10 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
   return tpl;
 }
 
-SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
+Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
 {
   const uint32_t w = image.width, h = image.height, W = w * scale, H = h * scale;
-  SharpMask out{W, H, 0, {}};
+  Image out{W, H, {}};
   if (w == 0 || h == 0 || scale == 0 || band == 0)
     return out;
   // Each band at its own full brightness.
@@ -293,18 +293,34 @@ SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
       blur[static_cast<size_t>(y) * W + x] =
           std::clamp((field(ix, iy) - CUT) / (slope * EDGE) + 0.5f, 0.0f, 1.0f) * peak[y / scale];
     }
-  up.swap(blur);
-  // Mips by 2x2 averages, down to one texel.
-  std::vector<float> level = std::move(up);
-  uint32_t lw = W, lh = H;
+  out.rgba.resize(static_cast<size_t>(W) * H * 4);
+  for (size_t i = 0; i < blur.size(); ++i)
+  {
+    const auto g = static_cast<uint8_t>(std::lround(blur[i] * 255.0f));
+    out.rgba[i * 4] = out.rgba[i * 4 + 1] = out.rgba[i * 4 + 2] = g;
+    out.rgba[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips)
+{
+  std::vector<uint8_t> out;
+  mips = 0;
+  uint32_t lw = image.width, lh = image.height;
+  if (lw == 0 || lh == 0)
+    return out;
+  std::vector<float> level(static_cast<size_t>(lw) * lh);
+  for (size_t i = 0; i < level.size(); ++i)
+    level[i] = image.rgba[i * 4];
   while (true)
   {
     for (float v : level)
     {
-      const auto g = static_cast<uint8_t>(std::lround(v * 255.0f));
-      out.rgba.insert(out.rgba.end(), {g, g, g, 255});
+      const auto g = static_cast<uint8_t>(std::lround(v));
+      out.insert(out.end(), {g, g, g, 255});
     }
-    ++out.mips;
+    ++mips;
     if (lw == 1 && lh == 1)
       break;
     const uint32_t nw = std::max(1u, lw / 2), nh = std::max(1u, lh / 2);

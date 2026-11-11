@@ -39,14 +39,12 @@ void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data)
 // A grey mask (text, shapes) drawn `scale` times larger with sharp edges: the
 // coverage interpolated and smoothed, then cut near half coverage with a soft
 // edge of even width, so letters keep their shape and weight; each band of `band` rows
-// is cut at half its own brightest grey (dimmed lines stay dimmed). Opaque
-// grey RGBA8, the full mip chain after the base level.
-struct SharpMask
-{
-  uint32_t width = 0, height = 0, mips = 0;
-  std::vector<uint8_t> rgba;
-};
-SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band);
+// is cut at half its own brightest grey (dimmed lines stay dimmed). Opaque grey.
+Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band);
+
+// An opaque grey image's texels and its smaller mips (2x2 averages) after
+// them, down to one texel, as RGBA8; `mips` counts the levels.
+std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips);
 
 // Encodes the rows [y0, y1) of an image (rounded out to whole blocks) as
 // RGB5A3 into `data`, the image's encoded bytes.
