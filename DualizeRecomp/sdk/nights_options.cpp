@@ -19,6 +19,7 @@
 #include "ui/game_assets.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <bit>
 #include <array>
 #include <cstring>
@@ -140,10 +141,10 @@ constexpr std::array<Cut, 7> CUT_RAPHICS{{
 }};
 
 // The controller window row's line (the third), whose setting now turns the
-// controller's rumble on and off: "Enable Rumble", the word Enable as the
-// Weather Link row has it.
-constexpr uint32_t RUMBLE_LINE = 2;
-constexpr Cut CUT_ENABLE{3, 3, 69};
+// controller's rumble on and off: "Rumble". The Weather Link row's (the
+// fourth) loses its "Enable " as well.
+constexpr uint32_t RUMBLE_LINE = 2, WEATHER_LINE = 3;
+constexpr Cut CUT_WEATHER_LINK{WEATHER_LINE, 73, 201};
 constexpr std::array<Cut, 6> CUT_RUMBLE{{
     {4, 2, 12},     // R, of Register
     {0, 54, 63},    // u, of Language
@@ -288,19 +289,186 @@ struct Labels
     Store(ASPECT_LINE, line);
   }
 
-  // Reads only lines the aspect redraw leaves alone (0, 3, 4 and 7).
+  // Reads only lines the aspect redraw leaves alone (0, 3, 4 and 7), so
+  // before the Weather Link redraw.
   void RedrawRumble()
   {
     Line line;
     int width = 0;
-    PutWide(line, CUT_ENABLE);
-    line.pen += 6;
     for (const Cut& cut : CUT_RUMBLE)
     {
       line.Put(Take(cut, &width), width);
       line.pen += 2;
     }
     Store(RUMBLE_LINE, line);
+  }
+
+  void RedrawWeatherLink()
+  {
+    Line line;
+    line.pen = 3;  // where "Enable" began
+    PutWide(line, CUT_WEATHER_LINK);
+    Store(WEATHER_LINE, line);
+  }
+};
+
+// The Options title: image 0 of the same textures, RGB5A3 256x128, three
+// 40-texel rows (Options, Sound Library, Concept Art), each a calligraphic
+// word over the same underline (from texel row 27 down). On the graphics page
+// the first reads "Graphics Settings", made of the titles' letters: the
+// Options rows', 2P Game Select's and Nightopia Select's (the 2P select
+// textures' image 1), Check Aspect Ratio's (image 8), pressed narrower to fit.
+constexpr uint32_t TITLE_IMAGE = 0, CHECK_TITLE_IMAGE = 8, TITLE_ROW = 40, TITLE_UNDERLINE = 27;
+constexpr const char* SELECT_2P_TEXTURES = "files/csd/textures/2p_piaselectus.tls";
+constexpr uint32_t SELECT_2P_TITLE_IMAGE = 1;
+constexpr size_t TITLE_BYTES = 256 * TITLE_ROW * 2;  // RGB5A3, 2 bytes a texel
+constexpr float TITLE_ROOM = 240, TITLE_SPACE = 14;
+constexpr int TITLE_KERN = 1;  // texels each letter overlaps the one before
+
+enum TitleSource : uint8_t
+{
+  OPTIONS_TITLES,
+  SELECT_2P_TITLES,
+  CHECK_TITLE,
+  TITLE_SOURCES
+};
+constexpr std::array<uint32_t, TITLE_SOURCES> TITLE_SOURCE_ROWS{3, 2, 1};
+
+struct TitleCut
+{
+  char letter;
+  TitleSource source;
+  uint32_t row;
+  uint32_t x0, x1;
+};
+constexpr std::array<TitleCut, 13> TITLE_CUTS{{
+    {'G', SELECT_2P_TITLES, 0, 68, 98},    // of Game
+    {'r', OPTIONS_TITLES, 1, 189, 200},    // of Library
+    {'a', SELECT_2P_TITLES, 0, 99, 112},   // of Game
+    {'p', OPTIONS_TITLES, 0, 96, 113},     // of Options
+    {'h', CHECK_TITLE, 0, 36, 48},         // of Check
+    {'i', OPTIONS_TITLES, 0, 128, 136},    // of Options
+    {'c', CHECK_TITLE, 0, 57, 67},         // of Check
+    {'s', OPTIONS_TITLES, 0, 171, 190},    // of Options
+    {'S', SELECT_2P_TITLES, 0, 160, 187},  // of Select
+    {'e', SELECT_2P_TITLES, 0, 188, 199},  // of Select
+    {'t', SELECT_2P_TITLES, 0, 232, 246},  // of Select
+    {'n', OPTIONS_TITLES, 0, 157, 171},    // of Options
+    {'g', SELECT_2P_TITLES, 1, 49, 64},    // of Nightopia
+}};
+constexpr std::string_view GRAPHICS_TITLE = "Graphics Settings";
+
+using Texel = std::array<float, 4>;  // premultiplied RGBA, 0-255
+
+struct Title
+{
+  std::array<const dualize::Image*, TITLE_SOURCES> sources{};
+  // Per source, its underline alone: per texel, the row's where it is least
+  // covered (the words' strokes cross it in different places).
+  std::array<std::vector<Texel>, TITLE_SOURCES> underlines;
+
+  static Texel Premultiplied(const dualize::Image& image, uint32_t x, uint32_t y)
+  {
+    const uint8_t* p = &image.rgba[(static_cast<size_t>(y) * image.width + x) * 4];
+    const float a = p[3] / 255.0f;
+    return {p[0] * a, p[1] * a, p[2] * a, static_cast<float>(p[3])};
+  }
+
+  void FindUnderlines()
+  {
+    for (uint32_t s = 0; s < TITLE_SOURCES; ++s)
+    {
+      const dualize::Image& image = *sources[s];
+      std::vector<Texel>& line = underlines[s];
+      line.assign(static_cast<size_t>(image.width) * TITLE_ROW, Texel{});
+      for (uint32_t y = 0; y < TITLE_ROW; ++y)
+      {
+        for (uint32_t x = 0; x < image.width; ++x)
+        {
+          Texel least = Premultiplied(image, x, y);
+          for (uint32_t row = 1; row < TITLE_SOURCE_ROWS[s]; ++row)
+          {
+            const Texel t = Premultiplied(image, x, row * TITLE_ROW + y);
+            if (t[3] < least[3])
+              least = t;
+          }
+          line[static_cast<size_t>(y) * image.width + x] = least;
+        }
+      }
+    }
+  }
+
+  // The letter's texels; below the underline's top only where they cover more
+  // than the underline does (the letter's tail).
+  void Put(std::vector<Texel>& canvas, uint32_t width, uint32_t pen, const TitleCut& cut) const
+  {
+    const dualize::Image& image = *sources[cut.source];
+    for (uint32_t y = 0; y < TITLE_ROW; ++y)
+    {
+      for (uint32_t x = cut.x0; x < cut.x1 && pen + x - cut.x0 < width; ++x)
+      {
+        const Texel t = Premultiplied(image, x, cut.row * TITLE_ROW + y);
+        const Texel& line = underlines[cut.source][static_cast<size_t>(y) * image.width + x];
+        if (y >= TITLE_UNDERLINE && t[3] <= line[3] + 64)
+          continue;
+        Texel& c = canvas[static_cast<size_t>(y) * width + pen + x - cut.x0];
+        const float keep = 1 - t[3] / 255;
+        for (int k = 0; k < 4; ++k)
+          c[k] = t[k] + c[k] * keep;
+      }
+    }
+  }
+
+  // Rows [0, TITLE_ROW) of `out` (Options' row): its underline with the
+  // word over it, centred.
+  bool Compose(dualize::Image& out) const
+  {
+    constexpr uint32_t WIDE = 512;
+    std::vector<Texel> canvas(static_cast<size_t>(WIDE) * TITLE_ROW, Texel{});
+    uint32_t pen = 0;
+    for (char letter : GRAPHICS_TITLE)
+    {
+      if (letter == ' ')
+      {
+        pen += static_cast<uint32_t>(TITLE_SPACE);
+        continue;
+      }
+      const auto cut = std::ranges::find(TITLE_CUTS, letter, &TitleCut::letter);
+      if (cut == TITLE_CUTS.end() || cut->x1 > sources[cut->source]->width)
+        return false;
+      Put(canvas, WIDE, pen, *cut);
+      pen += cut->x1 - cut->x0 - TITLE_KERN;
+    }
+    const float natural = static_cast<float>(pen + TITLE_KERN), fitted = std::min(TITLE_ROOM, natural);
+    const float step = natural / fitted, left = std::floor((static_cast<float>(out.width) - fitted) / 2);
+    for (uint32_t y = 0; y < TITLE_ROW; ++y)
+    {
+      for (uint32_t x = 0; x < out.width; ++x)
+      {
+        // The word pressed narrower: each texel the canvas span it covers.
+        Texel word{};
+        const float from = (static_cast<float>(x) - left) * step, to = from + step;
+        if (from >= 0 && to <= natural)
+        {
+          for (auto cx = static_cast<uint32_t>(from); static_cast<float>(cx) < to; ++cx)
+          {
+            const float cover = std::min(to, cx + 1.0f) - std::max(from, static_cast<float>(cx));
+            for (int k = 0; k < 4; ++k)
+              word[k] += canvas[static_cast<size_t>(y) * WIDE + cx][k] * cover / step;
+          }
+        }
+        const Texel& line = underlines[OPTIONS_TITLES][static_cast<size_t>(y) * out.width + x];
+        Texel t;
+        for (int k = 0; k < 4; ++k)
+          t[k] = word[k] + line[k] * (1 - word[3] / 255);
+        uint8_t* p = &out.rgba[(static_cast<size_t>(y) * out.width + x) * 4];
+        const float a = t[3] / 255;
+        for (int k = 0; k < 3; ++k)
+          p[k] = static_cast<uint8_t>(a > 0 ? std::clamp(t[k] / a + 0.5f, 0.0f, 255.0f) : 0);
+        p[3] = static_cast<uint8_t>(std::clamp(t[3] + 0.5f, 0.0f, 255.0f));
+      }
+    }
+    return true;
   }
 };
 }  // namespace
@@ -313,15 +481,37 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
     const std::filesystem::path path = game / OPTION_TEXTURES;
     std::vector<uint8_t> bytes = ReadFile(path);
     auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
-    if (labels && labels->format == 14 && labels->image.width == 256 && labels->image.height >= 8 * LINE)
+    const bool relabel = labels && labels->format == 14 && labels->image.width == 256 && labels->image.height >= 8 * LINE;
+    if (relabel)
     {
       Labels{labels->image}.Redraw();
       Labels{labels->image}.RedrawRumble();
-      static_assert(RUMBLE_LINE == ASPECT_LINE + 1);
-      EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (RUMBLE_LINE + 1) * LINE, bytes.data() + labels->offset);
+      Labels{labels->image}.RedrawWeatherLink();
+      static_assert(RUMBLE_LINE == ASPECT_LINE + 1 && WEATHER_LINE == RUMBLE_LINE + 1);
+      EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (WEATHER_LINE + 1) * LINE, bytes.data() + labels->offset);
       nights::KeepOptionLabels(labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
-      disc.OverrideFile(path, std::move(bytes));
     }
+    // The title row the graphics page shows.
+    auto titles = DecodeTplImage(bytes, TITLE_IMAGE);
+    auto check = DecodeTplImage(bytes, CHECK_TITLE_IMAGE);
+    auto select = DecodeTplImage(ReadFile(game / SELECT_2P_TEXTURES), SELECT_2P_TITLE_IMAGE);
+    if (titles && check && select && titles->format == 5 && titles->image.width == 256 &&
+        titles->image.height >= TITLE_SOURCE_ROWS[OPTIONS_TITLES] * TITLE_ROW &&
+        select->image.height >= TITLE_SOURCE_ROWS[SELECT_2P_TITLES] * TITLE_ROW && check->image.height >= TITLE_ROW)
+    {
+      Title title{{&titles->image, &select->image, &check->image}};
+      title.FindUnderlines();
+      Image composed = titles->image;
+      if (title.Compose(composed))
+      {
+        const std::span original = std::span(bytes).subspan(titles->offset, TITLE_BYTES);
+        std::vector<uint8_t> encoded(original.begin(), original.end());
+        EncodeRgb5a3(composed, 0, TITLE_ROW, encoded.data());
+        nights::KeepOptionTitle(original, encoded);
+      }
+    }
+    if (relabel)
+      disc.OverrideFile(path, std::move(bytes));
   }
   {
     const std::filesystem::path path = game / MODE_2P_TEXTURES;

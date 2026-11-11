@@ -36,6 +36,10 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
 // blocks) as CMPR into `data`, the image's encoded bytes.
 void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);
 
+// Encodes the rows [y0, y1) of an image (rounded out to whole blocks) as
+// RGB5A3 into `data`, the image's encoded bytes.
+void EncodeRgb5a3(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);
+
 // The game's bitmap font: an atlas of 2-bit glyphs and, per character, its
 // box in the atlas.
 class BitmapFont

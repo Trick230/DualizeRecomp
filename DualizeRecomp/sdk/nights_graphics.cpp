@@ -362,6 +362,9 @@ struct Page
   std::optional<Image> labels;
   std::vector<uint8_t> labels_encoded;
   uint8_t* labels_in_ram = nullptr;
+  // The title's first row, as the disc has it and as the page shows it.
+  std::vector<uint8_t> title_original, title_graphics;
+  uint8_t* title_in_ram = nullptr;
 
   std::array<HelpMessage, 2> help{{
       {static_cast<uint32_t>(NIGHTS_MODE_OPTION_TOP_HELP), u"Register Friends or change Nintendo WFC settings", {}},
@@ -400,6 +403,36 @@ uint8_t* FindLabels(const Memory& memory)
       return found - before;
   }
   return nullptr;
+}
+
+// The title's first row (Options) where the screen loaded it.
+uint8_t* FindTitle(const Memory& memory)
+{
+  if (g_page.title_original.empty())
+    return nullptr;
+  const std::vector<uint8_t>& title = g_page.title_original;
+  const std::boyer_moore_horspool_searcher search(title.begin(), title.end());
+  for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
+  {
+    uint8_t* data = memory.Effective(base, size);
+    uint8_t* found = std::search(data, data + size, search);
+    if (found != data + size)
+      return found;
+  }
+  return nullptr;
+}
+
+// The page's title in for Options, or back.
+void ShowTitle(const Memory& memory, bool graphics)
+{
+  if (graphics)
+    g_page.title_in_ram = FindTitle(memory);
+  if (g_page.title_in_ram == nullptr)
+    return;
+  const std::vector<uint8_t>& title = graphics ? g_page.title_graphics : g_page.title_original;
+  std::memcpy(g_page.title_in_ram, title.data(), title.size());
+  if (!graphics)
+    g_page.title_in_ram = nullptr;
 }
 
 // The list's four lines, from option `top` on: each label (pressed narrower
@@ -746,6 +779,12 @@ void KeepOptionLabels(const Image& image, std::span<const uint8_t> encoded)
   g_page.labels_encoded.assign(encoded.begin(), encoded.end());
 }
 
+void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t> graphics)
+{
+  g_page.title_original.assign(original.begin(), original.end());
+  g_page.title_graphics.assign(graphics.begin(), graphics.end());
+}
+
 void ResetGraphicsPage()
 {
   g_page.graphics = false;
@@ -754,6 +793,7 @@ void ResetGraphicsPage()
   g_page.undo.clear();
   g_page.quads.clear();
   g_page.labels_in_ram = nullptr;
+  g_page.title_in_ram = nullptr;
   for (HelpMessage& message : g_page.help)
     message.copies.clear();
   g_page.help_shown = -1;
@@ -798,6 +838,7 @@ extern "C" bool nights_ModeOptionLeft(CPUState* ctx)
     if (g_page.labels_in_ram == nullptr)
       std::fprintf(stderr, "[options] the labels texture is not in memory; the graphics page keeps its labels\n");
     DrawRows(machine);
+    ShowTitle(machine.memory, true);
     for (HelpMessage& message : g_page.help)
       message.Find(machine.memory);
     g_page.help_shown = -1;
@@ -811,6 +852,7 @@ extern "C" bool nights_ModeOptionLeft(CPUState* ctx)
   {
     ReleaseValueBoxes(ctx, screen);
     RestoreRows();
+    ShowTitle(machine.memory, false);
     for (HelpMessage& message : g_page.help)
       message.Restore();
     Store(machine.memory, screen + SCREEN_ROW, GRAPHICS_ROW);

@@ -252,6 +252,30 @@ void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data)
   }
 }
 
+void EncodeRgb5a3(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data)
+{
+  const auto scale = [](uint8_t v, int max) { return (v * max + 127) / 255; };
+  const uint32_t blocks_x = (image.width + 3) / 4;
+  for (uint32_t by = y0 / 4; by < (y1 + 3) / 4 && by * 4 < image.height; ++by)
+  {
+    for (uint32_t bx = 0; bx < blocks_x; ++bx)
+    {
+      uint8_t* block = data + (static_cast<size_t>(by) * blocks_x + bx) * 32;
+      for (uint32_t i = 0; i < 16; ++i)
+      {
+        const uint32_t x = std::min(bx * 4 + i % 4, image.width - 1), y = std::min(by * 4 + i / 4, image.height - 1);
+        const uint8_t* p = &image.rgba[(static_cast<size_t>(y) * image.width + x) * 4];
+        const int alpha = scale(p[3], 7);
+        const uint16_t v = alpha == 7
+                               ? static_cast<uint16_t>(0x8000 | scale(p[0], 31) << 10 | scale(p[1], 31) << 5 | scale(p[2], 31))
+                               : static_cast<uint16_t>(alpha << 12 | scale(p[0], 15) << 8 | scale(p[1], 15) << 4 | scale(p[2], 15));
+        block[2 * i] = static_cast<uint8_t>(v >> 8);
+        block[2 * i + 1] = static_cast<uint8_t>(v);
+      }
+    }
+  }
+}
+
 // <base>.inf is text: "bitmapSize : W H", "fontSize : N N", a palette of four
 // grey levels and one "index : halfW halfH centerX centerY // ... unicode 0xXXXX"
 // line per glyph. <base>.bin is the atlas, 2 bits a pixel, low bits first.
