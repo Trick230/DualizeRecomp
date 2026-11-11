@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdlib>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -194,6 +195,118 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
   tpl.format = format;
   tpl.offset = offset;
   return tpl;
+}
+
+SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
+{
+  const uint32_t w = image.width, h = image.height, W = w * scale, H = h * scale;
+  SharpMask out{W, H, 0, {}};
+  if (w == 0 || h == 0 || scale == 0 || band == 0)
+    return out;
+  // Each band at its own full brightness.
+  std::vector<float> grey(static_cast<size_t>(w) * h), peak(h, 1.0f);
+  for (uint32_t y0 = 0; y0 < h; y0 += band)
+  {
+    float most = 0.0f;
+    for (uint32_t y = y0; y < std::min(h, y0 + band); ++y)
+      for (uint32_t x = 0; x < w; ++x)
+        most = std::max(most, image.rgba[(static_cast<size_t>(y) * w + x) * 4] / 255.0f);
+    for (uint32_t y = y0; y < std::min(h, y0 + band); ++y)
+    {
+      peak[y] = most > 0.25f ? most : 1.0f;
+      for (uint32_t x = 0; x < w; ++x)
+        grey[static_cast<size_t>(y) * w + x] = image.rgba[(static_cast<size_t>(y) * w + x) * 4] / 255.0f / peak[y];
+    }
+  }
+  // Catmull-Rom weights at each output texel's centre, then a light blur
+  // (sigma a third of a source texel) that hides the 4-level CMPR steps.
+  const auto weights = [scale](uint32_t i, uint32_t n, std::array<int, 4>& at, std::array<float, 4>& wt) {
+    const float u = (static_cast<float>(i) + 0.5f) / static_cast<float>(scale) - 0.5f;
+    const int base = static_cast<int>(std::floor(u));
+    const float t = u - static_cast<float>(base);
+    wt = {((-0.5f * t + 1.0f) * t - 0.5f) * t, (1.5f * t - 2.5f) * t * t + 1.0f,
+          ((-1.5f * t + 2.0f) * t + 0.5f) * t, (0.5f * t - 0.5f) * t * t};
+    for (int k = 0; k < 4; ++k)
+      at[k] = std::clamp(base - 1 + k, 0, static_cast<int>(n) - 1);
+  };
+  std::vector<float> wide(static_cast<size_t>(W) * h), up(static_cast<size_t>(W) * H);
+  std::array<int, 4> at;
+  std::array<float, 4> wt;
+  for (uint32_t x = 0; x < W; ++x)
+  {
+    weights(x, w, at, wt);
+    for (uint32_t y = 0; y < h; ++y)
+    {
+      const float* row = &grey[static_cast<size_t>(y) * w];
+      wide[static_cast<size_t>(y) * W + x] = wt[0] * row[at[0]] + wt[1] * row[at[1]] + wt[2] * row[at[2]] + wt[3] * row[at[3]];
+    }
+  }
+  for (uint32_t y = 0; y < H; ++y)
+  {
+    weights(y, h, at, wt);
+    for (uint32_t x = 0; x < W; ++x)
+      up[static_cast<size_t>(y) * W + x] = wt[0] * wide[static_cast<size_t>(at[0]) * W + x] +
+                                           wt[1] * wide[static_cast<size_t>(at[1]) * W + x] +
+                                           wt[2] * wide[static_cast<size_t>(at[2]) * W + x] +
+                                           wt[3] * wide[static_cast<size_t>(at[3]) * W + x];
+  }
+  const float sigma = static_cast<float>(scale) / 3.0f;
+  const int reach = static_cast<int>(std::ceil(sigma * 3.0f));
+  std::vector<float> kernel(static_cast<size_t>(2 * reach + 1));
+  float sum = 0.0f;
+  for (int k = -reach; k <= reach; ++k)
+    sum += kernel[static_cast<size_t>(k + reach)] = std::exp(-0.5f * static_cast<float>(k * k) / (sigma * sigma));
+  for (float& k : kernel)
+    k /= sum;
+  std::vector<float> blur(up.size());
+  for (uint32_t y = 0; y < H; ++y)
+    for (uint32_t x = 0; x < W; ++x)
+    {
+      float v = 0.0f;
+      for (int k = -reach; k <= reach; ++k)
+        v += kernel[static_cast<size_t>(k + reach)] *
+             up[static_cast<size_t>(y) * W + static_cast<uint32_t>(std::clamp(static_cast<int>(x) + k, 0, static_cast<int>(W) - 1))];
+      blur[static_cast<size_t>(y) * W + x] = v;
+    }
+  // Cut at half coverage; the soft edge is about one output texel wide.
+  const float edge = 1.2f / static_cast<float>(scale);
+  for (uint32_t y = 0; y < H; ++y)
+    for (uint32_t x = 0; x < W; ++x)
+    {
+      float v = 0.0f;
+      for (int k = -reach; k <= reach; ++k)
+        v += kernel[static_cast<size_t>(k + reach)] *
+             blur[static_cast<size_t>(std::clamp(static_cast<int>(y) + k, 0, static_cast<int>(H) - 1)) * W + x];
+      up[static_cast<size_t>(y) * W + x] = std::clamp((v - 0.5f) / edge + 0.5f, 0.0f, 1.0f) * peak[y / scale];
+    }
+  // Mips by 2x2 averages, down to one texel.
+  std::vector<float> level = std::move(up);
+  uint32_t lw = W, lh = H;
+  while (true)
+  {
+    for (float v : level)
+    {
+      const auto g = static_cast<uint8_t>(std::lround(v * 255.0f));
+      out.rgba.insert(out.rgba.end(), {g, g, g, 255});
+    }
+    ++out.mips;
+    if (lw == 1 && lh == 1)
+      break;
+    const uint32_t nw = std::max(1u, lw / 2), nh = std::max(1u, lh / 2);
+    std::vector<float> next(static_cast<size_t>(nw) * nh);
+    for (uint32_t y = 0; y < nh; ++y)
+      for (uint32_t x = 0; x < nw; ++x)
+      {
+        const uint32_t x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
+        const uint32_t y0 = std::min(2 * y, lh - 1), y1 = std::min(2 * y + 1, lh - 1);
+        next[static_cast<size_t>(y) * nw + x] = 0.25f * (level[static_cast<size_t>(y0) * lw + x0] + level[static_cast<size_t>(y0) * lw + x1] +
+                                                         level[static_cast<size_t>(y1) * lw + x0] + level[static_cast<size_t>(y1) * lw + x1]);
+      }
+    level = std::move(next);
+    lw = nw;
+    lh = nh;
+  }
+  return out;
 }
 
 void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data)

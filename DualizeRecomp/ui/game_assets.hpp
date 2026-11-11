@@ -36,6 +36,18 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
 // blocks) as CMPR into `data`, the image's encoded bytes.
 void EncodeGreyCmpr(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);
 
+// A grey mask (text, shapes) drawn `scale` times larger with sharp edges: the
+// coverage interpolated smoothly, then cut at half coverage with a one-texel
+// soft edge, so letters keep their shape and weight; each band of `band` rows
+// is cut at half its own brightest grey (dimmed lines stay dimmed). Opaque
+// grey RGBA8, the full mip chain after the base level.
+struct SharpMask
+{
+  uint32_t width = 0, height = 0, mips = 0;
+  std::vector<uint8_t> rgba;
+};
+SharpMask SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band);
+
 // Encodes the rows [y0, y1) of an image (rounded out to whole blocks) as
 // RGB5A3 into `data`, the image's encoded bytes.
 void EncodeRgb5a3(const Image& image, uint32_t y0, uint32_t y1, uint8_t* data);

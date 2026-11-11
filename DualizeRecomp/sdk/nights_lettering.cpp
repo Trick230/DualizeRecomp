@@ -39,6 +39,7 @@ enum class Make : uint8_t
   G_FROM_C,        // the C, the O's lower right quarter, a bar in at the middle
   U_FROM_U,        // the u made even, its stems drawn up to the capitals
   TIMES_FROM_X,    // the x centred on the capitals' middle
+  L_FROM_B,        // the b's stem (the game's l, from its help lines, narrows at the foot)
   ACCENT_SMALL,    // a small letter (an i without its dot) and another's accent
   ACCENT_CAPITAL,  // a capital and its small letter's accent, raised
 };
@@ -464,6 +465,23 @@ std::optional<Bitmap> Build(char32_t c, LetteringSize size, float cap, float pre
       for (int x = 0; x < out.width; ++x)
         out.At(y, x) = stem.At(utop + 2, x);
     return out;
+  }
+  case Make::L_FROM_B:
+  {
+    const auto b = Build(U'b', size, cap, press);
+    if (!b)
+      return std::nullopt;
+    // The stem: the columns with ink above the bowl.
+    const int top = b->FirstRow(SOLID);
+    int first = b->width, last = -1;
+    for (int y = top; y < top + 4; ++y)
+      for (int x = 0; x < b->width; ++x)
+        if (b->At(y, x) > INK)
+        {
+          first = std::min(first, x);
+          last = std::max(last, x);
+        }
+    return last < first ? std::nullopt : std::optional(b->Columns(first, last + 1));
   }
   case Make::TIMES_FROM_X:
   {

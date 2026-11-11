@@ -29,6 +29,7 @@
 #include "ui/graphics_settings.hpp"
 
 #include <aurora/fifo.h>
+#include <aurora/texture.hpp>
 
 #include <algorithm>
 #include <array>
@@ -121,6 +122,7 @@ constexpr uint32_t INPUT_UP = 0x1, INPUT_DOWN = 0x2, INPUT_LEFT = 0x4, INPUT_RIG
 // value boxes' words. CMPR encodes 8x8 tiles, 32 bytes each.
 constexpr uint32_t LINE = 24, WIDTH = 256, TILE_ROW_BYTES = WIDTH / 8 * 32;
 constexpr uint32_t VALUE_LINE = ROWS, DRAWN_LINES = 2 * ROWS;
+constexpr uint32_t SHARP_SCALE = 4, CMPR_FORMAT = 0xE;  // GX_TF_CMPR
 constexpr uint32_t DRAWN_BYTES = DRAWN_LINES * LINE / 8 * TILE_ROW_BYTES;
 // The value boxes' words (lines 8-10), never redrawn: found in guest RAM.
 constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - WORDS_FIRST_TILE_ROW;
@@ -445,6 +447,8 @@ struct Page
   std::array<std::vector<uint8_t>, dualize::nights::LANGUAGE_COUNT> labels_encoded;
   Language language = Language::ENGLISH;
   uint8_t* labels_in_ram = nullptr;
+  // The drawn labels texture's sharp copy in the renderer (see DrawRows).
+  std::optional<aurora::texture::TextureSourceKey> sharp_key;
   std::array<uint32_t, 2> drawn_window{};  // the window's size the rows were drawn with
   // The title's first row, as the disc has it and as the page shows it.
   std::vector<uint8_t> title_original, title_graphics;
@@ -868,6 +872,17 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     if (copy != g_page.labels_in_ram)
       std::memcpy(copy, g_page.labels_in_ram, DRAWN_BYTES);
   }
+  // The renderer draws the texture from a sharp copy SHARP_SCALE times
+  // larger, cut from the same lettering (every copy has the same bytes).
+  const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, g_page.labels_in_ram);
+  if (!g_page.sharp_key || !(*g_page.sharp_key == key))
+  {
+    if (g_page.sharp_key)
+      aurora::texture::remove_memory_replacement(*g_page.sharp_key);
+    const dualize::SharpMask sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
+    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, sharp.mips, sharp.rgba);
+    g_page.sharp_key = key;
+  }
   aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);
   if (g_page.boxes && !g_page.undo.empty())
   {
@@ -885,6 +900,9 @@ void RestoreRows()
     for (uint8_t* copy : g_page.labels_found)
       std::memcpy(copy, g_page.labels_encoded[static_cast<size_t>(g_page.language)].data(), DRAWN_BYTES);
   }
+  if (g_page.sharp_key)
+    aurora::texture::remove_memory_replacement(*g_page.sharp_key);
+  g_page.sharp_key.reset();
   g_page.labels_in_ram = nullptr;
 }
 

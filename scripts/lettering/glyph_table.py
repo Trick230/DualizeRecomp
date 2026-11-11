@@ -16,6 +16,8 @@ SIZES = [('LABEL', 14, 1.0), ('SMALL', 13, EU_PRESS)]
 DONOR = {'\u0301': 'éáó', '\u0300': 'èàò', '\u0302': 'êâ', '\u0308': 'äöü'}
 
 def recipe(c, cap, pr):
+    # The game's l (its help lines') narrows at the foot: the b's stem instead.
+    if c == 'l' and pick('b', cap): return ('L_FROM_B',)
     g = pick(c, cap)
     if g is not None: return ('CUT', g)
     if c == 'O': return ('O_FROM_C',) if recipe('C', cap, pr) else None
@@ -66,7 +68,7 @@ for size, cap, pr in SIZES:
 def cchar(c):
     return f"U'\\u{ord(c):04X}'" if ord(c) > 0x7E or c in "'\\" else f"U'{c}'"
 
-lines = ['// Measured on the game's own lines of the Options labels' face by',
+lines = ["// Measured on the game's own lines of the Options labels' face by",
          '// scripts/lettering (letter cells cut by alignment to the known text): where',
          '// each letter is cut, how the missing ones are made, side bearings. Numbers only.', '']
 lines.append('constexpr LetteringSource SOURCES[] = {')
