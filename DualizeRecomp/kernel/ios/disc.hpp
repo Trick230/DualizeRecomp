@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <vector>
@@ -34,6 +35,15 @@ public:
     (void)path;
     (void)bytes;
     return false;
+  }
+
+  // Counts in `reads` every read of the files right in `folder` (a folder
+  // under the extracted disc), for the game's data loaded from them to be
+  // known reloaded. Nothing for a disc that can't.
+  virtual void CountReads(const std::filesystem::path& folder, std::atomic<uint32_t>* reads)
+  {
+    (void)folder;
+    (void)reads;
   }
 };
 }  // namespace dualize::ios

@@ -19,6 +19,7 @@
 #include "ui/game_assets.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <bit>
 #include <array>
@@ -117,11 +118,16 @@ void RenameMessages(const Memory& memory)
   }
 }
 
+// The game's message files (compressed archives), counted as they are read.
+constexpr const char* MESSAGE_FOLDER = "files/message";
+std::atomic<uint32_t> g_message_reads{0};
+
 // The Options list's labels: image 6 of its textures, a 256x256 CMPR of grey
 // text on black, a 24-texel line per label. The aspect row's line (the
 // second) is redrawn as "Graphics Settings" from the other lines' letters,
 // the G from a C.
 constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
+
 constexpr uint32_t LABELS_IMAGE = 6, LINE = 24, ASPECT_LINE = 1;
 constexpr size_t LABELS_BYTES = 256 * 256 / 2;  // CMPR, 4 bits a texel
 
@@ -477,6 +483,7 @@ namespace dualize
 {
 void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
 {
+  disc.CountReads(game / MESSAGE_FOLDER, &g_message_reads);
   {
     const std::filesystem::path path = game / OPTION_TEXTURES;
     std::vector<uint8_t> bytes = ReadFile(path);
@@ -535,13 +542,26 @@ using dualize::GetMachine;
 using dualize::Machine;
 }  // namespace
 
-// ModeOption's constructor: the screen's help line is copied from the
-// messages when the cursor moves, so renaming them here reaches it.
-// Declines: the game's code goes on.
-extern "C" bool nights_ModeOptionCtor(CPUState* ctx)
+// ModeOption's constructor. Declines: the game's code goes on.
+extern "C" bool nights_ModeOptionCtor(CPUState*)
 {
-  RenameMessages(GetMachine(CpuOf(ctx)).memory);
   dualize::nights::ResetGraphicsPage();
+  return false;
+}
+
+// A help line set to a message (every screen's, the main menu's too): the
+// messages are renamed first when a message file was read since the last time
+// (the screens load theirs again as they open, the originals with them), and
+// the first time (a savestate's memory has them as they were). Declines.
+extern "C" bool nights_HelpSet(CPUState* ctx)
+{
+  static uint32_t renamed_after = UINT32_MAX;
+  const uint32_t reads = g_message_reads.load(std::memory_order_relaxed);
+  if (reads != renamed_after)
+  {
+    renamed_after = reads;
+    RenameMessages(GetMachine(CpuOf(ctx)).memory);
+  }
   return false;
 }
 

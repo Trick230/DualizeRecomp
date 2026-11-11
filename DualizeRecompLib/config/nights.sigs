@@ -6,6 +6,11 @@
 @ModeOption_Update ADC 9421FE30 9414093684938896
 
 nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
+
+# Setting a help line to a message (help, message id): the messages renamed
+# first when the game has loaded them again.
+@Help_Set 5C 9421FFE0 23E9C7EAAB5A3E3C
+nights_HelpSet 4 9421FFE0 D9FC220F5E082681 at @Help_Set jump
 # Where the update ends when nothing was chosen.
 define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
 
