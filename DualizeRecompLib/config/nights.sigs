@@ -166,6 +166,15 @@ nights_ControllerWindowUpdate 4 880400B0 27AA5EED56B951A1 at @ControllerWindow_U
 define NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT @ControllerWindow_Update+20
 
 
+# The boot's logo task (main.dol 0x80125EBC). State 1 tests game flag 293
+# (cmpwi r3, 0 hooked): set, it plays the Wii Remote strap reminder (state 2),
+# whose end asks for the logos and waits for them (state 3); clear, it goes to
+# the logos (state 4). The reminder is skipped: set goes straight to its end.
+@SegaLogo_Update C5C 9421FD70 8303C7FF8B2DE2F6
+nights_StrapReminder 4 2C030000 B3BE349621357818 at @SegaLogo_Update+170 jump
+define NIGHTS_STRAP_REMINDER_END @SegaLogo_Update+884
+define NIGHTS_STRAP_REMINDER_NONE @SegaLogo_Update+258
+
 # A cutscene's message command (this, ?, command): kind 1 shows a dialogue
 # line (a subtitle) through the text messages' EntryMessage, kind 3 takes it
 # away. With subtitles off kind 1 does nothing.

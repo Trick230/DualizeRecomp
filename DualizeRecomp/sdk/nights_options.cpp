@@ -809,6 +809,14 @@ extern "C" bool nights_ControllerWindowUpdate(CPUState* ctx)
 }
 
 
+// The boot's logo task choosing whether to show the strap reminder (r3 its
+// flag): never, it ends at once and the logos follow.
+extern "C" bool nights_StrapReminder(CPUState* ctx)
+{
+  ctx->pc = ctx->gpr[3] != 0 ? NIGHTS_STRAP_REMINDER_END : NIGHTS_STRAP_REMINDER_NONE;
+  return true;
+}
+
 // A cutscene's message command, its kind in r0 (cmpwi r0, 1 hooked): with
 // subtitles off a dialogue line (kind 1) is not shown. Otherwise declines.
 extern "C" bool nights_EventSubtitle(CPUState* ctx)
