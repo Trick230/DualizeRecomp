@@ -41,7 +41,10 @@ def width_of(base):
     return WIDTH + 0.5 * (v['game_w'] / v['face_w'] - WIDTH)
 
 def build(weight):
-    f = instancer.instantiateVariableFont(TTFont(sys.argv[1]), {'wght': weight})
+    f = TTFont(sys.argv[1])
+    axes = {a.axisTag: a.defaultValue for a in f['fvar'].axes}
+    axes['wght'] = weight
+    f = instancer.instantiateVariableFont(f, axes)
     b = io.BytesIO(); f.save(b); f = TTFont(io.BytesIO(b.getvalue()))
     opt = subset.Options(); opt.name_IDs = ['*']; opt.layout_features = ['kern']; opt.notdef_outline = True
     s = subset.Subsetter(opt); s.populate(unicodes=KEEP); s.subset(f)
