@@ -40,7 +40,7 @@ def width_of(base):
         return WIDTH
     return WIDTH + 0.5 * (v['game_w'] / v['face_w'] - WIDTH)
 
-def build(weight):
+def build(weight, widths=None):
     f = TTFont(sys.argv[1])
     axes = {a.axisTag: a.defaultValue for a in f['fvar'].axes}
     axes['wght'] = weight
@@ -80,7 +80,7 @@ def build(weight):
         g.recalcBounds(glyf) if hasattr(g, 'recalcBounds') else None
         adv, lsb = hmtx[name]
         x0 = g.xMin if g.numberOfContours else 0; x1 = g.xMax if g.numberOfContours else adv
-        mid = (x0 + x1) / 2; k = width_of(base)
+        mid = (x0 + x1) / 2; k = width_of(base) * (widths or {}).get(base, 1.0)
         pen = TTGlyphPen(None)
         class Warp:
             def __init__(self, out): self.out = out
@@ -122,7 +122,8 @@ def build(weight):
     return b.getvalue()
 
 if __name__ == '__main__':
-    weight = float(sys.argv[2]) if len(sys.argv) > 2 else 300
-    data = build(weight)
+    weight = float(sys.argv[2]) if len(sys.argv) > 2 else 350
+    path = WORK / 'glyph_widths.json'  # font_widths.py's per-letter widths, when measured
+    data = build(weight, json.load(open(path)) if path.exists() else None)
     open(OUT, 'wb').write(data)
     print('width', round(WIDTH, 3), 'x-height', round(XH, 3), 'ascender', round(ASC, 3), 'descender', round(DESC, 3), 'weight', weight)

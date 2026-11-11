@@ -129,12 +129,12 @@ constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - W
 
 // The lettering, as the game's (measured on its labels texture; the face's
 // weight and spacing fitted to its lines by scripts/lettering/font_fit.py):
-// labels' capitals 14 texels high on a baseline at 19, letters half a texel
+// labels' capitals 14 texels high on a baseline at 19, letters 0.85 texel
 // further apart than the face sets them, ending clear of the value box; values' 13
 // high, as far apart for their size, centred in a cell 20 texels high (from row 2
 // of their line) on a baseline 15 down it.
-constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 0.5f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
-constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.45f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
+constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 0.85f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
+constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.8f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
 // A row the other settings lock, drawn dim.
 constexpr uint8_t LOCKED_LEVEL = 110;
 constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;
