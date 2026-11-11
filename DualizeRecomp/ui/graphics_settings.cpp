@@ -29,8 +29,8 @@ struct OptionText
   const char* help;
 };
 constexpr std::array<OptionText, GRAPHICS_OPTION_COUNT> OPTIONS{{
-    {"Window Size", "The window's size on the desktop"},
     {"Fullscreen", "Fill the screen with a borderless window"},
+    {"Window Size", "The window's size on the desktop"},
     {"Resolution Scale", "Draw the 3D world sharper than the window"},
     {"V-Sync", "Present in step with the display"},
     {"Frame Rate", "30 is the original; more is interpolated"},

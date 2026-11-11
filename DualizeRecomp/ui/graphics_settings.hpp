@@ -38,8 +38,8 @@ struct GraphicsSettings
 // The graphics page's options, top to bottom.
 enum class GraphicsOption
 {
-  WindowSize,
   Fullscreen,
+  WindowSize,
   ResolutionScale,
   VSync,
   FrameRate,
