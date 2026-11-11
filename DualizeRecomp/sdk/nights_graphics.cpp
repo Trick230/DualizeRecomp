@@ -410,14 +410,24 @@ uint8_t* FindTitle(const Memory& memory)
 {
   if (g_page.title_original.empty())
     return nullptr;
+  // Searched by a piece of the word's middle (RGB5A3 4x4 tiles, 32 bytes
+  // each): the rows around it are mostly transparent, zeros, as much of
+  // memory is, which makes the whole row a seconds-long search.
+  constexpr size_t TILE_BYTES = 32, TILE_ROW_BYTES = 256 / 4 * TILE_BYTES;
+  constexpr size_t KEY = 4 * TILE_ROW_BYTES + 20 * TILE_BYTES, KEY_BYTES = 24 * TILE_BYTES;
   const std::vector<uint8_t>& title = g_page.title_original;
-  const std::boyer_moore_horspool_searcher search(title.begin(), title.end());
+  if (title.size() < KEY + KEY_BYTES)
+    return nullptr;
+  const std::boyer_moore_horspool_searcher search(title.begin() + KEY, title.begin() + KEY + KEY_BYTES);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
-    uint8_t* found = std::search(data, data + size, search);
-    if (found != data + size)
-      return found;
+    for (uint8_t* at = data; (at = std::search(at, data + size, search)) != data + size; ++at)
+    {
+      if (static_cast<size_t>(at - data) >= KEY && static_cast<size_t>(data + size - (at - KEY)) >= title.size() &&
+          std::memcmp(at - KEY, title.data(), title.size()) == 0)
+        return at - KEY;
+    }
   }
   return nullptr;
 }
