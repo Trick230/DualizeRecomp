@@ -4,6 +4,7 @@
 // page in nights_graphics.cpp) share.
 
 #include "core/cpu.h"
+#include "sdk/nights_text.hpp"
 
 #include <cstdint>
 #include <span>
@@ -38,9 +39,9 @@ inline std::u16string BigEndian(std::u16string_view text)
 // its message data (the line ends the message, or a newline follows it).
 std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line);
 
-// The Options list's labels texture as the disc serves it (decoded, and its
-// CMPR bytes): the graphics page draws its rows over a copy.
-void KeepOptionLabels(const Image& image, std::span<const uint8_t> encoded);
+// The Options list's labels texture in a language as the disc serves it
+// (decoded, and its CMPR bytes): the pages draw their rows over a copy.
+void KeepOptionLabels(Language language, const Image& image, std::span<const uint8_t> encoded);
 // The Options title's first row (RGB5A3) as the disc serves it and as the
 // graphics page shows it.
 void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t> graphics);

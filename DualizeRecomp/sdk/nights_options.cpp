@@ -12,6 +12,7 @@
 #include "core/cpu.h"
 #include "ppc_natives.h"
 #include "sdk/nights_options.hpp"
+#include "sdk/nights_text.hpp"
 
 #include "cpu/cpu.hpp"
 #include "kernel/ios/disc.hpp"
@@ -39,20 +40,52 @@ using dualize::Memory;
 
 using dualize::nights::CpuOf;
 
-// One English line, UTF-16BE in the game's message data, swapped for another
-// no longer than it. A message may go on after the line (a newline, then the
-// screen's button guide): the rest moves up behind the new line and the room
-// left at the end is padded with terminators.
+// One line in a language, UTF-16BE in the game's message data, swapped for
+// another no longer than it. A message may go on after the line (a newline,
+// then the screen's button guide): the rest moves up behind the new line and
+// the room left at the end is padded with terminators. Japanese lines carry
+// their readings (<rN,kana> over the N characters before).
+using dualize::nights::Language;
 struct Message
 {
+  Language language;
   std::u16string_view from, to;
 };
 constexpr Message MESSAGES[] = {
-    {u"Check Aspect Ratio", u"Graphics Settings"},
-    {u"Check the height/width ratio of your screen", u"Change the resolution and image quality"},
-    {u"Change Nintendo Wi-Fi Connection and settings", u"Change the game's settings"},
-    {u"Turn the control window display on/off", u"Turn the controller's rumble on/off"},
+    // The aspect row's label, the row's help, the main menu's Options help
+    // (offline, no Nintendo WFC) and the controller window row's help.
+    {Language::ENGLISH, u"Check Aspect Ratio", u"Graphics Settings"},
+    {Language::ENGLISH, u"Check the height/width ratio of your screen", u"Change the resolution and image quality"},
+    {Language::ENGLISH, u"Change Nintendo Wi-Fi Connection and settings", u"Change the game's settings"},
+    {Language::ENGLISH, u"Turn the control window display on/off", u"Turn the controller's rumble on/off"},
+    {Language::JAPANESE, u"画面比率確認", u"画質設定"},
+    {Language::JAPANESE, u"ＴＶ画面<r2,がめん>のタテ/ヨコ比<r1,ひ>を確認<r2,かくにん>できます",
+     u"解像度<r3,かいぞうど>と画質<r2,がしつ>を変更<r2,へんこう>できます"},
+    {Language::JAPANESE, u"ネットワーク機能<r2,きのう>や、ゲームの設定<r2,せってい>ができます",
+     u"ゲームの設定<r2,せってい>ができます"},
+    {Language::JAPANESE, u"操作<r2,そうさ>ウィンドウの表示<r2,ひょうじ>を変更<r2,へんこう>できます",
+     u"振動<r2,しんどう>のオン/オフを変更<r2,へんこう>できます"},
+    {Language::FRENCH, u"Vérifier le format de l'image", u"Paramètres graphiques"},
+    {Language::FRENCH, u"Vérifier la largeur et la hauteur de l'écran", u"Modifier la résolution et la qualité d'image"},
+    {Language::FRENCH, u"Modifier paramètres de la CWF Nintendo et du jeu", u"Modifier les paramètres du jeu"},
+    {Language::FRENCH, u"Afficher/masquer la fenêtre des commandes", u"Activer/désactiver les vibrations"},
+    {Language::SPANISH, u"Comprobar proporción de imagen", u"Configuración gráfica"},
+    {Language::SPANISH, u"Comprobar ancho/largo de pantalla", u"Cambiar resolución y calidad"},
+    {Language::SPANISH, u"Cambiar opciones de la CWF de Nintendo y del juego", u"Cambiar las opciones del juego"},
+    {Language::SPANISH, u"Activar/Desactivar ventana de controles", u"Activar/Desactivar la vibración"},
+    {Language::GERMAN, u"Seitenverhältnis überprüfen", u"Grafikeinstellungen"},
+    {Language::GERMAN, u"Höhen-/Breitenverhältnis des Bildschirms überprüfen", u"Auflösung und Bildqualität ändern"},
+    {Language::GERMAN, u"Nintendo WFC- und Spieleinstellungen ändern", u"Spieleinstellungen ändern"},
+    {Language::GERMAN, u"Controller-Fenster ein-/ausschalten", u"Vibration ein-/ausschalten"},
+    {Language::ITALIAN, u"Controlla proporzioni immagini", u"Impostazioni grafiche"},
+    // Italian's first copy of these two ends in a space, the others don't.
+    {Language::ITALIAN, u"Regola rapporto larghezza/altezza del tuo schermo ", u"Cambia risoluzione e qualità dell'immagine"},
+    {Language::ITALIAN, u"Regola rapporto larghezza/altezza del tuo schermo", u"Cambia risoluzione e qualità dell'immagine"},
+    {Language::ITALIAN, u"Cambia impostazioni di gioco e della Nintendo WFC ", u"Cambia le impostazioni di gioco"},
+    {Language::ITALIAN, u"Cambia impostazioni di gioco e della Nintendo WFC", u"Cambia le impostazioni di gioco"},
+    {Language::ITALIAN, u"Attiva/disattiva la finestra dei comandi", u"Attiva/disattiva la vibrazione"},
 };
+static_assert(std::ranges::all_of(MESSAGES, [](const Message& m) { return m.to.size() <= m.from.size(); }));
 
 using dualize::nights::BigEndian;
 }  // namespace
@@ -94,13 +127,16 @@ std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view
 
 namespace
 {
-// Replaces every copy of each message in MEM2, where the game keeps its
-// message data.
+// Replaces every copy of each message of the game's language in MEM2, where
+// the game keeps its message data.
 void RenameMessages(const Memory& memory)
 {
   uint8_t* const end = memory.Effective(0x90000000u, Memory::MEM2_SIZE) + Memory::MEM2_SIZE;
+  const Language language = dualize::nights::GameLanguage(memory);
   for (const Message& message : MESSAGES)
   {
+    if (message.language != language)
+      continue;
     const std::u16string to = BigEndian(message.to);
     const size_t bytes = message.from.size() * 2;
     for (uint8_t* at : dualize::nights::FindMessageLines(memory, message.from))
@@ -127,6 +163,14 @@ std::atomic<uint32_t> g_message_reads{0};
 // second) is redrawn as "Graphics Settings" from the other lines' letters,
 // the G from a C.
 constexpr const char* OPTION_TEXTURES = "files/csd/textures/option_allus.tls";
+// The other languages' (the pages draw over each, the disc's left as it is).
+constexpr std::array<std::pair<Language, const char*>, 5> OTHER_OPTION_TEXTURES{{
+    {Language::JAPANESE, "files/csd/textures/option_all.tls"},
+    {Language::FRENCH, "files/csd/textures/option_allfr.tls"},
+    {Language::SPANISH, "files/csd/textures/option_allsp.tls"},
+    {Language::GERMAN, "files/csd/textures/option_allga.tls"},
+    {Language::ITALIAN, "files/csd/textures/option_allit.tls"},
+}};
 
 constexpr uint32_t LABELS_IMAGE = 6, LINE = 24, ASPECT_LINE = 1;
 constexpr size_t LABELS_BYTES = 256 * 256 / 2;  // CMPR, 4 bits a texel
@@ -496,7 +540,7 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
       Labels{labels->image}.RedrawWeatherLink();
       static_assert(RUMBLE_LINE == ASPECT_LINE + 1 && WEATHER_LINE == RUMBLE_LINE + 1);
       EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (WEATHER_LINE + 1) * LINE, bytes.data() + labels->offset);
-      nights::KeepOptionLabels(labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
+      nights::KeepOptionLabels(Language::ENGLISH, labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
     }
     // The title row the graphics page shows.
     auto titles = DecodeTplImage(bytes, TITLE_IMAGE);
@@ -519,6 +563,13 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
     }
     if (relabel)
       disc.OverrideFile(path, std::move(bytes));
+  }
+  for (const auto& [language, file] : OTHER_OPTION_TEXTURES)
+  {
+    const std::vector<uint8_t> bytes = ReadFile(game / file);
+    const auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
+    if (labels && labels->format == 14 && labels->image.width == 256 && labels->image.height == 256)
+      nights::KeepOptionLabels(language, labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
   }
   {
     const std::filesystem::path path = game / MODE_2P_TEXTURES;
