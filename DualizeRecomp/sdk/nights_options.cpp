@@ -599,6 +599,7 @@ void SeekAnimation(CPUState* ctx, uint32_t holder, float fraction, float step)
 // Then the instruction hooked (addi r3, r1, 0x138).
 extern "C" bool nights_ModeOptionListOpen(CPUState* ctx)
 {
+  dualize::nights::TakeOverOptionList(ctx, ctx->gpr[30]);
   SeekAnimation(ctx, ctx->gpr[30] + 0x74, 0.5f, 0.001f);
   CpuOf(ctx).CallGuest(NIGHTS_MODE_OPTION_ROW_ICON, {ctx->gpr[30]});
   ctx->gpr[3] = ctx->gpr[1] + 0x138;

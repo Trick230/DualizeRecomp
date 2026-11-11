@@ -28,9 +28,13 @@ nights_ModeOptionLeft 4 38600000 3820B63C4F205A0D at @ModeOption_Update+AB4 jump
 # message on it), a check that something else has the screen, and the input.
 nights_ModeOptionList 4 48000001 4BA5D7D7DCEB1B0A at @ModeOption_Update+138 jump
 define NIGHTS_MODE_OPTION_HELP addr(@ModeOption_Update+140,144)
+define NIGHTS_MODE_OPTION_ROW_HELP imm(@ModeOption_Update+148)
 define NIGHTS_SET_HELP call(@ModeOption_Update+14C)
 define NIGHTS_MODE_OPTION_BUSY call(@ModeOption_Update+154)
 define NIGHTS_PLAY_SOUND call(@ModeOption_Update+19C)
+# A on a row of the main page: the decide sound, then the row's action by the
+# screen's row (each of the game's rows opens a window of its own).
+define NIGHTS_MODE_OPTION_DECIDE @ModeOption_Update+1A4
 # The value boxes, set from the options, and the rows' highlight with the
 # big icon: the graphics page has its own. The calls a screen makes on its CSD
 # layout, a node looked up by name in a scene (a handle on the stack), the
@@ -41,6 +45,9 @@ define CSD_SCENE_NODE call(@ModeOption_Values+28)
 define CSD_FIND_NODE call(@ModeOption_Values+38)
 define CSD_SET_PATTERN call(@ModeOption_Values+48)
 define CSD_RELEASE_HANDLE call(@ModeOption_Values+54)
+# The game's settings (the pointer to them): the language at 0xAC (a word),
+# rumble at 0xB0 and the weather link at 0xB1 (bytes).
+define NIGHTS_SETTINGS addr(@ModeOption_Values+8,24)
 @ModeOption_Highlight 138 9421FFC0 2831EA44BA48B21F
 nights_ModeOptionHighlight 4 9421FFC0 D9FC020F5E07F021 at @ModeOption_Highlight jump
 define NIGHTS_MODE_OPTION_ROW_NODES addr(@ModeOption_Highlight+8,1C)

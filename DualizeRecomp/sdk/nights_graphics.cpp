@@ -12,6 +12,9 @@
 // change the value. The help line is one of the top level's messages, unused
 // offline, rewritten.
 //
+// The main page is drawn the same way, with five rows: the game's four, whose
+// A runs the game's own action for that row (its window), and Subtitles.
+//
 // Hooks and the game's calls in config/nights.sigs (ppc_natives.h).
 
 #include "core/cpu.h"
@@ -75,6 +78,25 @@ constexpr uint32_t GRAPHICS_ROW = 1;  // the main page's row that opens the grap
 constexpr uint32_t ROW_NODE_STRIDE = 0x10;
 // The big icon's patterns are the main page's rows plus one.
 constexpr uint32_t GRAPHICS_ICON = GRAPHICS_ROW + 1;
+
+// The main page's options: the game's four rows (A opens each one's window,
+// its help the row's) with Subtitles, ours, second. Its icon is Language's.
+enum class MainOption
+{
+  LANGUAGE,
+  SUBTITLES,
+  GRAPHICS,
+  RUMBLE,
+  WEATHER_LINK,
+  COUNT,
+};
+constexpr int MAIN_OPTION_COUNT = static_cast<int>(MainOption::COUNT);
+constexpr std::array<int, MAIN_OPTION_COUNT> GAME_ROW{0, -1, static_cast<int>(GRAPHICS_ROW), 2, 3};
+constexpr std::string_view SUBTITLES_HELP = "Show the dialogue lines in cutscenes";
+// The game's settings: the language (in its language window's order) and two
+// switches.
+constexpr uint32_t SETTINGS_LANGUAGE = 0xAC, SETTINGS_RUMBLE = 0xB0, SETTINGS_WEATHER_LINK = 0xB1;
+constexpr std::array<std::string_view, 6> LANGUAGES{"Japanese", "English", "Français", "Español", "Deutsch", "Italiano"};
 
 // The game's sounds and input (a 64-bit mask, low word: the directions; the
 // game's cursors read 0x10-0x80, previous and next whichever way a list lies).
@@ -341,16 +363,29 @@ struct HelpMessage
   }
 };
 
+// A row as drawn: its label and value (none: the row has no value box).
+struct Row
+{
+  std::string label, value;
+  bool locked = false;
+  bool operator==(const Row&) const = default;
+};
+
 struct Page
 {
   bool graphics = false;
+  bool taken = false;  // the main page's rows drawn by the page too
   enum class Switch
   {
     NONE,
     ENTER,
     LEAVE,
+    EXIT,  // the main page leaving the list for the top level
   } pending = Switch::NONE;
   int top = 0;  // the option in the first row
+  int row = 0;  // the row the cursor is on
+  int main_top = 0, main_row = 0;  // the main page's, while the graphics page is up
+  std::array<Row, ROWS> drawn_rows;
 
   // The value boxes, found as the page first opens (none if the layout
   // differs), and the second row's group.
@@ -459,35 +494,97 @@ void ShowTitle(const Memory& memory, bool graphics)
     g_page.title_in_ram = nullptr;
 }
 
+int OptionCount()
+{
+  return g_page.graphics ? dualize::GRAPHICS_OPTION_COUNT : MAIN_OPTION_COUNT;
+}
+
+Row MainRow(const Machine& machine, MainOption option)
+{
+  const Memory& memory = machine.memory;
+  const uint32_t settings = dualize::Load32(memory.Effective(NIGHTS_SETTINGS, 4));
+  const auto on_off = [&](bool on) { return std::string(on ? "ON" : "OFF"); };
+  const auto set = [&](uint32_t offset) { return *memory.Effective(settings + offset, 1) != 0; };
+  switch (option)
+  {
+  case MainOption::LANGUAGE:
+  {
+    const uint32_t language = dualize::Load32(memory.Effective(settings + SETTINGS_LANGUAGE, 4));
+    return {"Language Settings", std::string(language < LANGUAGES.size() ? LANGUAGES[language] : "")};
+  }
+  case MainOption::SUBTITLES:
+    return {"Subtitles", on_off(machine.Graphics().subtitles)};
+  case MainOption::GRAPHICS:
+    return {"Graphics Settings", ""};
+  case MainOption::RUMBLE:
+    return {"Rumble", on_off(set(SETTINGS_RUMBLE))};
+  case MainOption::WEATHER_LINK:
+    return {"Weather Link", on_off(set(SETTINGS_WEATHER_LINK))};
+  case MainOption::COUNT:
+    break;
+  }
+  return {};
+}
+
+// The page's option `option` as its row shows it (none past the page's end).
+Row RowOf(const Machine& machine, int option)
+{
+  if (option >= OptionCount())
+    return {};
+  if (!g_page.graphics)
+    return MainRow(machine, static_cast<MainOption>(option));
+  const auto which = static_cast<GraphicsOption>(option);
+  return {dualize::OptionName(which), dualize::OptionValue(machine.Graphics(), which),
+          dualize::OptionLocked(machine.Graphics(), which)};
+}
+
+std::array<Row, ROWS> RowsShown(const Machine& machine)
+{
+  std::array<Row, ROWS> rows;
+  for (int row = 0; row < ROWS; ++row)
+    rows[row] = RowOf(machine, g_page.top + row);
+  return rows;
+}
+
 // The list's four lines, from option `top` on: each label (pressed narrower
 // when too long), and its value in its value line, centred in the cell its
-// box's word shows (pressed narrower when too long).
-void DrawRows(const Machine& machine)
+// box's word shows (pressed narrower when too long). A row with no value
+// has its box hidden.
+void DrawRows(CPUState* ctx, uint32_t screen)
 {
   if (g_page.labels_in_ram == nullptr)
     return;
+  const Machine& machine = GetMachine(CpuOf(ctx));
   Image image = *g_page.labels;
   std::fill_n(image.rgba.begin(), static_cast<size_t>(DRAWN_LINES) * LINE * WIDTH * 4, 0);
   const LabelFont& labels = LabelLettering();
   const LabelFont& values = ValueLettering();
+  const std::array<Row, ROWS> rows = RowsShown(machine);
   for (int row = 0; row < ROWS; ++row)
   {
-    const int option = g_page.top + row;
-    if (option >= dualize::GRAPHICS_OPTION_COUNT)
+    if (rows[row].label.empty())
       continue;
-    const auto which = static_cast<GraphicsOption>(option);
-    const uint8_t level = dualize::OptionLocked(machine.Graphics(), which) ? LOCKED_LEVEL : 255;
-    const std::u32string label = Utf32(dualize::OptionName(which));
+    const uint8_t level = rows[row].locked ? LOCKED_LEVEL : 255;
+    const std::u32string label = Utf32(rows[row].label);
     const float label_width = labels.Width(label), label_room = LABEL_RIGHT - LABEL_X;
     labels.Draw(image, row, LABEL_BASELINE, label, LABEL_X, label_width > label_room ? label_room / label_width : 1.0f,
                 level);
-    const std::u32string value = Utf32(dualize::OptionValue(machine.Graphics(), which));
+    const std::u32string value = Utf32(rows[row].value);
+    if (value.empty())
+      continue;
     const float squeeze = std::min(1.0f, VALUE_ROOM / values.Width(value));
     values.Draw(image, VALUE_LINE + row, VALUE_BASELINE, value, (VALUE_WIDTH - values.Width(value, squeeze)) / 2, squeeze,
                 level);
   }
   dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, g_page.labels_in_ram);
   aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);
+  if (g_page.boxes && !g_page.undo.empty())
+  {
+    Layout layout(CpuOf(ctx), ctx, screen + SCREEN_LAYOUT);
+    for (int row = 0; row < ROWS; ++row)
+      layout.SetHidden(layout.Parent((*g_page.boxes)[row].word), rows[row].value.empty());
+  }
+  g_page.drawn_rows = rows;
 }
 
 void RestoreRows()
@@ -813,9 +910,44 @@ void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t>
   g_page.title_graphics.assign(graphics.begin(), graphics.end());
 }
 
+void TakeOverOptionList(CPUState* ctx, uint32_t screen)
+{
+  if (g_page.graphics || g_page.taken)
+    return;
+  const Memory& memory = GetMachine(CpuOf(ctx)).memory;
+  g_page.labels_in_ram = FindLabels(memory);
+  if (g_page.labels_in_ram == nullptr)
+  {
+    std::fprintf(stderr, "[options] the labels texture is not in memory; the list keeps the game's rows\n");
+    return;
+  }
+  if (!g_page.boxes)
+    FindValueBoxes(ctx, screen);
+  if (g_page.undo.empty())
+    BorrowValueBox(ctx, screen);
+  if (!g_page.boxes)
+  {
+    RestoreRows();
+    return;
+  }
+  for (HelpMessage& message : g_page.help)
+    message.Find(memory);
+  g_page.help_shown = -1;
+  g_page.help_text.clear();
+  g_page.taken = true;
+  g_page.top = 0;
+  g_page.row = 0;
+  Store(memory, screen + SCREEN_ROW, 0);
+  Store(memory, screen + SCREEN_CURSOR, 0);
+  DrawRows(ctx, screen);
+}
+
 void ResetGraphicsPage()
 {
   g_page.graphics = false;
+  g_page.taken = false;
+  g_page.top = g_page.row = g_page.main_top = g_page.main_row = 0;
+  g_page.drawn_rows = {};
   g_page.pending = Page::Switch::NONE;
   g_page.boxes.reset();
   g_page.undo.clear();
@@ -857,33 +989,62 @@ extern "C" bool nights_ModeOptionLeft(CPUState* ctx)
     return false;
   Machine& machine = GetMachine(CpuOf(ctx));
   const uint32_t screen = ctx->gpr[30];
+  const auto release = [&] {
+    ReleaseValueBoxes(ctx, screen);
+    RestoreRows();
+    for (HelpMessage& message : g_page.help)
+      message.Restore();
+  };
+  if (g_page.pending == Page::Switch::EXIT)
+  {
+    // The list goes on to the top level, as it was.
+    release();
+    g_page.pending = Page::Switch::NONE;
+    g_page.taken = false;
+    g_page.drawn_rows = {};
+    return false;
+  }
   g_page.graphics = g_page.pending == Page::Switch::ENTER;
   g_page.pending = Page::Switch::NONE;
+  g_page.help_shown = -1;
+  g_page.help_text.clear();
   if (g_page.graphics)
   {
-    g_page.top = 0;
-    g_page.labels_in_ram = FindLabels(machine.memory);
+    g_page.main_top = g_page.top;
+    g_page.main_row = g_page.row;
+    g_page.top = g_page.row = 0;
+    if (g_page.labels_in_ram == nullptr)
+      g_page.labels_in_ram = FindLabels(machine.memory);
     if (g_page.labels_in_ram == nullptr)
       std::fprintf(stderr, "[options] the labels texture is not in memory; the graphics page keeps its labels\n");
-    DrawRows(machine);
     ShowTitle(machine.memory, true);
-    for (HelpMessage& message : g_page.help)
-      message.Find(machine.memory);
-    g_page.help_shown = -1;
-    g_page.help_text.clear();
+    if (!g_page.taken)
+    {
+      for (HelpMessage& message : g_page.help)
+        message.Find(machine.memory);
+    }
     Store(machine.memory, screen + SCREEN_ROW, 0);
     if (!g_page.boxes)
       FindValueBoxes(ctx, screen);
-    BorrowValueBox(ctx, screen);
+    if (g_page.undo.empty())
+      BorrowValueBox(ctx, screen);
+    DrawRows(ctx, screen);
   }
   else
   {
-    ReleaseValueBoxes(ctx, screen);
-    RestoreRows();
     ShowTitle(machine.memory, false);
-    for (HelpMessage& message : g_page.help)
-      message.Restore();
-    Store(machine.memory, screen + SCREEN_ROW, GRAPHICS_ROW);
+    if (g_page.taken)
+    {
+      g_page.top = g_page.main_top;
+      g_page.row = g_page.main_row;
+      DrawRows(ctx, screen);
+      Store(machine.memory, screen + SCREEN_ROW, static_cast<uint32_t>(g_page.row));
+    }
+    else
+    {
+      release();
+      Store(machine.memory, screen + SCREEN_ROW, GRAPHICS_ROW);
+    }
   }
   Store(machine.memory, screen + SCREEN_STATE, STATE_OPEN);
   ctx->pc = NIGHTS_MODE_OPTION_UPDATE_DONE;
@@ -894,7 +1055,7 @@ extern "C" bool nights_ModeOptionLeft(CPUState* ctx)
 // graphics page they keep the value cells the page gave them.
 extern "C" bool nights_ModeOptionValues(CPUState* ctx)
 {
-  if (!g_page.graphics)
+  if (!g_page.graphics && !g_page.taken)
     return false;
   ctx->pc = ctx->lr;
   return true;
@@ -904,18 +1065,24 @@ extern "C" bool nights_ModeOptionValues(CPUState* ctx)
 // cursor is on: on the graphics page the icon stays Graphics Settings'.
 extern "C" bool nights_ModeOptionHighlight(CPUState* ctx)
 {
-  if (!g_page.graphics)
+  if (!g_page.graphics && !g_page.taken)
     return false;
   Cpu& cpu = CpuOf(ctx);
   const Memory& memory = GetMachine(cpu).memory;
   const uint32_t screen = ctx->gpr[3];
-  const uint32_t row = Load(memory, screen + SCREEN_ROW);
+  const auto row = static_cast<uint32_t>(g_page.row);
+  uint32_t icon = GRAPHICS_ICON;
+  if (!g_page.graphics)
+  {
+    const int option = std::clamp(g_page.top + g_page.row, 0, MAIN_OPTION_COUNT - 1);
+    icon = static_cast<uint32_t>(std::max(GAME_ROW[option], 0)) + 1;
+  }
   {
     Layout layout(cpu, ctx, screen + SCREEN_LAYOUT);
     for (uint32_t r = 0; r < ROWS; ++r)
       layout.SetPattern(Load(memory, NIGHTS_MODE_OPTION_ROW_NODES + r * ROW_NODE_STRIDE), r == row ? 0 : 1);
-    layout.SetPattern(NIGHTS_MODE_OPTION_ICON, GRAPHICS_ICON);
-    layout.SetPattern(NIGHTS_MODE_OPTION_ICON_GLOW, GRAPHICS_ICON);
+    layout.SetPattern(NIGHTS_MODE_OPTION_ICON, icon);
+    layout.SetPattern(NIGHTS_MODE_OPTION_ICON_GLOW, icon);
   }
   ctx->pc = ctx->lr;
   return true;
@@ -925,19 +1092,46 @@ extern "C" bool nights_ModeOptionHighlight(CPUState* ctx)
 // page's help line and input instead of the main page's.
 extern "C" bool nights_ModeOptionList(CPUState* ctx)
 {
-  if (!g_page.graphics)
+  if (!g_page.graphics && !g_page.taken)
     return false;
   Cpu& cpu = CpuOf(ctx);
   Machine& machine = GetMachine(cpu);
   const Memory& memory = machine.memory;
   const uint32_t screen = ctx->gpr[30];
-  const int row = static_cast<int>(Load(memory, screen + SCREEN_ROW));
-  const int option = std::clamp(g_page.top + row, 0, dualize::GRAPHICS_OPTION_COUNT - 1);
-  ShowHelp(ctx, dualize::OptionHelp(machine.Graphics(), static_cast<GraphicsOption>(option)));
-  std::array<uint32_t, 2> window{};
-  aurora_fifo_window_size(&window[0], &window[1]);
-  if (window != g_page.drawn_window)
-    DrawRows(machine);
+  // Back from a window of the game's, opened with its own row: the page's.
+  const int row = g_page.row;
+  if (Load(memory, screen + SCREEN_ROW) != static_cast<uint32_t>(row))
+  {
+    Store(memory, screen + SCREEN_ROW, static_cast<uint32_t>(row));
+    Store(memory, screen + SCREEN_CURSOR, static_cast<uint32_t>(row));
+    cpu.CallGuest(NIGHTS_MODE_OPTION_ROW_ICON, {screen});
+  }
+  const int count = OptionCount();
+  const int option = std::clamp(g_page.top + row, 0, count - 1);
+  const int game_row = g_page.graphics ? -1 : GAME_ROW[option];
+  if (g_page.graphics)
+  {
+    ShowHelp(ctx, dualize::OptionHelp(machine.Graphics(), static_cast<GraphicsOption>(option)));
+    std::array<uint32_t, 2> window{};
+    aurora_fifo_window_size(&window[0], &window[1]);
+    if (window != g_page.drawn_window)
+      DrawRows(ctx, screen);
+  }
+  else
+  {
+    if (game_row >= 0)
+    {
+      const uint32_t help = Load(memory, NIGHTS_MODE_OPTION_HELP);
+      cpu.CallGuest(NIGHTS_SET_HELP, {help, static_cast<uint32_t>(NIGHTS_MODE_OPTION_ROW_HELP + game_row)});
+    }
+    else
+    {
+      ShowHelp(ctx, SUBTITLES_HELP);
+    }
+    // The game's windows change its settings.
+    if (RowsShown(machine) != g_page.drawn_rows)
+      DrawRows(ctx, screen);
+  }
   ctx->pc = NIGHTS_MODE_OPTION_UPDATE_DONE;
   if (cpu.CallGuest(NIGHTS_MODE_OPTION_BUSY, {screen}) != 0)
     return true;
@@ -945,7 +1139,6 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
   const uint32_t controller = cpu.CallGuest(NIGHTS_INPUT_CONTROLLER, {Load(memory, NIGHTS_INPUT), 0});
   const auto repeated = [&](uint32_t mask) { return cpu.CallGuest(NIGHTS_INPUT_REPEATED, {controller, 0, 0, mask}) != 0; };
   const auto pressed = [&](uint32_t mask) { return cpu.CallGuest(NIGHTS_INPUT_PRESSED, {controller, 0, 0, mask}) != 0; };
-  const int count = dualize::GRAPHICS_OPTION_COUNT;
   int move = repeated(INPUT_UP) ? -1 : repeated(INPUT_DOWN) ? 1 : 0;
   if (move != 0)
   {
@@ -954,30 +1147,41 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
     g_page.top = std::clamp(g_page.top, to - (ROWS - 1), to);
     g_page.top = std::clamp(g_page.top, 0, std::max(0, count - ROWS));
     const bool scrolled = g_page.top != option - row;
-    Store(memory, screen + SCREEN_ROW, static_cast<uint32_t>(to - g_page.top));
-    Store(memory, screen + SCREEN_CURSOR, static_cast<uint32_t>(to - g_page.top));
+    g_page.row = to - g_page.top;
+    Store(memory, screen + SCREEN_ROW, static_cast<uint32_t>(g_page.row));
+    Store(memory, screen + SCREEN_CURSOR, static_cast<uint32_t>(g_page.row));
     cpu.CallGuest(NIGHTS_MODE_OPTION_ROW_ICON, {screen});
     PlaySound(cpu, SOUND_CURSOR);
     if (scrolled)
-      DrawRows(machine);
+      DrawRows(ctx, screen);
     return true;
   }
   const int change = repeated(INPUT_LEFT) ? -1 : repeated(INPUT_RIGHT) ? 1 : pressed(INPUT_A) ? 2 : 0;
-  if (change != 0)
+  if (change == 2 && game_row >= 0)
+  {
+    // The game's row: its own action, as A on it makes it.
+    Store(memory, screen + SCREEN_ROW, static_cast<uint32_t>(game_row));
+    ctx->pc = NIGHTS_MODE_OPTION_DECIDE;
+    return true;
+  }
+  if (change != 0 && (g_page.graphics || option == static_cast<int>(MainOption::SUBTITLES)))
   {
     dualize::GraphicsSettings settings = machine.Graphics();
-    dualize::StepOption(settings, static_cast<GraphicsOption>(option), change > 0 ? 1 : -1, change == 2);
+    if (g_page.graphics)
+      dualize::StepOption(settings, static_cast<GraphicsOption>(option), change > 0 ? 1 : -1, change == 2);
+    else
+      settings.subtitles = !settings.subtitles;
     if (!(settings == machine.Graphics()))
     {
       machine.SetGraphics(settings);
-      DrawRows(machine);
+      DrawRows(ctx, screen);
       PlaySound(cpu, change == 2 ? SOUND_DECIDE : SOUND_CURSOR);
     }
     return true;
   }
   if (pressed(INPUT_B))
   {
-    g_page.pending = Page::Switch::LEAVE;
+    g_page.pending = g_page.graphics ? Page::Switch::LEAVE : Page::Switch::EXIT;
     ctx->pc = NIGHTS_MODE_OPTION_LEAVE;
   }
   return true;

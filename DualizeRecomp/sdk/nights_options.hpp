@@ -46,4 +46,7 @@ void KeepOptionLabels(const Image& image, std::span<const uint8_t> encoded);
 void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t> graphics);
 // The Options screen was built: it shows its own page.
 void ResetGraphicsPage();
+// The settings list opening (its state 0, r30 the screen): the main page's
+// rows drawn by the page, as the graphics page's are, once it opens.
+void TakeOverOptionList(CPUState* ctx, uint32_t screen);
 }  // namespace dualize::nights
