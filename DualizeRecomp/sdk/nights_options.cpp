@@ -349,7 +349,7 @@ constexpr std::array<TitleCut, 13> TITLE_CUTS{{
     {'h', CHECK_TITLE, 0, 36, 48},         // of Check
     {'i', OPTIONS_TITLES, 0, 128, 136},    // of Options
     {'c', CHECK_TITLE, 0, 57, 67},         // of Check
-    {'s', OPTIONS_TITLES, 0, 171, 190},    // of Options
+    {'s', OPTIONS_TITLES, 0, 171, 196},    // of Options
     {'S', SELECT_2P_TITLES, 0, 160, 187},  // of Select
     {'e', SELECT_2P_TITLES, 0, 188, 199},  // of Select
     {'t', SELECT_2P_TITLES, 0, 232, 246},  // of Select

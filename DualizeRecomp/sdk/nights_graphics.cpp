@@ -23,6 +23,8 @@
 #include "ui/game_assets.hpp"
 #include "ui/graphics_settings.hpp"
 
+#include <aurora/fifo.h>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -94,6 +96,8 @@ constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - W
 // 20 texels high (from row 2 of their line) on a baseline 15 down it.
 constexpr float LABEL_CAP = 14.0f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
 constexpr float VALUE_CAP = 12.0f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
+// A row the other settings lock, drawn dim.
+constexpr uint8_t LOCKED_LEVEL = 110;
 constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;
 
 class LabelFont
@@ -116,8 +120,8 @@ public:
   }
 
   // Coverage over what the image has (its red, green and blue alike).
-  void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x,
-            float squeeze = 1.0f) const
+  void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze = 1.0f,
+            uint8_t level = 255) const
   {
     const float sx = m_scale * squeeze, sy = m_scale;
     float pen = x;
@@ -145,7 +149,8 @@ public:
             if (px < 0 || px >= static_cast<int>(WIDTH))
               continue;
             uint8_t* p = &image.rgba[(static_cast<size_t>(line * LINE + y) * image.width + px) * 4];
-            p[0] = p[1] = p[2] = std::max(p[0], glyph[static_cast<size_t>(gy) * w + gx]);
+            const auto ink = static_cast<uint8_t>(glyph[static_cast<size_t>(gy) * w + gx] * level / 255);
+            p[0] = p[1] = p[2] = std::max(p[0], ink);
           }
         }
       }
@@ -362,6 +367,7 @@ struct Page
   std::optional<Image> labels;
   std::vector<uint8_t> labels_encoded;
   uint8_t* labels_in_ram = nullptr;
+  std::array<uint32_t, 2> drawn_window{};  // the window's size the rows were drawn with
   // The title's first row, as the disc has it and as the page shows it.
   std::vector<uint8_t> title_original, title_graphics;
   uint8_t* title_in_ram = nullptr;
@@ -462,14 +468,18 @@ void DrawRows(const Machine& machine)
     if (option >= dualize::GRAPHICS_OPTION_COUNT)
       continue;
     const auto which = static_cast<GraphicsOption>(option);
+    const uint8_t level = dualize::OptionLocked(machine.Graphics(), which) ? LOCKED_LEVEL : 255;
     const std::u32string label = Utf32(dualize::OptionName(which));
     const float label_width = labels.Width(label), label_room = LABEL_RIGHT - LABEL_X;
-    labels.Draw(image, row, LABEL_BASELINE, label, LABEL_X, label_width > label_room ? label_room / label_width : 1.0f);
+    labels.Draw(image, row, LABEL_BASELINE, label, LABEL_X, label_width > label_room ? label_room / label_width : 1.0f,
+                level);
     const std::u32string value = Utf32(dualize::OptionValue(machine.Graphics(), which));
     const float squeeze = std::min(1.0f, VALUE_ROOM / values.Width(value));
-    values.Draw(image, VALUE_LINE + row, VALUE_BASELINE, value, (VALUE_WIDTH - values.Width(value, squeeze)) / 2, squeeze);
+    values.Draw(image, VALUE_LINE + row, VALUE_BASELINE, value, (VALUE_WIDTH - values.Width(value, squeeze)) / 2, squeeze,
+                level);
   }
   dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, g_page.labels_in_ram);
+  aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);
 }
 
 void RestoreRows()
@@ -915,7 +925,11 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
   const uint32_t screen = ctx->gpr[30];
   const int row = static_cast<int>(Load(memory, screen + SCREEN_ROW));
   const int option = std::clamp(g_page.top + row, 0, dualize::GRAPHICS_OPTION_COUNT - 1);
-  ShowHelp(ctx, dualize::OptionHelp(static_cast<GraphicsOption>(option)));
+  ShowHelp(ctx, dualize::OptionHelp(machine.Graphics(), static_cast<GraphicsOption>(option)));
+  std::array<uint32_t, 2> window{};
+  aurora_fifo_window_size(&window[0], &window[1]);
+  if (window != g_page.drawn_window)
+    DrawRows(machine);
   ctx->pc = NIGHTS_MODE_OPTION_UPDATE_DONE;
   if (cpu.CallGuest(NIGHTS_MODE_OPTION_BUSY, {screen}) != 0)
     return true;

@@ -51,11 +51,15 @@ enum class GraphicsOption
 constexpr int GRAPHICS_OPTION_COUNT = static_cast<int>(GraphicsOption::Count);
 
 const char* OptionName(GraphicsOption option);
+// An option the others leave no say (the window's size in fullscreen): shown,
+// not changed.
+bool OptionLocked(const GraphicsSettings& settings, GraphicsOption option);
 // One line, at most HELP_LENGTH characters (the room the game's message has).
-const char* OptionHelp(GraphicsOption option);
+const char* OptionHelp(const GraphicsSettings& settings, GraphicsOption option);
 constexpr size_t HELP_LENGTH = 42;
+// The window's size is the window's as it is (the display's in fullscreen).
 std::string OptionValue(const GraphicsSettings& settings, GraphicsOption option);
 // The option's next value (direction 1) or previous (-1); at either end it
-// stays, or with `wrap` goes round to the other.
+// stays, or with `wrap` goes round to the other. A locked option stays.
 void StepOption(GraphicsSettings& settings, GraphicsOption option, int direction, bool wrap);
 }  // namespace dualize

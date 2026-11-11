@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <utility>
 #include <vector>
 
 namespace dualize
@@ -78,6 +79,16 @@ std::vector<uint32_t> WindowWidths()
       widths.push_back(w);
   }
   return widths;
+}
+
+// The window's size as it is; the setting's before the window is up.
+std::pair<uint32_t, uint32_t> WindowSize(const GraphicsSettings& s)
+{
+  uint32_t width = 0, height = 0;
+  aurora_fifo_window_size(&width, &height);
+  if (width == 0 || height == 0)
+    return {s.window_width, WindowHeight(s.window_width)};
+  return {width, height};
 }
 
 const char* OnOff(bool on)
@@ -180,8 +191,15 @@ const char* OptionName(GraphicsOption option)
   return OPTIONS[static_cast<size_t>(option)].name;
 }
 
-const char* OptionHelp(GraphicsOption option)
+bool OptionLocked(const GraphicsSettings& s, GraphicsOption option)
 {
+  return option == GraphicsOption::WindowSize && s.fullscreen;
+}
+
+const char* OptionHelp(const GraphicsSettings& s, GraphicsOption option)
+{
+  if (OptionLocked(s, option))
+    return "Fullscreen fills the display; turn it off";
   return OPTIONS[static_cast<size_t>(option)].help;
 }
 
@@ -191,8 +209,11 @@ std::string OptionValue(const GraphicsSettings& s, GraphicsOption option)
   switch (option)
   {
   case GraphicsOption::WindowSize:
-    std::snprintf(text, sizeof(text), "%u\u00D7%u", s.window_width, WindowHeight(s.window_width));
+  {
+    const auto [width, height] = WindowSize(s);
+    std::snprintf(text, sizeof(text), "%u\u00D7%u", width, height);
     return text;
+  }
   case GraphicsOption::Fullscreen:
     return OnOff(s.fullscreen);
   case GraphicsOption::ResolutionScale:
@@ -223,17 +244,22 @@ std::string OptionValue(const GraphicsSettings& s, GraphicsOption option)
 
 void StepOption(GraphicsSettings& s, GraphicsOption option, int direction, bool wrap)
 {
+  if (OptionLocked(s, option))
+    return;
   switch (option)
   {
   case GraphicsOption::WindowSize:
   {
+    // From the window's width as it is (it may have been dragged): the next
+    // size wider or narrower.
     const std::vector<uint32_t> widths = WindowWidths();
-    const int n = static_cast<int>(widths.size());
-    int i = 0;
-    while (i + 1 < n && widths[static_cast<size_t>(i)] < s.window_width)
-      ++i;
-    i += direction;
-    s.window_width = widths[static_cast<size_t>(wrap ? (i + n) % n : std::clamp(i, 0, n - 1))];
+    const uint32_t width = WindowSize(s).first;
+    const auto wider = std::ranges::upper_bound(widths, width);
+    const auto narrower = std::ranges::lower_bound(widths, width);
+    if (direction > 0)
+      s.window_width = wider != widths.end() ? *wider : wrap ? widths.front() : widths.back();
+    else
+      s.window_width = narrower != widths.begin() ? *(narrower - 1) : wrap ? widths.back() : widths.front();
     break;
   }
   case GraphicsOption::Fullscreen:
