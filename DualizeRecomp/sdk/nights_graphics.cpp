@@ -60,16 +60,17 @@ using dualize::Memory;
 using dualize::nights::CpuOf;
 using dualize::nights::Language;
 
-// Kumbh Sans at weight 350 (SIL Open Font License 1.1, resources/fonts/
-// KumbhSans-OFL.txt), cut to Latin-1: of the free faces, the closest to the
-// game's own labels (scored letter by letter, its weight and spacing fitted
-// to the game's lines), set at whatever size the screen needs.
+// Dualize Sans (SIL Open Font License 1.1, resources/fonts/DualizeSans-OFL.txt):
+// Kumbh Sans, of the free faces the closest to the game's own labels, bent
+// to their letters (widths, x-height, ascenders, descenders, side bearings)
+// at the weight that inks their lines as darkly, cut to Latin-1
+// (scripts/lettering/font_tune.py); set at whatever size the screen needs.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-warning-option"
 #pragma clang diagnostic ignored "-Wc23-extensions"
 #pragma clang diagnostic ignored "-Wc++26-extensions"
 constexpr unsigned char LABEL_FONT[] = {
-#embed "../resources/fonts/KumbhSans-Book.ttf"
+#embed "../resources/fonts/DualizeSans.ttf"
 };
 // Noto Sans JP Black (SIL Open Font License 1.1, resources/fonts/
 // NotoSansJP-OFL.txt), cut to our Japanese texts' characters: the game's
@@ -128,12 +129,12 @@ constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - W
 
 // The lettering, as the game's (measured on its labels texture; the face's
 // weight and spacing fitted to its lines by scripts/lettering/font_fit.py):
-// labels' capitals 14 texels high on a baseline at 19, letters a texel further
-// apart than the face sets them, ending clear of the value box; values' 13
+// labels' capitals 14 texels high on a baseline at 19, letters half a texel
+// further apart than the face sets them, ending clear of the value box; values' 13
 // high, as far apart for their size, centred in a cell 20 texels high (from row 2
 // of their line) on a baseline 15 down it.
-constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 1.0f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
-constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.9f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
+constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 0.5f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
+constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.45f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
 // A row the other settings lock, drawn dim.
 constexpr uint8_t LOCKED_LEVEL = 110;
 constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;

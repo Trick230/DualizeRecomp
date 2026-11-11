@@ -1,3 +1,7 @@
+Dualize Sans: Kumbh Sans modified (letter widths, x-height, ascenders,
+descenders and side bearings moved to the game's own Options letters by
+scripts/lettering/font_tune.py), under the same license.
+
 Copyright 2020 The KumbhSans Project Authors (https://github.com/xconsau/KumbhSans)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
