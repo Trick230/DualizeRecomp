@@ -42,6 +42,7 @@ struct MachineConfig
   uint32_t width = 1280, height = 960;
   bool fullscreen = false;    // borderless over the whole display
   bool alpha_to_coverage = true;  // antialiased cut edges (leaves, fences) while multisampling
+  bool subtitles = true;  // the cutscenes' dialogue lines on screen
   uint32_t msaa = 8;          // samples a pixel: 1, 2, 4 or 8 (capped at the GPU's most)
   bool ambient_occlusion = false; // GTAO over the 3D world (off: the models' layers and baked shading leave it little to add)
   // NiGHTS' models are built of layers (hair over a head, brows over a

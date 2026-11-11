@@ -25,6 +25,7 @@ struct GraphicsSettings
   uint32_t msaa = 8;
   bool transparency_aa = true;
   bool ambient_occlusion = false;
+  bool subtitles = true;  // the cutscenes' dialogue lines (an Options row of its own)
 
   static GraphicsSettings FromConfig(const MachineConfig& config);
   void ApplyTo(MachineConfig& config) const;

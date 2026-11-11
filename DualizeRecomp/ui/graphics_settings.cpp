@@ -110,6 +110,7 @@ GraphicsSettings GraphicsSettings::FromConfig(const MachineConfig& config)
   s.transparency_aa = config.alpha_to_coverage;
   s.msaa = config.msaa;
   s.ambient_occlusion = config.ambient_occlusion;
+  s.subtitles = config.subtitles;
   return s;
 }
 
@@ -126,6 +127,7 @@ void GraphicsSettings::ApplyTo(MachineConfig& config) const
   config.alpha_to_coverage = transparency_aa;
   config.msaa = msaa;
   config.ambient_occlusion = ambient_occlusion;
+  config.subtitles = subtitles;
 }
 
 bool GraphicsSettings::Load(const std::filesystem::path& path)
@@ -166,6 +168,8 @@ bool GraphicsSettings::Load(const std::filesystem::path& path)
       transparency_aa = on;
     else if (key == "ambient_occlusion")
       ambient_occlusion = on;
+    else if (key == "subtitles")
+      subtitles = on;
   }
   return true;
 }
@@ -182,7 +186,8 @@ bool GraphicsSettings::Save(const std::filesystem::path& path) const
        << "frame_rate = " << frame_rate << "\n"
        << "msaa = " << msaa << "\n"
        << "transparency_aa = " << (transparency_aa ? "true" : "false") << "\n"
-       << "ambient_occlusion = " << (ambient_occlusion ? "true" : "false") << "\n";
+       << "ambient_occlusion = " << (ambient_occlusion ? "true" : "false") << "\n"
+       << "subtitles = " << (subtitles ? "true" : "false") << "\n";
   return static_cast<bool>(file);
 }
 

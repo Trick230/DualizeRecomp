@@ -146,3 +146,10 @@ define NIGHTS_CONTROLLER_WINDOW_SHOWN_NEXT @ControllerWindow_Shown+C0
 nights_ControllerWindowUpdate 4 880400B0 27AA5EED56B951A1 at @ControllerWindow_Update+1C jump
 define NIGHTS_CONTROLLER_WINDOW_UPDATE_NEXT @ControllerWindow_Update+20
 
+
+# A cutscene's message command (this, ?, command): kind 1 shows a dialogue
+# line (a subtitle) through the text messages' EntryMessage, kind 3 takes it
+# away. With subtitles off kind 1 does nothing.
+@Event_MessageCommand 1B8 9421FFB0 10522D52E79B8741
+nights_EventSubtitle 4 2C000001 CDBAA4962FED7266 at @Event_MessageCommand+18 jump
+define NIGHTS_EVENT_MESSAGE_COMMAND_DONE @Event_MessageCommand+1A4

@@ -756,3 +756,13 @@ extern "C" bool nights_ControllerWindowUpdate(CPUState* ctx)
   return true;
 }
 
+
+// A cutscene's message command, its kind in r0 (cmpwi r0, 1 hooked): with
+// subtitles off a dialogue line (kind 1) is not shown. Otherwise declines.
+extern "C" bool nights_EventSubtitle(CPUState* ctx)
+{
+  if (ctx->gpr[0] != 1 || GetMachine(CpuOf(ctx)).Graphics().subtitles)
+    return false;
+  ctx->pc = NIGHTS_EVENT_MESSAGE_COMMAND_DONE;
+  return true;
+}
