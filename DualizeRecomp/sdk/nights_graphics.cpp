@@ -371,6 +371,10 @@ struct Page
   // The title's first row, as the disc has it and as the page shows it.
   std::vector<uint8_t> title_original, title_graphics;
   uint8_t* title_in_ram = nullptr;
+  // Where the textures were last found: the screen loads them there again
+  // as a rule, so that place is checked before searching memory.
+  uint8_t* labels_found = nullptr;
+  uint8_t* title_found = nullptr;
 
   std::array<HelpMessage, 2> help{{
       {static_cast<uint32_t>(NIGHTS_MODE_OPTION_TOP_HELP), u"Register Friends or change Nintendo WFC settings", {}},
@@ -397,16 +401,18 @@ uint8_t* FindLabels(const Memory& memory)
 {
   if (!g_page.labels)
     return nullptr;
-  const uint8_t* words = g_page.labels_encoded.data() + WORDS_FIRST_TILE_ROW * TILE_ROW_BYTES;
+  const size_t before = WORDS_FIRST_TILE_ROW * TILE_ROW_BYTES;
+  const uint8_t* words = g_page.labels_encoded.data() + before;
   const size_t words_bytes = WORDS_TILE_ROWS * TILE_ROW_BYTES;
+  if (g_page.labels_found != nullptr && std::memcmp(g_page.labels_found + before, words, words_bytes) == 0)
+    return g_page.labels_found;
   const std::boyer_moore_horspool_searcher search(words, words + words_bytes);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
     uint8_t* found = std::search(data, data + size, search);
-    const size_t before = WORDS_FIRST_TILE_ROW * TILE_ROW_BYTES;
     if (found != data + size && static_cast<size_t>(found - data) >= before)
-      return found - before;
+      return g_page.labels_found = found - before;
   }
   return nullptr;
 }
@@ -424,6 +430,8 @@ uint8_t* FindTitle(const Memory& memory)
   const std::vector<uint8_t>& title = g_page.title_original;
   if (title.size() < KEY + KEY_BYTES)
     return nullptr;
+  if (g_page.title_found != nullptr && std::memcmp(g_page.title_found, title.data(), title.size()) == 0)
+    return g_page.title_found;
   const std::boyer_moore_horspool_searcher search(title.begin() + KEY, title.begin() + KEY + KEY_BYTES);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
@@ -432,7 +440,7 @@ uint8_t* FindTitle(const Memory& memory)
     {
       if (static_cast<size_t>(at - data) >= KEY && static_cast<size_t>(data + size - (at - KEY)) >= title.size() &&
           std::memcmp(at - KEY, title.data(), title.size()) == 0)
-        return at - KEY;
+        return g_page.title_found = at - KEY;
     }
   }
   return nullptr;
