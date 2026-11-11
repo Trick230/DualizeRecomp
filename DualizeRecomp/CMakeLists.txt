@@ -34,6 +34,7 @@ add_executable(DualizeRecomp
     sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp
     sdk/nights_graphics.cpp
+    sdk/nights_lettering.cpp
     sdk/nights_options.cpp
     sdk/nights_text.cpp
     sdk/nights_weather.cpp

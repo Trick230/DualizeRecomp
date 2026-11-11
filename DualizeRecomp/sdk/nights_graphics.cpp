@@ -19,6 +19,7 @@
 
 #include "core/cpu.h"
 #include "ppc_natives.h"
+#include "sdk/nights_lettering.hpp"
 #include "sdk/nights_options.hpp"
 #include "sdk/nights_text.hpp"
 
@@ -60,7 +61,9 @@ using dualize::nights::CpuOf;
 using dualize::nights::Language;
 
 // Nunito Sans Light (SIL Open Font License 1.1, resources/fonts/
-// NunitoSans-OFL.txt), cut to Latin-1: the free face closest to the labels'.
+// NunitoSans-OFL.txt), cut to Latin-1: the free face closest to the labels',
+// for the letters the game never prints in theirs (digits, X, ß) and the
+// Japanese pages' Latin.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-warning-option"
 #pragma clang diagnostic ignored "-Wc23-extensions"
@@ -156,6 +159,8 @@ public:
       width += (Advance(text, i) + (i + 1 < text.size() ? Tracking(text[i]) : 0.0f)) * squeeze;
     return width;
   }
+
+  float Tracking() const { return m_tracking; }
 
   // Coverage over what the image has (its red, green and blue alike).
   void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze = 1.0f,
@@ -485,6 +490,79 @@ const LabelFont& ValueLettering()
   return font;
 }
 
+// Our labels and values in the game's own lettering (sdk/nights_lettering),
+// a letter it never prints in the fallback face, at the same size.
+class GameLettering
+{
+public:
+  GameLettering(dualize::nights::LetteringSize size, const LabelFont& fallback) : m_size(size), m_fallback(fallback) {}
+
+  float Width(std::u32string_view text, float squeeze = 1.0f) const { return Lay(nullptr, 0, 0, text, 0, squeeze, 0); }
+
+  void Draw(Image& image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze = 1.0f,
+            uint8_t level = 255) const
+  {
+    Lay(&image, line, baseline, text, x, squeeze, level);
+  }
+
+private:
+  // Lays `text` out from `x`, drawing it when there is an image; its width.
+  float Lay(Image* image, uint32_t line, float baseline, std::u32string_view text, float x, float squeeze,
+            uint8_t level) const
+  {
+    using namespace dualize::nights;
+    const float press = LetteringPress(m_size) * squeeze, tracking = LetteringTracking(m_size) * squeeze;
+    float pen = x;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+      const char32_t c = text[i];
+      const float gap = i + 1 < text.size() ? tracking : 0.0f;
+      if (c == U' ')
+      {
+        pen += LetteringSpace(m_size) * squeeze;
+        continue;
+      }
+      if (const Letter* letter = GameLetter(c, m_size, squeeze))
+      {
+        if (image != nullptr)
+          Blit(*image, line, baseline, *letter, static_cast<int>(std::lround(pen + letter->left)), level);
+        pen += letter->left + static_cast<float>(letter->width) + letter->right + gap;
+        continue;
+      }
+      const std::u32string_view one = text.substr(i, 1);
+      if (image != nullptr)
+        m_fallback.Draw(*image, line, baseline, one, pen + m_fallback.Tracking() * press / 2, press, level);
+      pen += m_fallback.Width(one, press) + m_fallback.Tracking() * press + gap;
+    }
+    return pen - x;
+  }
+
+  static void Blit(Image& image, uint32_t line, float baseline, const dualize::nights::Letter& letter, int left,
+                   uint8_t level)
+  {
+    const int shift = static_cast<int>(std::lround(baseline)) - 19;
+    for (int y = 0; y < 24; ++y)
+    {
+      const int row = y + shift;
+      if (row < 0 || row >= static_cast<int>(LINE))
+        continue;
+      for (uint32_t x = 0; x < letter.width; ++x)
+      {
+        const int px = left + static_cast<int>(x);
+        if (px < 0 || px >= static_cast<int>(WIDTH))
+          continue;
+        uint8_t* p = &image.rgba[(static_cast<size_t>(line * LINE + row) * image.width + px) * 4];
+        const auto ink =
+            static_cast<uint8_t>(std::lround(letter.coverage[static_cast<size_t>(y) * letter.width + x] * level));
+        p[0] = p[1] = p[2] = std::max(p[0], ink);
+      }
+    }
+  }
+
+  dualize::nights::LetteringSize m_size;
+  const LabelFont& m_fallback;
+};
+
 // The labels texture of the page's language where the screen loaded it (its
 // first copy; labels_found has them all).
 uint8_t* FindLabels(const Memory& memory)
@@ -722,8 +800,32 @@ void DrawRows(CPUState* ctx, uint32_t screen)
   const Image& source = *g_page.labels[static_cast<size_t>(language)];
   Image image = source;
   std::fill_n(image.rgba.begin(), static_cast<size_t>(DRAWN_LINES) * LINE * WIDTH * 4, 0);
-  const LabelFont& labels = LabelLettering();
-  const LabelFont& values = ValueLettering();
+  // The Japanese pages keep the fallback faces (the game's face has no
+  // Japanese); the others letter as the game does: English labels large,
+  // the other languages' labels and every value small.
+  const bool japanese = language == Language::JAPANESE;
+  using dualize::nights::LetteringSize;
+  const GameLettering game_labels(language == Language::ENGLISH ? LetteringSize::LABEL : LetteringSize::SMALL,
+                                  language == Language::ENGLISH ? LabelLettering() : ValueLettering());
+  const GameLettering game_values(LetteringSize::SMALL, ValueLettering());
+  const auto label_width = [&](std::u32string_view text) {
+    return japanese ? LabelLettering().Width(text) : game_labels.Width(text);
+  };
+  const auto draw_label = [&](uint32_t line, std::u32string_view text, float squeeze, uint8_t level) {
+    if (japanese)
+      LabelLettering().Draw(image, line, LABEL_BASELINE, text, LABEL_X, squeeze, level);
+    else
+      game_labels.Draw(image, line, LABEL_BASELINE, text, LABEL_X, squeeze, level);
+  };
+  const auto value_width = [&](std::u32string_view text, float squeeze) {
+    return japanese ? ValueLettering().Width(text, squeeze) : game_values.Width(text, squeeze);
+  };
+  const auto draw_value = [&](uint32_t line, std::u32string_view text, float x, float squeeze, uint8_t level) {
+    if (japanese)
+      ValueLettering().Draw(image, line, VALUE_BASELINE, text, x, squeeze, level);
+    else
+      game_values.Draw(image, line, VALUE_BASELINE, text, x, squeeze, level);
+  };
   const std::array<Row, ROWS> rows = RowsShown(machine);
   for (int row = 0; row < ROWS; ++row)
   {
@@ -738,9 +840,8 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     else
     {
       const std::u32string label = Utf32(dualize::nights::Translate(rows[row].label, language));
-      const float label_width = labels.Width(label), label_room = LABEL_RIGHT - LABEL_X;
-      labels.Draw(image, row, LABEL_BASELINE, label, LABEL_X, label_width > label_room ? label_room / label_width : 1.0f,
-                  level);
+      const float width = label_width(label), label_room = LABEL_RIGHT - LABEL_X;
+      draw_label(static_cast<uint32_t>(row), label, width > label_room ? label_room / width : 1.0f, level);
     }
     if (rows[row].value.empty())
       continue;
@@ -758,9 +859,8 @@ void DrawRows(CPUState* ctx, uint32_t screen)
       }
     }
     const std::u32string value = Utf32(dualize::nights::Translate(rows[row].value, language));
-    const float squeeze = std::min(1.0f, VALUE_ROOM / values.Width(value));
-    values.Draw(image, VALUE_LINE + row, VALUE_BASELINE, value, (VALUE_WIDTH - values.Width(value, squeeze)) / 2, squeeze,
-                level);
+    const float squeeze = std::min(1.0f, VALUE_ROOM / value_width(value, 1.0f));
+    draw_value(VALUE_LINE + row, value, (VALUE_WIDTH - value_width(value, squeeze)) / 2, squeeze, level);
   }
   dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, g_page.labels_in_ram);
   for (uint8_t* copy : g_page.labels_found)
