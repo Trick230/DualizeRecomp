@@ -63,4 +63,7 @@ std::string OptionValue(const GraphicsSettings& settings, GraphicsOption option)
 // The option's next value (direction 1) or previous (-1); at either end it
 // stays, or with `wrap` goes round to the other. A locked option stays.
 void StepOption(GraphicsSettings& settings, GraphicsOption option, int direction, bool wrap);
+// An ON/OFF option's switch (set through the game's ON/OFF window, as the
+// game's own switches are), null for the others.
+bool* OptionSwitch(GraphicsSettings& settings, GraphicsOption option);
 }  // namespace dualize

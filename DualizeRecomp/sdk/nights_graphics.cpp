@@ -113,11 +113,13 @@ constexpr uint32_t DRAWN_BYTES = DRAWN_LINES * LINE / 8 * TILE_ROW_BYTES;
 // The value boxes' words (lines 8-10), never redrawn: found in guest RAM.
 constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - WORDS_FIRST_TILE_ROW;
 
-// The lettering, as the game's: labels' capitals 14 texels high on a baseline
-// at 19, ending clear of the value box; values' 12 high, centred in a cell
-// 20 texels high (from row 2 of their line) on a baseline 15 down it.
-constexpr float LABEL_CAP = 14.0f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
-constexpr float VALUE_CAP = 12.0f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
+// The lettering, as the game's (measured on its labels texture): labels'
+// capitals 14 texels high on a baseline at 19, letters 1.5 texels further apart
+// than the face sets them, ending clear of the value box; values' 13 high,
+// half a texel further apart, centred in a cell 20 texels high (from row 2
+// of their line) on a baseline 15 down it.
+constexpr float LABEL_CAP = 14.0f, LABEL_TRACKING = 1.5f, LABEL_BASELINE = 19.0f, LABEL_X = 4.0f, LABEL_RIGHT = 204.0f;
+constexpr float VALUE_CAP = 13.0f, VALUE_TRACKING = 0.5f, VALUE_TOP = 2.0f, VALUE_BASELINE = VALUE_TOP + 15.0f;
 // A row the other settings lock, drawn dim.
 constexpr uint8_t LOCKED_LEVEL = 110;
 constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;
@@ -125,7 +127,7 @@ constexpr float VALUE_WIDTH = 64.0f, VALUE_HEIGHT = 20.0f, VALUE_ROOM = 60.0f;
 class LabelFont
 {
 public:
-  explicit LabelFont(float cap_height)
+  LabelFont(float cap_height, float tracking) : m_tracking(tracking)
   {
     stbtt_InitFont(&m_font, LABEL_FONT, 0);
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -137,7 +139,7 @@ public:
   {
     float width = 0;
     for (size_t i = 0; i < text.size(); ++i)
-      width += Advance(text, i) * m_scale * squeeze;
+      width += (Advance(text, i) * m_scale + (i + 1 < text.size() ? m_tracking : 0.0f)) * squeeze;
     return width;
   }
 
@@ -176,7 +178,7 @@ public:
           }
         }
       }
-      pen += Advance(text, i) * sx;
+      pen += Advance(text, i) * sx + m_tracking * squeeze;
     }
   }
 
@@ -193,6 +195,7 @@ private:
 
   stbtt_fontinfo m_font{};
   float m_scale = 1.0f;
+  float m_tracking;  // texels added between letters
 };
 
 std::u32string Utf32(std::string_view text)
@@ -385,6 +388,7 @@ struct Page
   int top = 0;  // the option in the first row
   int row = 0;  // the row the cursor is on
   int main_top = 0, main_row = 0;  // the main page's, while the graphics page is up
+  int switch_option = -1;  // the option the ON/OFF window is up for
   std::array<Row, ROWS> drawn_rows;
 
   // The value boxes, found as the page first opens (none if the layout
@@ -422,13 +426,13 @@ Page g_page;
 
 const LabelFont& LabelLettering()
 {
-  static const LabelFont font(LABEL_CAP);
+  static const LabelFont font(LABEL_CAP, LABEL_TRACKING);
   return font;
 }
 
 const LabelFont& ValueLettering()
 {
-  static const LabelFont font(VALUE_CAP);
+  static const LabelFont font(VALUE_CAP, VALUE_TRACKING);
   return font;
 }
 
@@ -536,6 +540,16 @@ Row RowOf(const Machine& machine, int option)
   const auto which = static_cast<GraphicsOption>(option);
   return {dualize::OptionName(which), dualize::OptionValue(machine.Graphics(), which),
           dualize::OptionLocked(machine.Graphics(), which)};
+}
+
+// The page's option `option` as an ON/OFF switch, null if it isn't one (or
+// is locked).
+bool* SwitchOf(dualize::GraphicsSettings& settings, int option)
+{
+  if (!g_page.graphics)
+    return option == static_cast<int>(MainOption::SUBTITLES) ? &settings.subtitles : nullptr;
+  const auto which = static_cast<GraphicsOption>(option);
+  return dualize::OptionLocked(settings, which) ? nullptr : dualize::OptionSwitch(settings, which);
 }
 
 std::array<Row, ROWS> RowsShown(const Machine& machine)
@@ -1099,6 +1113,7 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
   const Memory& memory = machine.memory;
   const uint32_t screen = ctx->gpr[30];
   // Back from a window of the game's, opened with its own row: the page's.
+  g_page.switch_option = -1;
   const int row = g_page.row;
   if (Load(memory, screen + SCREEN_ROW) != static_cast<uint32_t>(row))
   {
@@ -1164,13 +1179,21 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
     ctx->pc = NIGHTS_MODE_OPTION_DECIDE;
     return true;
   }
-  if (change != 0 && (g_page.graphics || option == static_cast<int>(MainOption::SUBTITLES)))
+  dualize::GraphicsSettings settings = machine.Graphics();
+  if (SwitchOf(settings, option) != nullptr)
   {
-    dualize::GraphicsSettings settings = machine.Graphics();
-    if (g_page.graphics)
-      dualize::StepOption(settings, static_cast<GraphicsOption>(option), change > 0 ? 1 : -1, change == 2);
-    else
-      settings.subtitles = !settings.subtitles;
+    // A switch: A opens the game's ON/OFF window, as on its own switches.
+    if (change == 2)
+    {
+      g_page.switch_option = option;
+      PlaySound(cpu, SOUND_DECIDE);
+      ctx->pc = NIGHTS_MODE_OPTION_SWITCH_WINDOW;
+    }
+    return true;
+  }
+  if (change != 0 && g_page.graphics)
+  {
+    dualize::StepOption(settings, static_cast<GraphicsOption>(option), change > 0 ? 1 : -1, change == 2);
     if (!(settings == machine.Graphics()))
     {
       machine.SetGraphics(settings);
@@ -1184,5 +1207,50 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
     g_page.pending = g_page.graphics ? Page::Switch::LEAVE : Page::Switch::EXIT;
     ctx->pc = NIGHTS_MODE_OPTION_LEAVE;
   }
+  return true;
+}
+
+// The ON/OFF window opening (cntlzw r0, r0 hooked, r0 the setting): for a
+// switch of the page's, the cursor on its setting. Then the instruction.
+extern "C" bool nights_ModeOptionSwitchOpen(CPUState* ctx)
+{
+  if (g_page.switch_option < 0)
+    return false;
+  dualize::GraphicsSettings settings = GetMachine(CpuOf(ctx)).Graphics();
+  if (const bool* on = SwitchOf(settings, g_page.switch_option))
+    ctx->gpr[0] = *on ? 1 : 0;
+  return false;
+}
+
+// The ON/OFF window's help line (lwz r4, row hooked; the help is the first
+// row's plus r4): for a switch of the page's, the help its row has.
+extern "C" bool nights_ModeOptionSwitchHelp(CPUState* ctx)
+{
+  if (g_page.switch_option < 0 || g_page.help_shown < 0)
+    return false;
+  ctx->gpr[4] = g_page.help[static_cast<size_t>(g_page.help_shown)].id - static_cast<uint32_t>(NIGHTS_MODE_OPTION_ROW_HELP);
+  ctx->pc += 4;
+  return true;
+}
+
+// ON or OFF chosen in the window (lwz r0, row hooked; the window at r1+0x48,
+// r30 the screen): for a switch of the page's, the setting from the choice
+// (0 ON), then the window closes as for the game's rows.
+extern "C" bool nights_ModeOptionSwitchChosen(CPUState* ctx)
+{
+  if (g_page.switch_option < 0)
+    return false;
+  Cpu& cpu = CpuOf(ctx);
+  Machine& machine = GetMachine(cpu);
+  const uint32_t window = Load(machine.memory, ctx->gpr[1] + 0x48);
+  const bool on = cpu.CallGuest(NIGHTS_SWITCH_WINDOW_CHOICE, {window}) == 0;
+  dualize::GraphicsSettings settings = machine.Graphics();
+  if (bool* setting = SwitchOf(settings, g_page.switch_option); setting != nullptr && *setting != on)
+  {
+    *setting = on;
+    machine.SetGraphics(settings);
+    DrawRows(ctx, ctx->gpr[30]);
+  }
+  ctx->pc = NIGHTS_MODE_OPTION_SWITCH_CLOSE;
   return true;
 }

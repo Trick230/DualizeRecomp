@@ -292,4 +292,21 @@ void StepOption(GraphicsSettings& s, GraphicsOption option, int direction, bool 
     break;
   }
 }
+
+bool* OptionSwitch(GraphicsSettings& s, GraphicsOption option)
+{
+  switch (option)
+  {
+  case GraphicsOption::Fullscreen:
+    return &s.fullscreen;
+  case GraphicsOption::VSync:
+    return &s.vsync;
+  case GraphicsOption::TransparencyAA:
+    return &s.transparency_aa;
+  case GraphicsOption::AmbientOcclusion:
+    return &s.ambient_occlusion;
+  default:
+    return nullptr;
+  }
+}
 }  // namespace dualize

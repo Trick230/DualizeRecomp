@@ -35,6 +35,18 @@ define NIGHTS_PLAY_SOUND call(@ModeOption_Update+19C)
 # A on a row of the main page: the decide sound, then the row's action by the
 # screen's row (each of the game's rows opens a window of its own).
 define NIGHTS_MODE_OPTION_DECIDE @ModeOption_Update+1A4
+# The Rumble row's ON/OFF window (state 5), which the page's own switches
+# open too: its opening (the cursor ON for a set switch, from the setting in
+# r0: cntlzw hooked), then each frame its help line (lwz r4, row hooked, the
+# help the row's plus r4) and, chosen (r31 the settings), the setting written
+# by the row (lwz r0, row hooked) from the window's choice (0 ON), before the
+# window closes with the decide sound.
+define NIGHTS_MODE_OPTION_SWITCH_WINDOW @ModeOption_Update+2EC
+nights_ModeOptionSwitchOpen 4 7C000034 CC103C3120B816A5 at @ModeOption_Update+310 jump
+nights_ModeOptionSwitchHelp 4 809E00F0 9B5BC0AC997A787B at @ModeOption_Update+80C jump
+nights_ModeOptionSwitchChosen 4 801E00F0 469F40AA257CD5FB at @ModeOption_Update+844 jump
+define NIGHTS_SWITCH_WINDOW_CHOICE call(@ModeOption_Update+864)
+define NIGHTS_MODE_OPTION_SWITCH_CLOSE @ModeOption_Update+8E0
 # The value boxes, set from the options, and the rows' highlight with the
 # big icon: the graphics page has its own. The calls a screen makes on its CSD
 # layout, a node looked up by name in a scene (a handle on the stack), the
