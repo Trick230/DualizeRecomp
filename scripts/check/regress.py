@@ -4,6 +4,7 @@ computes shows up without looking at a single frame.
 
 Usage (from the repo root, after a build):
   python scripts/check/regress.py [--update] [--scenes a,b] [--exe path]
+  python scripts/check/regress.py --record <scene>   (scenes in RECORD only)
 --update records the current build's hashes as the references (do it only
 from a build known to be good). Exit status 1 when a scene differs, misses
 its movie's end or runs interpreted code it did not before.
@@ -22,21 +23,45 @@ from automation import Game
 BASE = os.path.join(ROOT, 'build', 'regress')
 STATES = os.path.join(ROOT, 'build', 'states', 'native')
 SCENES = {'forest': 'forest.sav', 'gate': 'gate.sav', 'bluetrees': 'bluetrees.sav',
-          'dark1': 'dark1.sav', 'cutscene': 'cutscene_eyes.sav', 'boot': None}
+          'dark1': 'dark1.sav', 'cutscene': 'cutscene_eyes.sav', 'boot': None,
+          'options': 'options.sav', 'stage': 'loading.sav'}
+# Scenes whose movie this script records: the pad presses ('-' waits), one a second.
+RECORD = {'options': 'a,-,dpad_down,dpad_down,a,-,dpad_down,dpad_right,dpad_down,a,-,b,-,dpad_up,a,-,b,-,b,-',
+          'stage': '-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-'}
 TIMEOUT = 300
 
 
-def run(scene, exe):
-    out = os.path.join(BASE, 'out')
-    user = os.path.join(out, 'user_' + scene)
+def fresh_user(scene):
+    user = os.path.join(BASE, 'out', 'user_' + scene)
     shutil.rmtree(user, ignore_errors=True)
     shutil.copytree(os.path.join(BASE, 'user_template'), user)
-    log = os.path.join(out, scene + '.log')
+    return user
+
+
+def record(scene, exe):
+    state = SCENES[scene]
+    movie = os.path.join(BASE, 'movies', scene + '.movie')
+    game = Game(ROOT, exe=exe)
+    try:
+        game.start(state=os.path.join(STATES, state) if state else None, log=os.path.join(BASE, 'out', scene + '_record.log'),
+                   extra_args=['--user', fresh_user(scene), '--no-interpolation', '--record-input', movie])
+        time.sleep(5)
+        for step in RECORD[scene].split(','):
+            if step != '-':
+                game.pad(frames=6, **{step: 1})
+            time.sleep(1)
+    finally:
+        game.stop()
+    print(scene, 'recorded to', movie, '(now run --update --scenes', scene + ')')
+
+
+def run(scene, exe):
+    log = os.path.join(BASE, 'out', scene + '.log')
     game = Game(ROOT, exe=exe)
     state = SCENES[scene]
     try:
         game.start(state=os.path.join(STATES, state) if state else None, log=log,
-                   extra_args=['--user', user, '--unthrottled', '--no-vsync', '--no-interpolation',
+                   extra_args=['--user', fresh_user(scene), '--unthrottled', '--no-vsync', '--no-interpolation',
                                '--hash-every', '10', '--replay-input', os.path.join(BASE, 'movies', scene + '.movie')])
         deadline = time.time() + TIMEOUT
         while game.proc.poll() is None and time.time() < deadline:
@@ -55,9 +80,12 @@ def main():
     ap.add_argument('--update', action='store_true', help='record the references from this build')
     ap.add_argument('--scenes', default=','.join(SCENES))
     ap.add_argument('--exe', default=None, help='game executable (default: the release build)')
+    ap.add_argument('--record', choices=sorted(RECORD), help="record this scene's movie")
     a = ap.parse_args()
     os.makedirs(os.path.join(BASE, 'out'), exist_ok=True)
     os.makedirs(os.path.join(BASE, 'ref'), exist_ok=True)
+    if a.record:
+        return record(a.record, a.exe)
     failed = []
     for scene in a.scenes.split(','):
         t0 = time.time()
