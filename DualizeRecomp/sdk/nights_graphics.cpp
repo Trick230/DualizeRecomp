@@ -1440,6 +1440,16 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
     return true;
   }
   const int change = repeated(INPUT_LEFT) ? -1 : repeated(INPUT_RIGHT) ? 1 : pressed(INPUT_A) ? 2 : 0;
+  if (change == 2 && option == static_cast<int>(MainOption::GRAPHICS))
+  {
+    // Graphics Settings: straight to the graphics page. Through the game's
+    // own action (its aspect row's) it played that row's animation on the
+    // box in the aspect row's place, Subtitles' now.
+    PlaySound(cpu, SOUND_DECIDE);
+    g_page.pending = Page::Switch::ENTER;
+    ctx->pc = NIGHTS_MODE_OPTION_LEAVE;
+    return true;
+  }
   if (change == 2 && game_row >= 0)
   {
     // The game's row: its own action, as A on it makes it.
