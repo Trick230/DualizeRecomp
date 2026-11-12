@@ -120,6 +120,8 @@ def main():
         print(head, '-> OK' if not problems else '-> FAIL: ' + '; '.join(problems), flush=True)
         if problems:
             failed.append(scene)
+            # Kept apart, since the next run of the scene overwrites its log.
+            shutil.copy(os.path.join(BASE, 'out', scene + '.log'), os.path.join(BASE, 'out', scene + '_fail.log'))
     print('REGRESS', 'FAIL ' + ','.join(failed) if failed else 'OK')
     sys.exit(1 if failed else 0)
 
