@@ -1,5 +1,7 @@
 #include "sdk/nights_message_font.hpp"
 
+#include "sdk/nights_2p_text.hpp"
+
 #include <aurora/texture.hpp>
 
 #pragma clang diagnostic push
@@ -616,9 +618,13 @@ MessageFont g_font;
 
 void LoadMessageFont(const std::filesystem::path& game)
 {
-  if (!g_font.Load(game))
-    return;
+  // The one provider also makes the 2P menus' text (nights_2p_text.cpp).
   aurora::texture::set_replacement_provider(
-      [](const aurora::texture::TextureSource& source, void*) { g_font.Provide(source); }, nullptr);
+      [](const aurora::texture::TextureSource& source, void* font) {
+        if (font != nullptr)
+          g_font.Provide(source);
+        Provide2PText(source);
+      },
+      g_font.Load(game) ? &g_font : nullptr);
 }
 }  // namespace dualize::nights

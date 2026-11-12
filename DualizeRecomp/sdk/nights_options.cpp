@@ -12,6 +12,7 @@
 #include "core/cpu.h"
 #include "ppc_natives.h"
 #include "sdk/nights_options.hpp"
+#include "sdk/nights_2p_text.hpp"
 #include "sdk/nights_message_font.hpp"
 #include "sdk/nights_text.hpp"
 
@@ -658,8 +659,10 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
       std::fill_n(&text->image.rgba[(static_cast<size_t>(y) * width + x0) * 4], (width - x0) * 4, 0);
     }
     EncodeGreyCmpr(text->image, y0, RACE_WIFI_Y1, bytes.data() + text->offset);
+    nights::Keep2PText(race.file, bytes);
     disc.OverrideFile(path, std::move(bytes));
   }
+  nights::Load2PText(game);
 }
 }  // namespace dualize
 
