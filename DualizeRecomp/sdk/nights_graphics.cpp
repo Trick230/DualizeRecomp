@@ -1441,9 +1441,10 @@ extern "C" bool nights_ModeOptionList(CPUState* ctx)
     return true;
   }
   dualize::GraphicsSettings settings = machine.Graphics();
-  if (SwitchOf(settings, option) != nullptr)
+  if (SwitchOf(settings, option) != nullptr && change != 0)
   {
-    // A switch: A opens the game's ON/OFF window, as on its own switches.
+    // A switch: A opens the game's ON/OFF window, as on its own switches
+    // (left and right do nothing; B leaves below).
     if (change == 2)
     {
       g_page.switch_option = option;
