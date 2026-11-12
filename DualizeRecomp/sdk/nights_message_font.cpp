@@ -165,11 +165,21 @@ bool InIconShape(const Icon& icon, float x, float y)
   }
 }
 
-std::string CellKey(const Cell& cell)
+// A cell's levels packed 2 bits each, to look its glyph up by.
+using CellKey = std::array<uint8_t, CELL * CELL / 4>;
+struct CellKeyHash
 {
-  std::string key(CELL * CELL / 4, '\0');
+  size_t operator()(const CellKey& key) const noexcept
+  {
+    return std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(key.data()), key.size()));
+  }
+};
+
+CellKey KeyOf(const Cell& cell)
+{
+  CellKey key{};
   for (size_t i = 0; i < cell.size(); ++i)
-    key[i / 4] = static_cast<char>(key[i / 4] | cell[i] << (i % 4 * 2));
+    key[i / 4] = static_cast<uint8_t>(key[i / 4] | cell[i] << (i % 4 * 2));
   return key;
 }
 
@@ -217,7 +227,7 @@ public:
       for (uint32_t y = 0; y < CELL; ++y)
         for (uint32_t x = 0; x < CELL; ++x)
           cell[y * CELL + x] = level(x0 + static_cast<int>(x), y0 + static_cast<int>(y));
-      m_by_cell.emplace(CellKey(cell), static_cast<char32_t>(code));
+      m_by_cell.emplace(KeyOf(cell), static_cast<char32_t>(code));
       m_cells.emplace(static_cast<char32_t>(code), cell);
       m_windows.emplace(static_cast<char32_t>(code), Window{half_w, half_h});
     }
@@ -254,38 +264,35 @@ public:
                                       }) -
                                       LEVELS.begin());
     }
-    // The cache's cells, as atlas levels.
+    // The cache's cells, as atlas levels, read from its 8x8 texel blocks of
+    // 4 bits a texel.
     const auto* data = static_cast<const uint8_t*>(source.data);
-    std::vector<uint8_t> index(static_cast<size_t>(CACHE_WIDTH) * CACHE_HEIGHT);
-    for (uint32_t by = 0; by < CACHE_HEIGHT / 8; ++by)
-      for (uint32_t bx = 0; bx < CACHE_WIDTH / 8; ++bx)
-      {
-        const uint8_t* block = data + (static_cast<size_t>(by) * (CACHE_WIDTH / 8) + bx) * 32;
-        for (uint32_t y = 0; y < 8; ++y)
-          for (uint32_t x = 0; x < 8; ++x)
-          {
-            const uint8_t byte = block[y * 4 + x / 2];
-            index[static_cast<size_t>(by * 8 + y) * CACHE_WIDTH + bx * 8 + x] = x % 2 == 0 ? byte >> 4 : byte & 15;
-          }
-      }
-    std::vector<std::optional<Cell>> cells(CACHE_COLUMNS * CACHE_ROWS);
+    auto& cells = m_now;
+    cells.assign(CACHE_COLUMNS * CACHE_ROWS, std::nullopt);
     size_t inked = 0, known = 0;
     for (uint32_t r = 0; r < CACHE_ROWS; ++r)
       for (uint32_t c = 0; c < CACHE_COLUMNS; ++c)
       {
         Cell cell{};
-        bool ink = false;
+        uint8_t ink = 0;
         for (uint32_t y = 0; y < CELL; ++y)
-          for (uint32_t x = 0; x < CELL; ++x)
+        {
+          const uint32_t ty = r * CELL + y;
+          const uint8_t* row = data + (static_cast<size_t>(ty / 8) * (CACHE_WIDTH / 8)) * 32 + ty % 8 * 4;
+          for (uint32_t x = 0; x < CELL; x += 2)
           {
-            const uint8_t l = level[index[static_cast<size_t>(r * CELL + y) * CACHE_WIDTH + c * CELL + x]];
-            cell[y * CELL + x] = l;
-            ink |= l != 0;
+            const uint32_t tx = c * CELL + x;  // even, so the byte holds it and the next
+            const uint8_t byte = row[tx / 8 * 32 + tx % 8 / 2];
+            const uint8_t a = level[byte >> 4], b = level[byte & 15];
+            cell[y * CELL + x] = a;
+            cell[y * CELL + x + 1] = b;
+            ink |= a | b;
           }
+        }
         if (!ink)
           continue;
         ++inked;
-        known += m_by_cell.contains(CellKey(cell));
+        known += m_by_cell.contains(KeyOf(cell));
         cells[r * CACHE_COLUMNS + c] = cell;
       }
     if (inked == 0 || known * 5 < inked * 4)  // not the message font's cache
@@ -295,14 +302,21 @@ public:
     const auto lowest = std::min_element(palette.begin(), palette.end(), [](auto& a, auto& b) { return a[3] < b[3]; });
     const auto highest = std::max_element(palette.begin(), palette.end(), [](auto& a, auto& b) { return a[3] < b[3]; });
     const std::array<uint8_t, 4> ink_color = *highest, paper = *lowest;
-    if (m_copy.empty() || ink_color != m_ink || paper != m_paper)
+    const bool fresh = m_copy.empty() || ink_color != m_ink || paper != m_paper;
+    if (fresh)
     {
       m_copy.assign(ChainBytes(), 0);
       m_drawn.assign(cells.size(), std::nullopt);
       m_ink = ink_color;
       m_paper = paper;
-      Fill(paper);
+      for (size_t s = 0; s < m_shade.size(); ++s)
+        for (int k = 0; k < 4; ++k)
+          m_shade[s][k] = static_cast<uint8_t>(
+              std::lround(m_paper[k] + (m_ink[k] - m_paper[k]) * static_cast<float>(s) / (m_shade.size() - 1)));
+      for (size_t i = 0; i < m_copy.size(); i += 4)
+        std::memcpy(&m_copy[i], m_paper.data(), 4);
     }
+    m_rects.clear();
     for (size_t i = 0; i < cells.size(); ++i)
     {
       if (cells[i] == m_drawn[i])
@@ -312,13 +326,16 @@ public:
         DrawCell(col, row, nullptr);
       else
       {
-        const auto found = m_by_cell.find(CellKey(*cells[i]));
+        const auto found = m_by_cell.find(KeyOf(*cells[i]));
         const auto coverage = found != m_by_cell.end() ? Glyph(found->second) : Upscale(*cells[i]);
         DrawCell(col, row, coverage.get());
       }
       m_drawn[i] = cells[i];
     }
-    aurora::texture::set_memory_replacement(source.key, CACHE_WIDTH * SCALE, CACHE_HEIGHT * SCALE, MIPS, m_copy);
+    // The renderer copies the last copy's texture and takes the changed cells,
+    // else the whole copy.
+    if (fresh || m_kept.empty() || !aurora::texture::derive_memory_replacement(source.key, m_kept.back(), m_rects, m_copy))
+      aurora::texture::set_memory_replacement(source.key, CACHE_WIDTH * SCALE, CACHE_HEIGHT * SCALE, MIPS, m_copy);
     m_kept.push_back(source.key);
     if (m_kept.size() > KEPT)
     {
@@ -364,44 +381,39 @@ private:
     return bytes;
   }
 
-  void Fill(const std::array<uint8_t, 4>& color)
-  {
-    for (size_t i = 0; i < m_copy.size(); i += 4)
-      std::memcpy(&m_copy[i], color.data(), 4);
-  }
-
   // A cell of every level of the copy: `coverage` (BIG x BIG) between the
-  // palette's paper and ink, averaged down for the smaller levels.
+  // palette's paper and ink, averaged down for the smaller levels; its rects
+  // go to m_rects.
   void DrawCell(uint32_t col, uint32_t row, const Coverage* coverage)
   {
-    size_t level_at = 0;
-    std::vector<float> cover(static_cast<size_t>(BIG) * BIG, 0.0f);
+    // Coverage summed over each level's texel, in 255 * 4^(MIPS-1) steps.
+    std::array<uint16_t, BIG * BIG> cover{};
     if (coverage != nullptr)
       for (size_t i = 0; i < cover.size(); ++i)
-        cover[i] = (*coverage)[i] / 255.0f;
+        cover[i] = static_cast<uint16_t>((*coverage)[i] << 2 * (MIPS - 1));
+    size_t level_at = 0;
     uint32_t size = BIG;
     for (uint32_t m = 0; m < MIPS; ++m)
     {
       const uint32_t width = CACHE_WIDTH * SCALE >> m;
       for (uint32_t y = 0; y < size; ++y)
+      {
+        uint8_t* p = &m_copy[level_at + (static_cast<size_t>(row * size + y) * width + col * size) * 4];
         for (uint32_t x = 0; x < size; ++x)
-        {
-          const float c = cover[static_cast<size_t>(y) * size + x];
-          uint8_t* p = &m_copy[level_at + (static_cast<size_t>(row * size + y) * width + col * size + x) * 4];
-          for (int k = 0; k < 4; ++k)
-            p[k] = static_cast<uint8_t>(std::lround(m_paper[k] + (m_ink[k] - m_paper[k]) * c));
-        }
+          std::memcpy(p + x * 4, m_shade[cover[y * size + x]].data(), 4);
+      }
+      m_rects.push_back({m, col * size, row * size, size, size});
       level_at += static_cast<size_t>(width) * (CACHE_HEIGHT * SCALE >> m) * 4;
       if (m + 1 < MIPS)
       {
+        // In place: each texel of the half-size level reads 2x2 texels at or after it.
         const uint32_t half = size / 2;
-        std::vector<float> next(static_cast<size_t>(half) * half);
         for (uint32_t y = 0; y < half; ++y)
           for (uint32_t x = 0; x < half; ++x)
-            next[static_cast<size_t>(y) * half + x] =
-                0.25f * (cover[(2 * y) * size + 2 * x] + cover[(2 * y) * size + 2 * x + 1] +
-                         cover[(2 * y + 1) * size + 2 * x] + cover[(2 * y + 1) * size + 2 * x + 1]);
-        cover = std::move(next);
+            cover[y * half + x] = static_cast<uint16_t>(
+                (cover[2 * y * size + 2 * x] + cover[2 * y * size + 2 * x + 1] + cover[(2 * y + 1) * size + 2 * x] +
+                 cover[(2 * y + 1) * size + 2 * x + 1] + 2) /
+                4);
         size = half;
       }
     }
@@ -581,7 +593,7 @@ private:
     return out;
   }
 
-  std::unordered_map<std::string, char32_t> m_by_cell;
+  std::unordered_map<CellKey, char32_t, CellKeyHash> m_by_cell;
   std::unordered_map<char32_t, Cell> m_cells;
   std::unordered_map<char32_t, Window> m_windows;
   stbtt_fontinfo m_latin{}, m_japanese{}, m_icons{};
@@ -592,6 +604,9 @@ private:
   std::vector<uint8_t> m_copy;
   std::vector<std::optional<Cell>> m_drawn;
   std::array<uint8_t, 4> m_ink{}, m_paper{};
+  std::array<std::array<uint8_t, 4>, 255 * (1 << 2 * (MIPS - 1)) + 1> m_shade{};  // by DrawCell's cover
+  std::vector<aurora::texture::TextureRect> m_rects;
+  std::vector<std::optional<Cell>> m_now;
   std::vector<aurora::texture::TextureSourceKey> m_kept;
   std::jthread m_warm;  // last: stops before the rest goes
 };

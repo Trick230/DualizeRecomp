@@ -50,7 +50,7 @@ constexpr uint32_t SPACE = 0x20, IDEOGRAPHIC_SPACE = 0x3000;
 
 // The line being drawn: each glyph's centre moved by this much.
 uint32_t g_line = 0;
-std::vector<float> g_shift;
+std::vector<float> g_shift, g_width, g_centre;  // the last two: LayOut's, kept for their room
 // The sprite the line draws now and its shift.
 uint32_t g_sprite = 0;
 float g_sprite_shift = 0.0f;
@@ -82,7 +82,10 @@ void LayOut(dualize::Memory& memory, uint32_t line)
   g_shift.assign(count, 0.0f);
   if (count < 2 || count > 4096)
     return;
-  std::vector<float> width(count), centre(count);
+  std::vector<float>& width = g_width;
+  std::vector<float>& centre = g_centre;
+  width.resize(count);
+  centre.resize(count);
   float inked = 0.0f;
   for (uint32_t i = 0; i < count; ++i)
   {
