@@ -42,9 +42,9 @@ std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view
 // The Options list's labels texture in a language as the disc serves it
 // (decoded, and its CMPR bytes): the pages draw their rows over a copy.
 void KeepOptionLabels(Language language, const Image& image, std::span<const uint8_t> encoded);
-// The Options title's first row (RGB5A3) as the disc serves it and as the
-// graphics page shows it.
-void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t> graphics);
+// The Options title's first row (RGB5A3) in a language as the disc serves it
+// and as the graphics page shows it.
+void KeepOptionTitle(Language language, std::span<const uint8_t> original, std::span<const uint8_t> graphics);
 // The Options screen was built: it shows its own page.
 void ResetGraphicsPage();
 // The settings list opening (its state 0, r30 the screen): the main page's

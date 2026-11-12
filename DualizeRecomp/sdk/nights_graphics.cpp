@@ -455,16 +455,19 @@ struct Page
   // The drawn labels texture's sharp copy in the renderer (see DrawRows).
   std::optional<aurora::texture::TextureSourceKey> sharp_key;
   std::array<uint32_t, 2> drawn_window{};  // the window's size the rows were drawn with
-  // The title's first row, as the disc has it and as the page shows it.
-  std::vector<uint8_t> title_original, title_graphics;
-  uint8_t* title_in_ram = nullptr;
+  // The title's first row per language, as the disc has it and as the page
+  // shows it; where the page put its own (every copy the screen loaded).
+  std::array<std::vector<uint8_t>, dualize::nights::LANGUAGE_COUNT> title_original, title_graphics;
+  std::vector<uint8_t*> title_in_ram;
+  Language title_language = Language::ENGLISH;
   // Where the textures were last found: the screen loads them there again
   // as a rule, so that place is checked before searching memory. Another
   // language's menus hold two copies of the labels texture (the list draws
   // with the second), each drawn over alike; a new language's are searched.
   std::vector<uint8_t*> labels_found;
   Language labels_found_language = Language::COUNT;
-  uint8_t* title_found = nullptr;
+  std::vector<uint8_t*> title_found;
+  Language title_found_language = Language::COUNT;
 
   std::array<HelpMessage, 2> help{{
       {static_cast<uint32_t>(NIGHTS_MODE_OPTION_TOP_HELP),
@@ -529,21 +532,27 @@ uint8_t* FindLabels(const Memory& memory)
   return g_page.labels_found.empty() ? nullptr : g_page.labels_found.front();
 }
 
-// The title's first row (Options) where the screen loaded it.
-uint8_t* FindTitle(const Memory& memory)
+// The title's first row (Options) in the page's language, every copy the
+// screen loaded.
+const std::vector<uint8_t*>& FindTitle(const Memory& memory)
 {
-  if (g_page.title_original.empty())
-    return nullptr;
+  std::vector<uint8_t*>& found = g_page.title_found;
+  const std::vector<uint8_t>& title = g_page.title_original[static_cast<size_t>(g_page.language)];
   // Searched by a piece of the word's middle (RGB5A3 4x4 tiles, 32 bytes
   // each): the rows around it are mostly transparent, zeros, as much of
   // memory is, which makes the whole row a seconds-long search.
   constexpr size_t TILE_BYTES = 32, TILE_ROW_BYTES = 256 / 4 * TILE_BYTES;
   constexpr size_t KEY = 4 * TILE_ROW_BYTES + 20 * TILE_BYTES, KEY_BYTES = 24 * TILE_BYTES;
-  const std::vector<uint8_t>& title = g_page.title_original;
   if (title.size() < KEY + KEY_BYTES)
-    return nullptr;
-  if (g_page.title_found != nullptr && std::memcmp(g_page.title_found, title.data(), title.size()) == 0)
-    return g_page.title_found;
+  {
+    found.clear();
+    return found;
+  }
+  if (g_page.title_found_language == g_page.language && !found.empty() &&
+      std::ranges::all_of(found, [&](const uint8_t* copy) { return std::memcmp(copy, title.data(), title.size()) == 0; }))
+    return found;
+  found.clear();
+  g_page.title_found_language = g_page.language;
   const std::boyer_moore_horspool_searcher search(title.begin() + KEY, title.begin() + KEY + KEY_BYTES);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
@@ -552,26 +561,26 @@ uint8_t* FindTitle(const Memory& memory)
     {
       if (static_cast<size_t>(at - data) >= KEY && static_cast<size_t>(data + size - (at - KEY)) >= title.size() &&
           std::memcmp(at - KEY, title.data(), title.size()) == 0)
-        return g_page.title_found = at - KEY;
+        found.push_back(at - KEY);
     }
   }
-  return nullptr;
+  return found;
 }
 
 // The page's title in for Options, or back.
 void ShowTitle(const Memory& memory, bool graphics)
 {
-  // Its letters are the English titles': other languages keep their own.
-  if (graphics && g_page.language != Language::ENGLISH)
-    return;
   if (graphics)
+  {
     g_page.title_in_ram = FindTitle(memory);
-  if (g_page.title_in_ram == nullptr)
-    return;
-  const std::vector<uint8_t>& title = graphics ? g_page.title_graphics : g_page.title_original;
-  std::memcpy(g_page.title_in_ram, title.data(), title.size());
+    g_page.title_language = g_page.language;
+  }
+  const auto language = static_cast<size_t>(g_page.title_language);
+  const std::vector<uint8_t>& title = graphics ? g_page.title_graphics[language] : g_page.title_original[language];
+  for (uint8_t* copy : g_page.title_in_ram)
+    std::memcpy(copy, title.data(), title.size());
   if (!graphics)
-    g_page.title_in_ram = nullptr;
+    g_page.title_in_ram.clear();
 }
 
 int OptionCount()
@@ -1166,10 +1175,10 @@ void KeepOptionLabels(Language language, const Image& image, std::span<const uin
   g_page.labels_encoded[static_cast<size_t>(language)].assign(encoded.begin(), encoded.end());
 }
 
-void KeepOptionTitle(std::span<const uint8_t> original, std::span<const uint8_t> graphics)
+void KeepOptionTitle(Language language, std::span<const uint8_t> original, std::span<const uint8_t> graphics)
 {
-  g_page.title_original.assign(original.begin(), original.end());
-  g_page.title_graphics.assign(graphics.begin(), graphics.end());
+  g_page.title_original[static_cast<size_t>(language)].assign(original.begin(), original.end());
+  g_page.title_graphics[static_cast<size_t>(language)].assign(graphics.begin(), graphics.end());
 }
 
 void TakeOverOptionList(CPUState* ctx, uint32_t screen)
@@ -1216,7 +1225,7 @@ void ResetGraphicsPage()
   g_page.undo.clear();
   g_page.quads.clear();
   g_page.labels_in_ram = nullptr;
-  g_page.title_in_ram = nullptr;
+  g_page.title_in_ram.clear();
   for (HelpMessage& message : g_page.help)
     message.copies.clear();
   g_page.help_shown = -1;

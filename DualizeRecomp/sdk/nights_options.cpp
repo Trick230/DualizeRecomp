@@ -29,6 +29,7 @@
 #include <span>
 #include <fstream>
 #include <iterator>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,6 +48,7 @@ using dualize::nights::CpuOf;
 // the room left at the end is padded with terminators. Japanese lines carry
 // their readings (<rN,kana> over the N characters before).
 using dualize::nights::Language;
+using dualize::nights::LANGUAGE_COUNT;
 struct Message
 {
   Language language;
@@ -205,11 +207,25 @@ constexpr std::array<Cut, 6> CUT_RUMBLE{{
     {3, 57, 68},    // e, of Enable
 }};
 
-// The 2P Race window's description: image 13 of the 2P select textures, a
-// 512x128 CMPR of grey text on black. Its last two lines (rows 47-82) invite
-// play over Nintendo Wi-Fi Connection; the rows from 40 to 88 hold only them.
-constexpr const char* MODE_2P_TEXTURES = "files/csd/textures/mode2Pselectus.tls";
-constexpr uint32_t RACE_TEXT_IMAGE = 13, RACE_WIFI_Y0 = 40, RACE_WIFI_Y1 = 88;
+// The 2P Race window's description: image 13 of each language's 2P select
+// textures, a 512x128 CMPR of grey text on black. Its last two lines (rows
+// 46-84) invite play over Nintendo Wi-Fi Connection; the rows from 40 to 88
+// hold only them. In German and Spanish that sentence begins on the second
+// line (rows 24-40), from "Du kannst" and "Juega".
+struct RaceText
+{
+  const char* file;
+  uint32_t second_line_x;  // where the sentence begins on the second line, else the width
+};
+constexpr std::array<RaceText, 6> RACE_TEXTS{{
+    {"files/csd/textures/mode2Pselect.tls", 512},
+    {"files/csd/textures/mode2Pselectus.tls", 512},
+    {"files/csd/textures/mode2Pselectfr.tls", 512},
+    {"files/csd/textures/mode2Pselectga.tls", 95},
+    {"files/csd/textures/mode2Pselectit.tls", 512},
+    {"files/csd/textures/mode2Pselectsp.tls", 186},
+}};
+constexpr uint32_t RACE_TEXT_IMAGE = 13, RACE_LINE2_Y0 = 24, RACE_WIFI_Y0 = 40, RACE_WIFI_Y1 = 88;
 
 std::vector<uint8_t> ReadFile(const std::filesystem::path& path)
 {
@@ -364,11 +380,14 @@ struct Labels
 };
 
 // The Options title: image 0 of the same textures, RGB5A3 256x128, three
-// 40-texel rows (Options, Sound Library, Concept Art), each a calligraphic
-// word over the same underline (from texel row 27 down). On the graphics page
-// the first reads "Graphics Settings", made of the titles' letters: the
-// Options rows', 2P Game Select's and Nightopia Select's (the 2P select
-// textures' image 1), Check Aspect Ratio's (image 8), pressed narrower to fit.
+// 40-texel rows (Options, Sound Library, Concept Art; each language's in its
+// own, the Japanese the English), each a calligraphic word over the same
+// underline (from texel row 27 down). On the graphics page the first reads
+// "Graphics Settings" or the language's own, made of the titles' letters:
+// the Options rows', 2P Game Select's and Nightopia Select's (the 2P select
+// textures' image 1), Check Aspect Ratio's (image 8), and the Italian and
+// Spanish Options rows', pressed narrower to fit. The other languages' Check
+// Aspect Ratio rows are lettered narrower, so none of their letters is taken.
 constexpr uint32_t TITLE_IMAGE = 0, CHECK_TITLE_IMAGE = 8, TITLE_ROW = 40, TITLE_UNDERLINE = 27;
 constexpr const char* SELECT_2P_TEXTURES = "files/csd/textures/2p_piaselectus.tls";
 constexpr uint32_t SELECT_2P_TITLE_IMAGE = 1;
@@ -381,33 +400,55 @@ enum TitleSource : uint8_t
   OPTIONS_TITLES,
   SELECT_2P_TITLES,
   CHECK_TITLE,
+  ITALIAN_TITLES,
+  SPANISH_TITLES,
   TITLE_SOURCES
 };
-constexpr std::array<uint32_t, TITLE_SOURCES> TITLE_SOURCE_ROWS{3, 2, 1};
+constexpr std::array<uint32_t, TITLE_SOURCES> TITLE_SOURCE_ROWS{3, 2, 1, 3, 3};
 
+// A letter (or a word) cut from a source row, by the name the titles use.
 struct TitleCut
 {
-  char letter;
+  std::string_view name;
   TitleSource source;
   uint32_t row;
   uint32_t x0, x1;
 };
-constexpr std::array<TitleCut, 13> TITLE_CUTS{{
-    {'G', SELECT_2P_TITLES, 0, 68, 98},    // of Game
-    {'r', OPTIONS_TITLES, 1, 189, 200},    // of Library
-    {'a', SELECT_2P_TITLES, 0, 99, 112},   // of Game
-    {'p', OPTIONS_TITLES, 0, 96, 113},     // of Options
-    {'h', CHECK_TITLE, 0, 36, 48},         // of Check
-    {'i', OPTIONS_TITLES, 0, 128, 136},    // of Options
-    {'c', CHECK_TITLE, 0, 57, 67},         // of Check
-    {'s', OPTIONS_TITLES, 0, 171, 196},    // of Options
-    {'S', SELECT_2P_TITLES, 0, 160, 187},  // of Select
-    {'e', SELECT_2P_TITLES, 0, 188, 199},  // of Select
-    {'t', SELECT_2P_TITLES, 0, 232, 246},  // of Select
-    {'n', OPTIONS_TITLES, 0, 157, 171},    // of Options
-    {'g', SELECT_2P_TITLES, 1, 49, 64},    // of Nightopia
+constexpr std::array<TitleCut, 22> TITLE_CUTS{{
+    {"G", SELECT_2P_TITLES, 0, 68, 98},    // of Game
+    {"r", OPTIONS_TITLES, 1, 189, 200},    // of Library
+    {"a", SELECT_2P_TITLES, 0, 99, 112},   // of Game
+    {"p", OPTIONS_TITLES, 0, 96, 113},     // of Options
+    {"h", CHECK_TITLE, 0, 36, 48},         // of Check
+    {"i", OPTIONS_TITLES, 0, 128, 136},    // of Options
+    {"c", CHECK_TITLE, 0, 57, 67},         // of Check
+    {"s", OPTIONS_TITLES, 0, 171, 196},    // of Options
+    {"S", SELECT_2P_TITLES, 0, 160, 187},  // of Select
+    {"e", SELECT_2P_TITLES, 0, 188, 199},  // of Select
+    {"t", SELECT_2P_TITLES, 0, 232, 246},  // of Select
+    {"n", OPTIONS_TITLES, 0, 157, 171},    // of Options
+    {"g", SELECT_2P_TITLES, 1, 49, 64},    // of Nightopia
+    {"m", SELECT_2P_TITLES, 0, 113, 137},  // of Game
+    {"A", OPTIONS_TITLES, 2, 160, 198},    // of Art
+    {"z", ITALIAN_TITLES, 0, 117, 133},    // of Opzioni
+    // Opzioni's n and last i: Options' n is cut short by its s, and its i
+    // keeps bits of the t before.
+    {"n2", ITALIAN_TITLES, 0, 163, 183},
+    {"i2", ITALIAN_TITLES, 0, 183, 195},
+    {"Opzioni", ITALIAN_TITLES, 0, 62, 195},
+    {"Opciones", SPANISH_TITLES, 0, 53, 204},
+    {"de", SPANISH_TITLES, 2, 117, 150},  // of Libreta de dibujos
 }};
-constexpr std::string_view GRAPHICS_TITLE = "Graphics Settings";
+// Each language's graphics page title, its cuts by name ('|' between, ' '
+// for a space).
+constexpr std::array<std::string_view, LANGUAGE_COUNT> GRAPHICS_TITLES{
+    "G|r|a|p|h|i|c|s| |S|e|t|t|i|n|g|s",  // Japanese: the English titles
+    "G|r|a|p|h|i|c|s| |S|e|t|t|i|n|g|s",
+    "G|r|a|p|h|i|s|m|e|s",
+    "Opciones| |de| |i2|m|a|g|e|n2",
+    "A|n2|z|e|i2|g|e",
+    "Opzioni| |i2|m|m|a|g|i2|n2|e",
+};
 
 using Texel = std::array<float, 4>;  // premultiplied RGBA, 0-255
 
@@ -443,7 +484,8 @@ struct Title
             if (t[3] < least[3])
               least = t;
           }
-          line[static_cast<size_t>(y) * image.width + x] = least;
+          // Above it only letters are left where every row has some.
+          line[static_cast<size_t>(y) * image.width + x] = y >= TITLE_UNDERLINE ? least : Texel{};
         }
       }
     }
@@ -471,21 +513,24 @@ struct Title
   }
 
   // Rows [0, TITLE_ROW) of `out` (Options' row): its underline with the
-  // word over it, centred.
-  bool Compose(dualize::Image& out) const
+  // title (cut names, '|' between) over it, centred.
+  bool Compose(std::string_view title, dualize::Image& out) const
   {
     constexpr uint32_t WIDE = 512;
     std::vector<Texel> canvas(static_cast<size_t>(WIDE) * TITLE_ROW, Texel{});
     uint32_t pen = 0;
-    for (char letter : GRAPHICS_TITLE)
+    for (const auto part : std::views::split(title, '|'))
     {
-      if (letter == ' ')
+      const std::string_view name(part.begin(), part.end());
+      if (name == " ")
       {
         pen += static_cast<uint32_t>(TITLE_SPACE);
         continue;
       }
-      const auto cut = std::ranges::find(TITLE_CUTS, letter, &TitleCut::letter);
+      const auto cut = std::ranges::find(TITLE_CUTS, name, &TitleCut::name);
       if (cut == TITLE_CUTS.end() || cut->x1 > sources[cut->source]->width)
+        return false;
+      if (pen + cut->x1 - cut->x0 > WIDE)
         return false;
       Put(canvas, WIDE, pen, *cut);
       pen += cut->x1 - cut->x0 - TITLE_KERN;
@@ -522,6 +567,45 @@ struct Title
     return true;
   }
 };
+// Each language's graphics page title (its Options row redrawn) for the
+// pages; `english` and `others` the languages' Options textures.
+void KeepTitles(const std::filesystem::path& game, std::span<const uint8_t> english,
+                const std::array<std::vector<uint8_t>, LANGUAGE_COUNT>& others)
+{
+  const auto titles_of = [&](Language language) {
+    const auto& bytes = language == Language::ENGLISH ? english : std::span<const uint8_t>(others[static_cast<size_t>(language)]);
+    auto titles = dualize::DecodeTplImage(bytes, TITLE_IMAGE);
+    if (titles && (titles->format != 5 || titles->image.width != 256 ||
+                   titles->image.height < TITLE_SOURCE_ROWS[OPTIONS_TITLES] * TITLE_ROW ||
+                   titles->offset + TITLE_BYTES > bytes.size()))
+      titles.reset();
+    return titles;
+  };
+  auto english_titles = titles_of(Language::ENGLISH), italian = titles_of(Language::ITALIAN),
+       spanish = titles_of(Language::SPANISH);
+  auto check = dualize::DecodeTplImage(english, CHECK_TITLE_IMAGE);
+  auto select = dualize::DecodeTplImage(ReadFile(game / SELECT_2P_TEXTURES), SELECT_2P_TITLE_IMAGE);
+  if (!english_titles || !italian || !spanish || !check || !select ||
+      select->image.height < TITLE_SOURCE_ROWS[SELECT_2P_TITLES] * TITLE_ROW || check->image.height < TITLE_ROW)
+    return;
+  Title title{{&english_titles->image, &select->image, &check->image, &italian->image, &spanish->image}};
+  title.FindUnderlines();
+  for (size_t l = 0; l < LANGUAGE_COUNT; ++l)
+  {
+    const auto language = static_cast<Language>(l);
+    const auto titles = language == Language::ENGLISH ? english_titles : titles_of(language);
+    if (!titles)
+      continue;
+    dualize::Image composed = titles->image;
+    if (!title.Compose(GRAPHICS_TITLES[l], composed))
+      continue;
+    const auto& bytes = language == Language::ENGLISH ? english : std::span<const uint8_t>(others[l]);
+    const std::span original = bytes.subspan(titles->offset, TITLE_BYTES);
+    std::vector<uint8_t> encoded(original.begin(), original.end());
+    dualize::EncodeRgb5a3(composed, 0, TITLE_ROW, encoded.data());
+    dualize::nights::KeepOptionTitle(language, original, encoded);
+  }
+}
 }  // namespace
 
 namespace dualize
@@ -544,46 +628,37 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
       EncodeGreyCmpr(labels->image, ASPECT_LINE * LINE, (WEATHER_LINE + 1) * LINE, bytes.data() + labels->offset);
       nights::KeepOptionLabels(Language::ENGLISH, labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
     }
-    // The title row the graphics page shows.
-    auto titles = DecodeTplImage(bytes, TITLE_IMAGE);
-    auto check = DecodeTplImage(bytes, CHECK_TITLE_IMAGE);
-    auto select = DecodeTplImage(ReadFile(game / SELECT_2P_TEXTURES), SELECT_2P_TITLE_IMAGE);
-    if (titles && check && select && titles->format == 5 && titles->image.width == 256 &&
-        titles->image.height >= TITLE_SOURCE_ROWS[OPTIONS_TITLES] * TITLE_ROW &&
-        select->image.height >= TITLE_SOURCE_ROWS[SELECT_2P_TITLES] * TITLE_ROW && check->image.height >= TITLE_ROW)
+    std::array<std::vector<uint8_t>, LANGUAGE_COUNT> option_textures;
+    for (const auto& [language, file] : OTHER_OPTION_TEXTURES)
     {
-      Title title{{&titles->image, &select->image, &check->image}};
-      title.FindUnderlines();
-      Image composed = titles->image;
-      if (title.Compose(composed))
-      {
-        const std::span original = std::span(bytes).subspan(titles->offset, TITLE_BYTES);
-        std::vector<uint8_t> encoded(original.begin(), original.end());
-        EncodeRgb5a3(composed, 0, TITLE_ROW, encoded.data());
-        nights::KeepOptionTitle(original, encoded);
-      }
+      std::vector<uint8_t>& other = option_textures[static_cast<size_t>(language)];
+      other = ReadFile(game / file);
+      const auto other_labels = DecodeTplImage(other, LABELS_IMAGE);
+      if (other_labels && other_labels->format == 14 && other_labels->image.width == 256 &&
+          other_labels->image.height == 256)
+        nights::KeepOptionLabels(language, other_labels->image,
+                                 std::span(other).subspan(other_labels->offset, LABELS_BYTES));
     }
+    KeepTitles(game, bytes, option_textures);
     if (relabel)
       disc.OverrideFile(path, std::move(bytes));
   }
-  for (const auto& [language, file] : OTHER_OPTION_TEXTURES)
+  for (const RaceText& race : RACE_TEXTS)
   {
-    const std::vector<uint8_t> bytes = ReadFile(game / file);
-    const auto labels = DecodeTplImage(bytes, LABELS_IMAGE);
-    if (labels && labels->format == 14 && labels->image.width == 256 && labels->image.height == 256)
-      nights::KeepOptionLabels(language, labels->image, std::span(bytes).subspan(labels->offset, LABELS_BYTES));
-  }
-  {
-    const std::filesystem::path path = game / MODE_2P_TEXTURES;
+    const std::filesystem::path path = game / race.file;
     std::vector<uint8_t> bytes = ReadFile(path);
     auto text = DecodeTplImage(bytes, RACE_TEXT_IMAGE);
-    if (text && text->format == 14 && text->image.width == 512 && text->image.height == 128)
+    if (!text || text->format != 14 || text->image.width != 512 || text->image.height != 128)
+      continue;
+    const uint32_t width = text->image.width;
+    const uint32_t y0 = race.second_line_x < width ? RACE_LINE2_Y0 : RACE_WIFI_Y0;
+    for (uint32_t y = y0; y < RACE_WIFI_Y1; ++y)
     {
-      for (uint32_t y = RACE_WIFI_Y0; y < RACE_WIFI_Y1; ++y)
-        std::fill_n(&text->image.rgba[static_cast<size_t>(y) * text->image.width * 4], text->image.width * 4, 0);
-      EncodeGreyCmpr(text->image, RACE_WIFI_Y0, RACE_WIFI_Y1, bytes.data() + text->offset);
-      disc.OverrideFile(path, std::move(bytes));
+      const uint32_t x0 = y < RACE_WIFI_Y0 ? race.second_line_x : 0;
+      std::fill_n(&text->image.rgba[(static_cast<size_t>(y) * width + x0) * 4], (width - x0) * 4, 0);
     }
+    EncodeGreyCmpr(text->image, y0, RACE_WIFI_Y1, bytes.data() + text->offset);
+    disc.OverrideFile(path, std::move(bytes));
   }
 }
 }  // namespace dualize
