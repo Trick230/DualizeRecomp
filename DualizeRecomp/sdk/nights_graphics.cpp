@@ -1132,7 +1132,7 @@ void BorrowValueBox(CPUState* ctx, uint32_t screen)
   for (size_t i = 0; i < 2; ++i)
   {
     const uint32_t half = boxes[0].halves[i];
-    CopyQuad(memory, half, borrowed.halves[i], Load(memory, half + CAST_OWN_COLOR), std::nullopt,
+    CopyQuad(memory, half, borrowed.halves[i], Load(memory, half + CAST_LOCAL_QUAD + 8), std::nullopt,
              Load(memory, half + CAST_QUAD + VERTICES * VERTEX));
   }
   for (uint32_t row = 0; row < ROWS; ++row)
