@@ -17,15 +17,21 @@ STATES = os.path.join(ROOT, 'build', 'states', 'native')
 OUT = os.path.join(ROOT, 'build', 'perf')
 USER = os.path.join(OUT, 'user')  # default settings, the same for every run
 SKIP_SPEED, SKIP_GX = 1, 2  # the first stats lines cover the state load
+# Scene -> (savestate, extra arguments). forest_gpu loads the GPU (3x render
+# scale, ambient occlusion, MSAA 8x by default); menu is the Options screen.
+SCENES = {'forest': ('forest', []), 'gate': ('gate', []), 'bluetrees': ('bluetrees', []),
+          'trees': ('trees', []), 'dark1': ('dark1', []),
+          'forest_gpu': ('forest', ['--render-scale', '3', '--ao']), 'menu': ('options', [])}
 
 
 def run(exe, scene, secs, log):
+    state, extra = SCENES[scene]
     game = Game(ROOT, exe=exe)
     env = dict(os.environ)
     os.environ['DUALIZE_GX_STATS'] = '1'
     try:
-        game.start(state=os.path.join(STATES, scene + '.sav'), log=log,
-                   extra_args=['--user', USER, '--unthrottled', '--no-vsync', '--no-interpolation'])
+        game.start(state=os.path.join(STATES, state + '.sav'), log=log,
+                   extra_args=['--user', USER, '--unthrottled', '--no-vsync', '--no-interpolation', *extra])
         time.sleep(secs)
     finally:
         game.stop()
@@ -46,7 +52,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rounds', type=int, default=2)
     ap.add_argument('--secs', type=float, default=25)
-    ap.add_argument('--scenes', default='forest,gate')
+    ap.add_argument('--scenes', default='forest,gate,forest_gpu,menu', help=','.join(SCENES))
     ap.add_argument('--no-history', action='store_true', help="don't append to history.csv (training runs)")
     ap.add_argument('builds', nargs='*', help='label=path/to/DualizeRecomp.exe')
     a = ap.parse_args()
