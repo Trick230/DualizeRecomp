@@ -40,6 +40,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include immintrin.h>")
 endif()
 
+# Profile-guided optimisation (scripts/pgo.sh): GENERATE builds an instrumented
+# game that writes raw profiles to build/pgo/raw as it exits; USE optimises
+# everything with the merged profile. Needs compiler-rt's profile runtime.
+set(DUALIZE_PGO "OFF" CACHE STRING "Profile-guided optimisation: OFF, GENERATE or USE")
+set(DUALIZE_PGO_PROFILE "${CMAKE_SOURCE_DIR}/build/pgo/merged.profdata" CACHE FILEPATH "Merged profile for DUALIZE_PGO=USE")
+if(DUALIZE_PGO STREQUAL "GENERATE")
+    add_compile_options(-fprofile-generate=${CMAKE_SOURCE_DIR}/build/pgo/raw)
+    add_link_options(-fprofile-generate=${CMAKE_SOURCE_DIR}/build/pgo/raw)
+elseif(DUALIZE_PGO STREQUAL "USE")
+    # Code changed since the profile keeps its old counts or none: not an error.
+    add_compile_options(-fprofile-use=${DUALIZE_PGO_PROFILE} -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
+    add_link_options(-fprofile-use=${DUALIZE_PGO_PROFILE})
+endif()
+
 add_subdirectory(thirdparty)
 add_subdirectory(DualizeRecompLib)
 add_subdirectory(DualizeRecomp)

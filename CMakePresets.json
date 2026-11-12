@@ -28,11 +28,25 @@
       "inherits": "base",
       "displayName": "Debug",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "pgo-generate",
+      "inherits": "release",
+      "displayName": "Release, instrumented for PGO (scripts/pgo.sh)",
+      "cacheVariables": { "DUALIZE_PGO": "GENERATE" }
+    },
+    {
+      "name": "pgo",
+      "inherits": "release",
+      "displayName": "Release optimised with the PGO profile (scripts/pgo.sh)",
+      "cacheVariables": { "DUALIZE_PGO": "USE" }
     }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
     { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo" },
-    { "name": "debug", "configurePreset": "debug" }
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "pgo-generate", "configurePreset": "pgo-generate" },
+    { "name": "pgo", "configurePreset": "pgo" }
   ]
 }
