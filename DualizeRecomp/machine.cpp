@@ -225,8 +225,11 @@ bool Machine::Start(std::string* error)
       (!config.replay_input.empty() && !m_movie.Replay(config.replay_input, error)))
     return false;
 
-  m_boot_time = LocalTimeNow();
-  StartNightsWeather(config.record_input.empty() && config.replay_input.empty() && config.hash_every == 0);
+  // Recorded, replayed and hashed runs start on a fixed date (2026-01-01), so
+  // a run from boot reads the same clock each time.
+  const bool deterministic = !config.record_input.empty() || !config.replay_input.empty() || config.hash_every != 0;
+  m_boot_time = deterministic ? 1767225600 : LocalTimeNow();
+  StartNightsWeather(!deterministic);
   ios::Config ios_config;
   ios_config.nand_root = config.user / "Wii";
   ios_config.disc = disc;
