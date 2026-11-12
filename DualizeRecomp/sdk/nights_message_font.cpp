@@ -45,7 +45,13 @@ constexpr unsigned char JAPANESE_FACE[] = {
 #embed "../resources/fonts/DualizeGothicJP-Bold.ttf"
 };
 #pragma clang diagnostic pop
-constexpr float LATIN_EM = 16.0f, JAPANESE_EM = 19.25f;  // texels
+// Each face's em across and down and its baseline (texels from the cell's top),
+// one for every glyph: the atlas sets all its glyphs on one baseline, so they
+// are not registered on the atlas's one by one (the faces' shapes differ from
+// its, and each glyph would come out at its own height). Fitted to the whole
+// atlas by scripts/lettering/atlas_fit.py and baseline_fit.py.
+constexpr float LATIN_EM = 16.0f, LATIN_EM_DOWN = 16.75f, LATIN_BASELINE = 17.75f;
+constexpr float JAPANESE_EM = 19.25f, JAPANESE_EM_DOWN = 19.5f, JAPANESE_BASELINE = 19.8125f;
 constexpr char32_t LAST_LATIN = 0x24F;
 constexpr char32_t FIRST_ICON = 0x391, LAST_ICON = 0x39D;  // Greek capitals the font draws pad buttons at
 
@@ -59,9 +65,7 @@ constexpr std::array<uint8_t, 4> LEVELS{0x00, 0x62, 0xBD, 0xFF};
 // atlas's ink) is not that glyph (an icon on its code point): the atlas's.
 constexpr float MATCH_ERROR = 0.9f;
 constexpr float FIT = 0.3f;    // a glyph narrowed (lowered) to its window by at most this
-constexpr uint8_t INK = 8;     // coverage counted as ink when fitting
 constexpr float CUT = 4.0f;    // error per texel of ink placed where the game cuts it
-constexpr int REACH = 3;  // the registration's search, BIG texels each way
 // Copies of the cache kept with the renderer (each new text makes another).
 constexpr size_t KEPT = 3;
 
@@ -339,115 +343,70 @@ private:
       return nullptr;
     const bool latin = code <= LAST_LATIN;
     const stbtt_fontinfo& face = latin ? m_latin : m_japanese;
-    const float scale = latin ? m_latin_scale : m_japanese_scale;
+    const float scale_x = latin ? m_latin_scale : m_japanese_scale;
+    const float scale_y = scale_x * (latin ? LATIN_EM_DOWN / LATIN_EM : JAPANESE_EM_DOWN / JAPANESE_EM);
+    const float baseline = (latin ? LATIN_BASELINE : JAPANESE_BASELINE) * SCALE;
     if (stbtt_FindGlyphIndex(&face, static_cast<int>(code)) == 0)
       return nullptr;
-    constexpr int PAD = static_cast<int>(BIG);
-    const int side = static_cast<int>(BIG) + 2 * PAD;
-    std::vector<uint8_t> canvas(static_cast<size_t>(side) * side);
-    // The glyph centred on a canvas with room to slide a cell's window over,
-    // `kx` and `ky` times as wide and high.
-    const auto render = [&](float kx, float ky) {
-      std::fill(canvas.begin(), canvas.end(), 0);
-      int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-      stbtt_GetCodepointBitmapBox(&face, static_cast<int>(code), scale * kx, scale * ky, &x0, &y0, &x1, &y1);
-      const int w = x1 - x0, h = y1 - y0;
-      if (w <= 0 || h <= 0 || w > side || h > side)
-        return false;
-      stbtt_MakeCodepointBitmap(&face, &canvas[static_cast<size_t>((side - h) / 2) * side + (side - w) / 2], w, h, side,
-                                scale * kx, scale * ky, static_cast<int>(code));
-      return true;
-    };
-    // The ink's span across and down, in atlas texels.
-    const auto span = [&](bool across) {
-      int first = side, last = -1;
-      for (int i = 0; i < side; ++i)
-        for (int j = 0; j < side; ++j)
-          if ((across ? canvas[static_cast<size_t>(j) * side + i] : canvas[static_cast<size_t>(i) * side + j]) > INK)
-          {
-            first = std::min(first, i);
-            last = i;
-            break;
-          }
-      return last < first ? 0.0f : static_cast<float>(last - first + 1) / SCALE;
-    };
-    const int left = static_cast<int>(CELL / 2) - 1 - window.half_w, right = static_cast<int>(CELL / 2) + 1 + window.half_w;
-    const int top = static_cast<int>(CELL / 2) - 1 - window.half_h, bottom = static_cast<int>(CELL / 2) + 1 + window.half_h;
-    // A glyph wider (higher) than the part of its cell the game draws
-    // narrowed (lowered) to fit, the face's outlines otherwise kept.
-    if (!render(1, 1))
+    int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;  // the outline's box, font units, y up
+    if (!stbtt_GetCodepointBox(&face, static_cast<int>(code), &ix0, &iy0, &ix1, &iy1) || ix1 <= ix0 || iy1 <= iy0)
       return nullptr;
-    const float kx = std::clamp(static_cast<float>(right - left) / std::max(0.5f, span(true)), 1 - FIT, 1.0f);
-    const float ky = std::clamp(static_cast<float>(bottom - top) / std::max(0.5f, span(false)), 1 - FIT, 1.0f);
-    if ((kx < 1 || ky < 1) && !render(kx, ky))
+    // The part of the cell the game draws, in BIG texels.
+    const float left = static_cast<float>((static_cast<int>(CELL / 2) - 1 - window.half_w) * static_cast<int>(SCALE));
+    const float right = static_cast<float>((static_cast<int>(CELL / 2) + 1 + window.half_w) * static_cast<int>(SCALE));
+    const float top = static_cast<float>((static_cast<int>(CELL / 2) - 1 - window.half_h) * static_cast<int>(SCALE));
+    const float bottom = static_cast<float>((static_cast<int>(CELL / 2) + 1 + window.half_h) * static_cast<int>(SCALE));
+    // A glyph wider than that, or reaching past it up or down from the
+    // baseline, narrowed (lowered, about the baseline) to fit, the face's
+    // outlines otherwise kept.
+    const float kx = std::clamp((right - left) / (static_cast<float>(ix1 - ix0) * scale_x), 1 - FIT, 1.0f);
+    float ky = 1.0f;
+    if (iy1 > 0)
+      ky = std::min(ky, (baseline - top) / (static_cast<float>(iy1) * scale_y));
+    if (iy0 < 0)
+      ky = std::min(ky, (bottom - baseline) / (static_cast<float>(-iy0) * scale_y));
+    ky = std::clamp(ky, 1 - FIT, 1.0f);
+    const float sx = scale_x * kx, sy = scale_y * ky;
+    // The ink's middle across on the cell's middle (the window is symmetric
+    // about it), the baseline on the face's.
+    const float origin_x = static_cast<float>(BIG) / 2 - 0.5f * static_cast<float>(ix0 + ix1) * sx;
+    const float origin_y = baseline;
+    const float fx = origin_x - std::floor(origin_x), fy = origin_y - std::floor(origin_y);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    stbtt_GetCodepointBitmapBoxSubpixel(&face, static_cast<int>(code), sx, sy, fx, fy, &x0, &y0, &x1, &y1);
+    const int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0 || w > static_cast<int>(2 * BIG) || h > static_cast<int>(2 * BIG))
       return nullptr;
-    // Summed area, for the window's texels at the atlas's size.
-    std::vector<uint32_t> sum(static_cast<size_t>(side + 1) * (side + 1), 0);
-    for (int y = 0; y < side; ++y)
-      for (int x = 0; x < side; ++x)
-        sum[static_cast<size_t>(y + 1) * (side + 1) + x + 1] = canvas[static_cast<size_t>(y) * side + x] +
-                                                                 sum[static_cast<size_t>(y) * (side + 1) + x + 1] +
-                                                                 sum[static_cast<size_t>(y + 1) * (side + 1) + x] -
-                                                                 sum[static_cast<size_t>(y) * (side + 1) + x];
-    const auto box = [&](int x, int y) {  // a texel at the atlas's size, the window's corner at (x, y)
-      const auto at = [&](int xx, int yy) { return static_cast<int64_t>(sum[static_cast<size_t>(yy) * (side + 1) + xx]); };
-      return static_cast<float>(at(x + SCALE, y + SCALE) - at(x, y + SCALE) - at(x + SCALE, y) + at(x, y)) /
-             (255.0f * SCALE * SCALE);
-    };
-    // Where the window goes: the ink's middles over each other, then the
-    // nearest fit around.
-    double ax = 0, ay = 0, am = 0, cx = 0, cy = 0, cm = 0;
+    std::vector<uint8_t> bitmap(static_cast<size_t>(w) * h);
+    stbtt_MakeCodepointBitmapSubpixel(&face, bitmap.data(), w, h, w, sx, sy, fx, fy, static_cast<int>(code));
+    auto out = std::make_shared<Coverage>(static_cast<size_t>(BIG) * BIG, 0);
+    const int bx = static_cast<int>(std::floor(origin_x)) + x0, by = static_cast<int>(std::floor(origin_y)) + y0;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x)
+      {
+        const int ox = bx + x, oy = by + y;
+        if (ox >= 0 && oy >= 0 && ox < static_cast<int>(BIG) && oy < static_cast<int>(BIG))
+          (*out)[static_cast<size_t>(oy) * BIG + ox] = bitmap[static_cast<size_t>(y) * w + x];
+      }
+    // Off the atlas's glyph by too much: not that glyph (an icon on its code
+    // point).
+    float error = 0, ink = 0;
     for (uint32_t y = 0; y < CELL; ++y)
       for (uint32_t x = 0; x < CELL; ++x)
       {
-        const double v = LEVELS[cell[y * CELL + x]] / 255.0;
-        ax += v * (x + 0.5);
-        ay += v * (y + 0.5);
-        am += v;
+        uint32_t sum = 0;
+        for (uint32_t yy = 0; yy < SCALE; ++yy)
+          for (uint32_t xx = 0; xx < SCALE; ++xx)
+            sum += (*out)[static_cast<size_t>(y * SCALE + yy) * BIG + x * SCALE + xx];
+        const float ours = static_cast<float>(sum) / (255.0f * SCALE * SCALE);
+        const float atlas = LEVELS[cell[y * CELL + x]] / 255.0f;
+        const float cx = static_cast<float>(x * SCALE), cy = static_cast<float>(y * SCALE);
+        const bool drawn = cx >= left && cx < right && cy >= top && cy < bottom;
+        error += drawn ? std::abs(ours - atlas) : CUT * ours;
+        ink += atlas;
       }
-    for (int y = 0; y < side; ++y)
-      for (int x = 0; x < side; ++x)
-      {
-        const double v = canvas[static_cast<size_t>(y) * side + x];
-        cx += v * (x + 0.5);
-        cy += v * (y + 0.5);
-        cm += v;
-      }
-    if (am <= 0 || cm <= 0)
+    if (ink <= 0 || error > MATCH_ERROR * ink)
       return nullptr;
-    const int gx = static_cast<int>(std::lround(cx / cm - ax / am * SCALE));
-    const int gy = static_cast<int>(std::lround(cy / cm - ay / am * SCALE));
-    float best = 0;
-    int bx = gx, by = gy;
-    bool first = true;
-    for (int dy = -REACH; dy <= REACH; ++dy)
-      for (int dx = -REACH; dx <= REACH; ++dx)
-      {
-        const int ox = gx + dx, oy = gy + dy;
-        if (ox < 0 || oy < 0 || ox + static_cast<int>(BIG) > side || oy + static_cast<int>(BIG) > side)
-          continue;
-        float error = 0;
-        for (uint32_t y = 0; y < CELL; ++y)
-          for (uint32_t x = 0; x < CELL; ++x)
-          {
-            const float ours = box(ox + static_cast<int>(x * SCALE), oy + static_cast<int>(y * SCALE));
-            const bool drawn = static_cast<int>(x) >= left && static_cast<int>(x) < right && static_cast<int>(y) >= top &&
-                               static_cast<int>(y) < bottom;
-            error += drawn ? std::abs(ours - LEVELS[cell[y * CELL + x]] / 255.0f) : CUT * ours;
-          }
-        if (first || error < best)
-        {
-          best = error;
-          bx = ox;
-          by = oy;
-          first = false;
-        }
-      }
-    if (first || best > MATCH_ERROR * static_cast<float>(am))
-      return nullptr;
-    auto out = std::make_shared<Coverage>(static_cast<size_t>(BIG) * BIG);
-    for (uint32_t y = 0; y < BIG; ++y)
-      std::memcpy(&(*out)[static_cast<size_t>(y) * BIG], &canvas[static_cast<size_t>(by + static_cast<int>(y)) * side + bx], BIG);
     return out;
   }
 
