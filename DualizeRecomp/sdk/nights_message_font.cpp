@@ -44,6 +44,9 @@ constexpr unsigned char LATIN_FACE[] = {
 constexpr unsigned char JAPANESE_FACE[] = {
 #embed "../resources/fonts/DualizeGothicJP-Bold.ttf"
 };
+constexpr unsigned char ICON_FACE[] = {
+#embed "../resources/fonts/DualizeIcons.ttf"
+};
 #pragma clang diagnostic pop
 // Each face's em across and down and its baseline (texels from the cell's top),
 // one for every glyph: the atlas sets all its glyphs on one baseline, so they
@@ -77,6 +80,90 @@ struct Window
   int half_w, half_h;
 };
 using Coverage = std::vector<uint8_t>;          // BIG x BIG
+
+// The pad-button icons at the Greek capitals, drawn from exact shapes: the
+// atlas's rings, rounded rectangles, bars and d-pad, and the letters inside
+// in Dualize Icons (resources/fonts/DualizeIcons-OFL.txt), every number fitted
+// to the atlas's icon by scripts/lettering/icon_fit.py. Texels, the cell's
+// top left corner at 0, 0.
+enum class IconFrame
+{
+  RING,  // centre x, y, radius, stroke
+  RECT,  // centre x, y, half width, half height, corner radius, stroke (on its path)
+  NONE,
+};
+enum class IconMark
+{
+  LETTER,  // the letter: its em, its width over that, its ink box's middle x, y
+  PLUS,    // centre x, y, the bar across: half long, half thick; the one down: half long, half thick
+  MINUS,   // centre x, y, half long, half thick
+  DPAD,    // centre x, y, arms' half reach across and down, half width, outer corners' radius;
+           // each arm's slit: its middle from the centre, long, thick, off the arm's middle line
+};
+struct Icon
+{
+  char32_t code;
+  IconFrame frame;
+  std::array<float, 6> frame_params;
+  IconMark mark;
+  char letter;
+  std::array<float, 10> mark_params;
+};
+constexpr std::array<float, 6> ICON_RING{12.0f, 12.0f, 8.55f, 1.0f};
+constexpr std::array<Icon, 13> ICONS{{
+    {0x391, IconFrame::RING, ICON_RING, IconMark::LETTER, 'A', {14.125f, 0.900f, 12.1875f, 11.125f}},
+    {0x392, IconFrame::RECT, {11.971f, 11.942f, 5.706f, 8.473f, 1.556f, 1.123f}, IconMark::LETTER, 'B', {14.375f, 0.900f, 12.3125f, 11.25f}},
+    {0x393, IconFrame::RING, ICON_RING, IconMark::LETTER, '1', {14.25f, 0.930f, 11.125f, 11.5f}},
+    {0x394, IconFrame::RING, ICON_RING, IconMark::LETTER, '2', {14.25f, 1.060f, 11.8125f, 11.25f}},
+    {0x395, IconFrame::RING, ICON_RING, IconMark::PLUS, 0, {11.704f, 11.497f, 4.678f, 0.797f, 4.862f, 0.697f}},
+    {0x396, IconFrame::RING, ICON_RING, IconMark::MINUS, 0, {11.474f, 11.431f, 4.498f, 0.800f}},
+    {0x397, IconFrame::NONE, {}, IconMark::DPAD, 0,
+     {11.565f, 11.574f, 8.410f, 8.349f, 3.170f, 0.934f, 5.124f, 2.939f, 0.843f, 0.241f}},
+    {0x398, IconFrame::RECT, {12.002f, 11.974f, 7.630f, 8.507f, 1.756f, 1.091f}, IconMark::LETTER, 'Z', {18.0f, 1.020f, 11.8125f, 11.9375f}},
+    {0x399, IconFrame::RING, ICON_RING, IconMark::LETTER, 'B', {15.75f, 1.230f, 12.5625f, 12.125f}},
+    {0x39A, IconFrame::RING, ICON_RING, IconMark::LETTER, 'a', {16.875f, 1.070f, 12.1875f, 12.5f}},
+    {0x39B, IconFrame::RING, ICON_RING, IconMark::LETTER, 'b', {16.625f, 1.020f, 12.6875f, 12.0f}},
+    {0x39C, IconFrame::RING, ICON_RING, IconMark::LETTER, 'x', {16.375f, 1.030f, 12.0f, 12.5625f}},
+    {0x39D, IconFrame::RING, ICON_RING, IconMark::LETTER, 'y', {14.25f, 1.130f, 12.8125f, 13.375f}},
+}};
+constexpr uint32_t ICON_SAMPLES = 4;  // per BIG texel each way (16 per atlas texel, as fitted)
+
+// A rounded rectangle's signed distance (negative inside).
+float RoundedBox(float x, float y, float cx, float cy, float hw, float hh, float radius)
+{
+  radius = std::max(0.0f, std::min({radius, hw, hh}));
+  const float qx = std::abs(x - cx) - (hw - radius), qy = std::abs(y - cy) - (hh - radius);
+  return std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - radius;
+}
+
+// Whether the point (texels) is in the icon's frame or mark (not its letter).
+bool InIconShape(const Icon& icon, float x, float y)
+{
+  const auto& f = icon.frame_params;
+  if (icon.frame == IconFrame::RING && std::abs(std::hypot(x - f[0], y - f[1]) - f[2]) <= f[3] / 2)
+    return true;
+  if (icon.frame == IconFrame::RECT && std::abs(RoundedBox(x, y, f[0], f[1], f[2], f[3], f[4])) <= f[5] / 2)
+    return true;
+  const auto& m = icon.mark_params;
+  const auto bar = [&](float cx, float cy, float hw, float hh) { return std::abs(x - cx) <= hw && std::abs(y - cy) <= hh; };
+  switch (icon.mark)
+  {
+  case IconMark::PLUS:
+    return bar(m[0], m[1], m[2], m[3]) || bar(m[0], m[1], m[5], m[4]);
+  case IconMark::MINUS:
+    return bar(m[0], m[1], m[2], m[3]);
+  case IconMark::DPAD:
+  {
+    if (RoundedBox(x, y, m[0], m[1], m[2], m[4], m[5]) > 0 && RoundedBox(x, y, m[0], m[1], m[4], m[3], m[5]) > 0)
+      return false;
+    const float d = m[6], half_long = m[7] / 2, half_thick = m[8] / 2, off = m[9];
+    return !(bar(m[0] + off, m[1] - d, half_thick, half_long) || bar(m[0] + off, m[1] + d, half_thick, half_long) ||
+             bar(m[0] - d, m[1] + off, half_long, half_thick) || bar(m[0] + d, m[1] + off, half_long, half_thick));
+  }
+  default:
+    return false;
+  }
+}
 
 std::string CellKey(const Cell& cell)
 {
@@ -138,6 +225,7 @@ public:
       return false;
     stbtt_InitFont(&m_latin, LATIN_FACE, 0);
     stbtt_InitFont(&m_japanese, JAPANESE_FACE, 0);
+    stbtt_InitFont(&m_icons, ICON_FACE, 0);
     m_latin_scale = stbtt_ScaleForMappingEmToPixels(&m_latin, LATIN_EM * SCALE);
     m_japanese_scale = stbtt_ScaleForMappingEmToPixels(&m_japanese, JAPANESE_EM * SCALE);
     m_warm = std::jthread([this](std::stop_token stop) {
@@ -329,18 +417,68 @@ private:
         return it->second;
     }
     const Cell& cell = m_cells.at(code);
-    std::shared_ptr<const Coverage> made = Draw(code, cell, m_windows.at(code));
-    if (!made)
+    std::shared_ptr<const Coverage> made =
+        code >= FIRST_ICON && code <= LAST_ICON ? DrawIcon(code) : Draw(code, cell, m_windows.at(code));
     if (!made)
       made = Upscale(cell);
     std::lock_guard lock(m_mutex);
     return m_glyphs.emplace(code, std::move(made)).first->second;
   }
 
+  // A pad-button icon from its shapes and letter.
+  std::shared_ptr<const Coverage> DrawIcon(char32_t code) const
+  {
+    const auto icon = std::find_if(ICONS.begin(), ICONS.end(), [&](const Icon& i) { return i.code == code; });
+    if (icon == ICONS.end())
+      return nullptr;
+    auto out = std::make_shared<Coverage>(static_cast<size_t>(BIG) * BIG, 0);
+    constexpr float STEP = 1.0f / (SCALE * ICON_SAMPLES);  // texels
+    for (uint32_t y = 0; y < BIG; ++y)
+      for (uint32_t x = 0; x < BIG; ++x)
+      {
+        uint32_t in = 0;
+        for (uint32_t sy = 0; sy < ICON_SAMPLES; ++sy)
+          for (uint32_t sx = 0; sx < ICON_SAMPLES; ++sx)
+            in += InIconShape(*icon, (static_cast<float>(x * ICON_SAMPLES + sx) + 0.5f) * STEP,
+                              (static_cast<float>(y * ICON_SAMPLES + sy) + 0.5f) * STEP);
+        (*out)[static_cast<size_t>(y) * BIG + x] =
+            static_cast<uint8_t>((in * 255 + ICON_SAMPLES * ICON_SAMPLES / 2) / (ICON_SAMPLES * ICON_SAMPLES));
+      }
+    if (icon->mark != IconMark::LETTER)
+      return out;
+    // The letter: its em down, its width across, its ink box's middle where fitted.
+    const auto& m = icon->mark_params;
+    const int letter = static_cast<unsigned char>(icon->letter);
+    int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;  // font units, y up
+    if (!stbtt_GetCodepointBox(&m_icons, letter, &ix0, &iy0, &ix1, &iy1))
+      return out;
+    const float sy = stbtt_ScaleForMappingEmToPixels(&m_icons, m[0] * SCALE), sx = sy * m[1];
+    const float origin_x = m[2] * SCALE - 0.5f * static_cast<float>(ix0 + ix1) * sx;
+    const float origin_y = m[3] * SCALE + 0.5f * static_cast<float>(iy0 + iy1) * sy;
+    const float fx = origin_x - std::floor(origin_x), fy = origin_y - std::floor(origin_y);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    stbtt_GetCodepointBitmapBoxSubpixel(&m_icons, letter, sx, sy, fx, fy, &x0, &y0, &x1, &y1);
+    const int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0 || w > static_cast<int>(BIG) || h > static_cast<int>(BIG))
+      return out;
+    std::vector<uint8_t> bitmap(static_cast<size_t>(w) * h);
+    stbtt_MakeCodepointBitmapSubpixel(&m_icons, bitmap.data(), w, h, w, sx, sy, fx, fy, letter);
+    const int bx = static_cast<int>(std::floor(origin_x)) + x0, by = static_cast<int>(std::floor(origin_y)) + y0;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x)
+      {
+        const int ox = bx + x, oy = by + y;
+        if (ox >= 0 && oy >= 0 && ox < static_cast<int>(BIG) && oy < static_cast<int>(BIG))
+        {
+          uint8_t& texel = (*out)[static_cast<size_t>(oy) * BIG + ox];
+          texel = std::max(texel, bitmap[static_cast<size_t>(y) * w + x]);
+        }
+      }
+    return out;
+  }
+
   std::shared_ptr<const Coverage> Draw(char32_t code, const Cell& cell, const Window& window) const
   {
-    if (code >= FIRST_ICON && code <= LAST_ICON)
-      return nullptr;
     const bool latin = code <= LAST_LATIN;
     const stbtt_fontinfo& face = latin ? m_latin : m_japanese;
     const float scale_x = latin ? m_latin_scale : m_japanese_scale;
@@ -446,7 +584,7 @@ private:
   std::unordered_map<std::string, char32_t> m_by_cell;
   std::unordered_map<char32_t, Cell> m_cells;
   std::unordered_map<char32_t, Window> m_windows;
-  stbtt_fontinfo m_latin{}, m_japanese{};
+  stbtt_fontinfo m_latin{}, m_japanese{}, m_icons{};
   float m_latin_scale = 1, m_japanese_scale = 1;
   std::mutex m_mutex;
   std::unordered_map<char32_t, std::shared_ptr<const Coverage>> m_glyphs;
