@@ -807,18 +807,19 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     if (const auto value = value_text(rows[row].value))
       draw_value(image, 1, row, *value, level);
   }
-  dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, g_page.labels_in_ram);
-  for (uint8_t* copy : g_page.labels_found)
-  {
-    if (copy != g_page.labels_in_ram)
-      std::memcpy(copy, g_page.labels_in_ram, DRAWN_BYTES);
-  }
+  // The texture as it will be, its sharp copy registered before the game's
+  // memory has it: the renderer runs alongside, and a draw of the new bytes
+  // with no replacement yet would make (and keep, by its contents) the
+  // game's own texture.
+  std::vector<uint8_t> next(g_page.labels_in_ram,
+                            g_page.labels_in_ram + static_cast<size_t>(image.width) * image.height / 2);
+  dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, next.data());
   // The sharp copy (every copy of the texture has the same bytes).
-  const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, g_page.labels_in_ram);
+  const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, next.data());
+  std::optional<aurora::texture::TextureSourceKey> replaced;
   if (!g_page.sharp_key || !(*g_page.sharp_key == key))
   {
-    if (g_page.sharp_key)
-      aurora::texture::remove_memory_replacement(*g_page.sharp_key);
+    replaced = g_page.sharp_key;
     Image sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
     const auto clear = [&](uint32_t line) {
       const size_t from = static_cast<size_t>(line) * LINE * SHARP_SCALE * sharp.width;
@@ -845,6 +846,12 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, texels);
     g_page.sharp_key = key;
   }
+  for (uint8_t* copy : g_page.labels_found)
+    std::memcpy(copy, next.data(), DRAWN_BYTES);
+  if (std::ranges::find(g_page.labels_found, g_page.labels_in_ram) == g_page.labels_found.end())
+    std::memcpy(g_page.labels_in_ram, next.data(), DRAWN_BYTES);
+  if (replaced)
+    aurora::texture::remove_memory_replacement(*replaced);
   aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);
   if (g_page.boxes && !g_page.undo.empty())
   {
