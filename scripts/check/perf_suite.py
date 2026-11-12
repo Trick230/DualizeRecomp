@@ -39,13 +39,14 @@ def run(exe, scene, secs, log):
         os.environ.update(env)
     text = open(log, errors='replace').read()
     speed = [float(m) for m in re.findall(r'speed (\d+(?:\.\d+)?)%', text)][SKIP_SPEED:]
-    gx = re.findall(r'\[gx\] (\d+) fps.*?frame ms ([\d.]+) sd ([\d.]+) max ([\d.]+)', text)[SKIP_GX:]
+    gx = re.findall(r'\[gx\] (\d+) fps.*?frame ms ([\d.]+) sd ([\d.]+) max ([\d.]+)(?:, gpu ms ([\d.]+))?', text)[SKIP_GX:]
     if not speed or not gx:
         return None
     return {'speed': statistics.median(speed), 'fps': statistics.median(int(g[0]) for g in gx),
             'frame_ms': statistics.median(float(g[1]) for g in gx),
             'frame_sd_ms': statistics.median(float(g[2]) for g in gx),
-            'max_frame_ms': max(float(g[3]) for g in gx), 'samples': len(gx)}
+            'max_frame_ms': max(float(g[3]) for g in gx), 'samples': len(gx),
+            'gpu_ms': statistics.median(float(g[4] or 0) for g in gx)}
 
 
 def main():
@@ -65,7 +66,7 @@ def main():
     with open(history, 'a', newline='') as f:
         w = csv.writer(f)
         if new:
-            w.writerow(['date', 'commit', 'build', 'scene', 'round', 'speed_pct', 'fps', 'frame_ms', 'frame_sd_ms', 'max_frame_ms', 'samples'])
+            w.writerow(['date', 'commit', 'build', 'scene', 'round', 'speed_pct', 'fps', 'frame_ms', 'frame_sd_ms', 'max_frame_ms', 'samples', 'gpu_ms'])
         for r in range(a.rounds):
             for scene in a.scenes.split(','):
                 for label, exe in builds:
@@ -75,12 +76,12 @@ def main():
                         continue
                     results.setdefault((label, scene), []).append(m)
                     w.writerow([datetime.datetime.now().isoformat(timespec='seconds'), commit, label, scene, r,
-                                f"{m['speed']:.0f}", m['fps'], f"{m['frame_ms']:.3f}", f"{m['frame_sd_ms']:.3f}", f"{m['max_frame_ms']:.2f}", m['samples']])
+                                f"{m['speed']:.0f}", m['fps'], f"{m['frame_ms']:.3f}", f"{m['frame_sd_ms']:.3f}", f"{m['max_frame_ms']:.2f}", m['samples'], f"{m['gpu_ms']:.2f}"])
                     f.flush()
     for (label, scene), ms in sorted(results.items()):
         med = lambda k: statistics.median(x[k] for x in ms)
         print(f'{label:>10} {scene:>8}: speed {med("speed"):.0f}%  fps {med("fps"):.0f}  frame {med("frame_ms"):.3f} ms'
-              f' (sd {med("frame_sd_ms"):.2f})  max frame {max(x["max_frame_ms"] for x in ms):.2f} ms  ({len(ms)} runs)')
+              f' (sd {med("frame_sd_ms"):.2f})  gpu {med("gpu_ms"):.2f} ms  max frame {max(x["max_frame_ms"] for x in ms):.2f} ms  ({len(ms)} runs)')
 
 
 if __name__ == '__main__':
