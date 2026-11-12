@@ -33,6 +33,7 @@ add_executable(DualizeRecomp
     sdk/rvl_nand.cpp
     sdk/rvl_vi.cpp
     sdk/rvl_wud.cpp
+    sdk/nights_glyph.cpp
     sdk/nights_graphics.cpp
     sdk/nights_message_font.cpp
     sdk/nights_options.cpp

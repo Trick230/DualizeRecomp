@@ -181,3 +181,10 @@ define NIGHTS_STRAP_REMINDER_NONE @SegaLogo_Update+258
 @Event_MessageCommand 1B8 9421FFB0 10522D52E79B8741
 nights_EventSubtitle 4 2C000001 CDBAA4962FED7266 at @Event_MessageCommand+18 jump
 define NIGHTS_EVENT_MESSAGE_COMMAND_DONE @Event_MessageCommand+1A4
+
+# The text's glyphs (sdk/nights_glyph.cpp): a glyph sprite's draw, right
+# after it has the sprite batch add its quad.
+@GlyphSprite_Draw 140 9421FFB0 CBFFA74A7CD4737A
+@SpriteBatch_AddQuad 358 9421FFB0 CC077866A12C4292
+define NIGHTS_SPRITE_BATCH_ADD_QUAD @SpriteBatch_AddQuad
+nights_GlyphQuad 4 2C030000 B3BE349621357818 at @GlyphSprite_Draw+FC jump
