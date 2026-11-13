@@ -182,6 +182,13 @@ define NIGHTS_STRAP_REMINDER_NONE @SegaLogo_Update+258
 nights_EventSubtitle 4 2C000001 CDBAA4962FED7266 at @Event_MessageCommand+18 jump
 define NIGHTS_EVENT_MESSAGE_COMMAND_DONE @Event_MessageCommand+1A4
 
+# Whether + skips a cutscene (RealTimeMovie::IsSkippable, its id): one its
+# table marks skippable (the story's, not the results') only once the story
+# has gone past it. Hooked after the table's mark: skippable at once.
+@RealTimeMovie_IsSkippable EC 9421FFE0 BDE7BD42A2864F6A
+nights_CutsceneSkippable 4 3FC00000 EC7C5227977DF9FA at @RealTimeMovie_IsSkippable+48 jump
+define NIGHTS_CUTSCENE_SKIPPABLE @RealTimeMovie_IsSkippable+C4
+
 # The text's glyphs (sdk/nights_glyph.cpp): a text line's draw, as it draws
 # each glyph node; a glyph sprite's draw, right after it has the sprite batch
 # add its quad; the text's scale (the pointer the glyph size reads).

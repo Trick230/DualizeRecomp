@@ -910,3 +910,11 @@ extern "C" bool nights_EventSubtitle(CPUState* ctx)
   ctx->pc = NIGHTS_EVENT_MESSAGE_COMMAND_DONE;
   return true;
 }
+
+// A cutscene its table marks skippable: skippable the first time too, not
+// only once the story has gone past it.
+extern "C" bool nights_CutsceneSkippable(CPUState* ctx)
+{
+  ctx->pc = NIGHTS_CUTSCENE_SKIPPABLE;
+  return true;
+}
