@@ -36,6 +36,7 @@ add_executable(DualizeRecomp
     sdk/nights_glyph.cpp
     sdk/nights_graphics.cpp
     sdk/nights_2p_text.cpp
+    sdk/nights_ui_images.cpp
     sdk/nights_message_font.cpp
     sdk/nights_options.cpp
     sdk/nights_text.cpp

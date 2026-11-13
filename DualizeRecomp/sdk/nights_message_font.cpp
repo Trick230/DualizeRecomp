@@ -1,6 +1,7 @@
 #include "sdk/nights_message_font.hpp"
 
 #include "sdk/nights_2p_text.hpp"
+#include "sdk/nights_ui_images.hpp"
 
 #include <aurora/texture.hpp>
 
@@ -618,12 +619,15 @@ MessageFont g_font;
 
 void LoadMessageFont(const std::filesystem::path& game)
 {
-  // The one provider also makes the 2P menus' text (nights_2p_text.cpp).
+  // The one provider also makes the 2P menus' text (nights_2p_text.cpp)
+  // and, for the rest of the interface's pictures, larger copies
+  // (nights_ui_images.cpp).
   aurora::texture::set_replacement_provider(
       [](const aurora::texture::TextureSource& source, void* font) {
         if (font != nullptr)
           g_font.Provide(source);
-        Provide2PText(source);
+        if (!Provide2PText(source))
+          ProvideUiImage(source);
       },
       g_font.Load(game) ? &g_font : nullptr);
 }

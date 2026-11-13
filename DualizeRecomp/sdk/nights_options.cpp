@@ -13,6 +13,7 @@
 #include "ppc_natives.h"
 #include "sdk/nights_options.hpp"
 #include "sdk/nights_2p_text.hpp"
+#include "sdk/nights_ui_images.hpp"
 #include "sdk/nights_message_font.hpp"
 #include "sdk/nights_text.hpp"
 
@@ -614,6 +615,7 @@ namespace dualize
 void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
 {
   disc.CountReads(game / MESSAGE_FOLDER, &g_message_reads);
+  nights::WatchUiImages(disc, game);
   nights::LoadMessageFont(game);
   {
     const std::filesystem::path path = game / OPTION_TEXTURES;

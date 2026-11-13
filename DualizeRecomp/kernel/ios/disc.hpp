@@ -45,5 +45,15 @@ public:
     (void)folder;
     (void)reads;
   }
+
+  // Calls `watch` (on the reading thread: it must be quick) with the path of
+  // each file right in `folder` as the game reads it, once per read.
+  using ReadWatch = void (*)(const std::filesystem::path& file, void* user);
+  virtual void WatchReads(const std::filesystem::path& folder, ReadWatch watch, void* user)
+  {
+    (void)folder;
+    (void)watch;
+    (void)user;
+  }
 };
 }  // namespace dualize::ios

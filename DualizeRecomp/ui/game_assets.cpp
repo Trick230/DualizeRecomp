@@ -158,7 +158,7 @@ std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t in
   return std::move(decoded->image);
 }
 
-std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index)
+std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index, bool pixels)
 {
   if (data.size() < 12 || Be32(data.data()) != 0x0020AF30)
     return std::nullopt;
@@ -185,6 +185,10 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
   const uint32_t blocks_y = (image.height + f->block_h - 1) / f->block_h;
   if (offset + static_cast<size_t>(blocks_x) * blocks_y * f->block_bytes > data.size())
     return std::nullopt;
+  tpl.format = format;
+  tpl.offset = offset;
+  if (!pixels)
+    return tpl;
   image.rgba.resize(static_cast<size_t>(image.width) * image.height * 4);
   const uint8_t* src = &data[offset];
   for (uint32_t y = 0; y < blocks_y; ++y)
@@ -192,8 +196,6 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
     for (uint32_t x = 0; x < blocks_x; ++x, src += f->block_bytes)
       DecodeBlock(*f, src, image, x * f->block_w, y * f->block_h);
   }
-  tpl.format = format;
-  tpl.offset = offset;
   return tpl;
 }
 
@@ -336,6 +338,206 @@ std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips)
     level = std::move(next);
     lw = nw;
     lh = nh;
+  }
+  return out;
+}
+
+Image UpscaleImage(const Image& image, uint32_t scale)
+{
+  const uint32_t w = image.width, h = image.height, ow = w * scale, oh = h * scale;
+  Image out{ow, oh, std::vector<uint8_t>(static_cast<size_t>(ow) * oh * 4)};
+  if (w == 0 || h == 0 || scale == 0)
+    return out;
+  // Premultiplied source.
+  std::vector<std::array<float, 4>> src(static_cast<size_t>(w) * h);
+  bool opaque = true;
+  for (size_t i = 0; i < src.size(); ++i)
+  {
+    const uint8_t* p = &image.rgba[i * 4];
+    const float a = p[3] / 255.0f;
+    src[i] = {p[0] / 255.0f * a, p[1] / 255.0f * a, p[2] / 255.0f * a, a};
+    opaque = opaque && p[3] == 255;
+  }
+  // Output texel o of an axis of n source texels samples (o + 0.5) / scale -
+  // 0.5: Catmull-Rom over texels i0 - 1 .. i0 + 2 (clamped), its nearest two
+  // i0, i0 + 1 bounding the result.
+  struct Tap
+  {
+    std::array<uint32_t, 4> at;
+    std::array<float, 4> w;
+  };
+  const auto taps = [scale](uint32_t n) {
+    std::vector<Tap> t(static_cast<size_t>(n) * scale);
+    for (uint32_t o = 0; o < t.size(); ++o)
+    {
+      const float s = (static_cast<float>(o) + 0.5f) / static_cast<float>(scale) - 0.5f;
+      const float i0 = std::floor(s), f = s - i0;
+      Tap& tap = t[o];
+      for (int k = 0; k < 4; ++k)
+        tap.at[k] = static_cast<uint32_t>(std::clamp(static_cast<int>(i0) - 1 + k, 0, static_cast<int>(n) - 1));
+      const float f2 = f * f, f3 = f2 * f;
+      tap.w = {-0.5f * f3 + f2 - 0.5f * f, 1.5f * f3 - 2.5f * f2 + 1.0f, -1.5f * f3 + 2.0f * f2 + 0.5f * f,
+               0.5f * f3 - 0.5f * f2};
+    }
+    return t;
+  };
+  const std::vector<Tap> tx = taps(w), ty = taps(h);
+  // Rows widened.
+  std::vector<std::array<float, 4>> wide(static_cast<size_t>(h) * ow);
+  for (uint32_t y = 0; y < h; ++y)
+    for (uint32_t x = 0; x < ow; ++x)
+    {
+      const Tap& t = tx[x];
+      std::array<float, 4> acc{};
+      for (int k = 0; k < 4; ++k)
+      {
+        const auto& s = src[static_cast<size_t>(y) * w + t.at[k]];
+        for (int c = 0; c < 4; ++c)
+          acc[c] += s[c] * t.w[k];
+      }
+      wide[static_cast<size_t>(y) * ow + x] = acc;
+    }
+  // Columns heightened, each texel kept within its four nearest source
+  // texels' range; straight colour out, alpha kept apart for its edges.
+  std::vector<float> alpha(static_cast<size_t>(ow) * oh);
+  for (uint32_t y = 0; y < oh; ++y)
+  {
+    const Tap& t = ty[y];
+    for (uint32_t x = 0; x < ow; ++x)
+    {
+      std::array<float, 4> acc{};
+      for (int k = 0; k < 4; ++k)
+      {
+        const auto& s = wide[static_cast<size_t>(t.at[k]) * ow + x];
+        for (int c = 0; c < 4; ++c)
+          acc[c] += s[c] * t.w[k];
+      }
+      const auto& n00 = src[static_cast<size_t>(t.at[1]) * w + tx[x].at[1]];
+      const auto& n01 = src[static_cast<size_t>(t.at[1]) * w + tx[x].at[2]];
+      const auto& n10 = src[static_cast<size_t>(t.at[2]) * w + tx[x].at[1]];
+      const auto& n11 = src[static_cast<size_t>(t.at[2]) * w + tx[x].at[2]];
+      for (int c = 0; c < 4; ++c)
+        acc[c] = std::clamp(acc[c], std::min({n00[c], n01[c], n10[c], n11[c]}),
+                            std::max({n00[c], n01[c], n10[c], n11[c]}));
+      const size_t i = static_cast<size_t>(y) * ow + x;
+      alpha[i] = acc[3];
+      uint8_t* p = &out.rgba[i * 4];
+      if (acc[3] > 1.0f / 1024)
+        for (int c = 0; c < 3; ++c)
+          p[c] = static_cast<uint8_t>(std::lround(std::min(acc[c] / acc[3], 1.0f) * 255));
+      p[3] = static_cast<uint8_t>(std::lround(acc[3] * 255));
+    }
+  }
+  if (opaque)
+    return out;
+  // A real edge rises across about one source texel (its slope `scale`
+  // times an output texel's); there the ramp is cut to one output texel
+  // around half coverage. Gentler slopes (shadows, glows) stay as they are.
+  const auto at = [&](int x, int y) {
+    return alpha[static_cast<size_t>(std::clamp(y, 0, static_cast<int>(oh) - 1)) * ow +
+                 static_cast<size_t>(std::clamp(x, 0, static_cast<int>(ow) - 1))];
+  };
+  const auto k = static_cast<float>(scale);
+  for (int y = 0; y < static_cast<int>(oh); ++y)
+    for (int x = 0; x < static_cast<int>(ow); ++x)
+    {
+      const float a = at(x, y);
+      const float gx = (at(x + 1, y) - at(x - 1, y)) * 0.5f, gy = (at(x, y + 1) - at(x, y - 1)) * 0.5f;
+      const float edge = std::clamp((std::sqrt(gx * gx + gy * gy) * k - 0.35f) / 0.3f, 0.0f, 1.0f);
+      const float cut = std::clamp((a - 0.5f) * k + 0.5f, 0.0f, 1.0f);
+      out.rgba[(static_cast<size_t>(y) * ow + static_cast<size_t>(x)) * 4 + 3] =
+          static_cast<uint8_t>(std::lround((a + (cut - a) * edge) * 255));
+    }
+  // Colourless texels (no coverage at all) take their covered neighbours' mean.
+  for (int pass = 0; pass < 2; ++pass)
+  {
+    std::vector<size_t> filled;
+    std::vector<std::array<uint8_t, 3>> colours;
+    for (int y = 0; y < static_cast<int>(oh); ++y)
+      for (int x = 0; x < static_cast<int>(ow); ++x)
+      {
+        const size_t i = static_cast<size_t>(y) * ow + static_cast<size_t>(x);
+        if (alpha[i] > 1.0f / 1024)
+          continue;
+        std::array<uint32_t, 3> sum{};
+        uint32_t count = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx)
+          {
+            const int nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= static_cast<int>(ow) || ny >= static_cast<int>(oh))
+              continue;
+            const size_t j = static_cast<size_t>(ny) * ow + static_cast<size_t>(nx);
+            if (alpha[j] <= 1.0f / 1024)
+              continue;
+            for (int c = 0; c < 3; ++c)
+              sum[c] += out.rgba[j * 4 + c];
+            ++count;
+          }
+        if (count == 0)
+          continue;
+        filled.push_back(i);
+        colours.push_back({static_cast<uint8_t>(sum[0] / count), static_cast<uint8_t>(sum[1] / count),
+                           static_cast<uint8_t>(sum[2] / count)});
+      }
+    for (size_t f = 0; f < filled.size(); ++f)
+    {
+      std::memcpy(&out.rgba[filled[f] * 4], colours[f].data(), 3);
+      alpha[filled[f]] = 1.0f;  // coloured now (its stored alpha stays 0)
+    }
+  }
+  return out;
+}
+
+std::vector<uint8_t> MipChain(const Image& image, uint32_t& mips)
+{
+  std::vector<uint8_t> out;
+  mips = 0;
+  uint32_t lw = image.width, lh = image.height;
+  if (lw == 0 || lh == 0)
+    return out;
+  size_t total = 0;
+  for (uint32_t mw = lw, mh = lh;; mw = std::max(1u, mw / 2), mh = std::max(1u, mh / 2))
+  {
+    total += static_cast<size_t>(mw) * mh * 4;
+    if (mw == 1 && mh == 1)
+      break;
+  }
+  out.reserve(total);
+  out.insert(out.end(), image.rgba.begin(), image.rgba.end());
+  mips = 1;
+  size_t level = 0;  // where the current level starts in `out`
+  while (lw > 1 || lh > 1)
+  {
+    const uint32_t nw = std::max(1u, lw / 2), nh = std::max(1u, lh / 2);
+    const size_t next = out.size();
+    out.resize(next + static_cast<size_t>(nw) * nh * 4);
+    for (uint32_t y = 0; y < nh; ++y)
+      for (uint32_t x = 0; x < nw; ++x)
+      {
+        std::array<float, 4> acc{};
+        for (uint32_t s = 0; s < 4; ++s)
+        {
+          const uint32_t sx = std::min(2 * x + s % 2, lw - 1), sy = std::min(2 * y + s / 2, lh - 1);
+          const uint8_t* p = &out[level + (static_cast<size_t>(sy) * lw + sx) * 4];
+          const float a = p[3] / 255.0f;
+          for (int c = 0; c < 3; ++c)
+            acc[c] += p[c] * a;
+          acc[3] += a;
+        }
+        uint8_t* q = &out[next + (static_cast<size_t>(y) * nw + x) * 4];
+        if (acc[3] > 0)
+          for (int c = 0; c < 3; ++c)
+            q[c] = static_cast<uint8_t>(std::lround(std::min(acc[c] / acc[3], 255.0f)));
+        else
+          for (int c = 0; c < 3; ++c)
+            q[c] = out[level + (static_cast<size_t>(std::min(2 * y, lh - 1)) * lw + std::min(2 * x, lw - 1)) * 4 + c];
+        q[3] = static_cast<uint8_t>(std::lround(acc[3] / 4 * 255));
+      }
+    level = next;
+    lw = nw;
+    lh = nh;
+    ++mips;
   }
   return out;
 }

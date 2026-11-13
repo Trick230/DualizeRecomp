@@ -19,6 +19,7 @@ namespace dualize::nights
 void Keep2PText(std::string_view file, std::span<const uint8_t> bytes);
 // Reads the files not kept yet from the game's folder, then the lines on a worker.
 void Load2PText(const std::filesystem::path& game);
-// For the replacement provider: the sharp copy of a kept image, as it is first drawn.
-void Provide2PText(const aurora::texture::TextureSource& source);
+// For the replacement provider: the sharp copy of a kept image, as it is
+// first drawn; whether it registered one.
+bool Provide2PText(const aurora::texture::TextureSource& source);
 }  // namespace dualize::nights

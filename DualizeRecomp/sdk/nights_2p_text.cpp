@@ -978,20 +978,22 @@ void Load2PText(const std::filesystem::path& game)
   g_reader = std::jthread(ReadTexts);
 }
 
-void Provide2PText(const aurora::texture::TextureSource& source)
+bool Provide2PText(const aurora::texture::TextureSource& source)
 {
   if (source.format != CMPR || !g_ready)
-    return;
+    return false;
   for (Text& text : g_texts)
   {
     if (text.provided || !(text.key == source.key))
       continue;
     g_read.wait(false);
     text.provided = true;
-    if (!text.texels.empty())
+    const bool drawn = !text.texels.empty();
+    if (drawn)
       aurora::texture::set_memory_replacement(text.key, text.width, text.height, text.mips, text.texels);
     text.texels = {};
-    return;
+    return drawn;
   }
+  return false;
 }
 }  // namespace dualize::nights

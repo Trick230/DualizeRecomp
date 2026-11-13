@@ -24,13 +24,14 @@ struct Image
 // unknown format.
 std::optional<Image> LoadTplImage(const std::filesystem::path& path, uint32_t index);
 
-// The same from the file's bytes, with where the image's data starts and its GX format.
+// The same from the file's bytes, with where the image's data starts and its
+// GX format; with `pixels` false only the size is set (rgba stays empty).
 struct TplImage
 {
   Image image;
   uint32_t format = 0, offset = 0;
 };
-std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index);
+std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t index, bool pixels = true);
 
 // Encodes the rows [y0, y1) of an opaque grey image (rounded out to whole
 // blocks) as CMPR into `data`, the image's encoded bytes.
@@ -45,6 +46,18 @@ Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band);
 // An opaque grey image's texels and its smaller mips (2x2 averages) after
 // them, down to one texel, as RGBA8; `mips` counts the levels.
 std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips);
+
+// A picture (logo, icon, panel) drawn `scale` times larger with nothing made
+// up: its premultiplied colour interpolated (Catmull-Rom, kept within each
+// spot's four nearest texels: no halos), and where its alpha has a real edge
+// (a cut-out's outline, not a soft shadow or glow) that edge redrawn one
+// output texel wide at the same place. Transparent texels take their
+// neighbours' colour, for filtering not to darken the outline.
+Image UpscaleImage(const Image& image, uint32_t scale);
+
+// An image's texels and its smaller mips (premultiplied 2x2 averages) after
+// them, down to one texel, as RGBA8; `mips` counts the levels.
+std::vector<uint8_t> MipChain(const Image& image, uint32_t& mips);
 
 // Encodes the rows [y0, y1) of an image (rounded out to whole blocks) as
 // RGB5A3 into `data`, the image's encoded bytes.

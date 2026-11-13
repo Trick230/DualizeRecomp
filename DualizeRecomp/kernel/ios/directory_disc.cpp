@@ -328,6 +328,15 @@ public:
         m_counted[static_cast<int32_t>(i)] = reads;
     }
   }
+  void WatchReads(const fs::path& folder, ReadWatch watch, void* user) override
+  {
+    const std::string wanted = folder.lexically_normal().generic_string();
+    for (size_t i = 0; i < m_files.size(); ++i)
+    {
+      if (m_files[i].parent_path().lexically_normal().generic_string() == wanted)
+        m_watched[static_cast<int32_t>(i)] = {watch, user};
+    }
+  }
   uint64_t GamePartition() const override { return GAME_PARTITION; }
   bool HasWiiHashes() const override { return m_wii_hashes; }
   uint64_t EndOffset() const override { return m_end_offset; }
@@ -407,6 +416,8 @@ private:
   {
     if (const auto counted = m_counted.find(index); counted != m_counted.end())
       counted->second->fetch_add(1, std::memory_order_relaxed);
+    if (const auto watched = m_watched.find(index); watched != m_watched.end())
+      watched->second.first(m_files[index], watched->second.second);
     if (const auto it = m_overrides.find(index); it != m_overrides.end())
     {
       if (offset + size > it->second.size())
@@ -454,6 +465,7 @@ private:
   std::vector<fs::path> m_files;
   std::unordered_map<int32_t, std::vector<uint8_t>> m_overrides;
   std::unordered_map<int32_t, std::atomic<uint32_t>*> m_counted;
+  std::unordered_map<int32_t, std::pair<ReadWatch, void*>> m_watched;
   mutable std::array<OpenFile, 8> m_open{};
   mutable size_t m_next_slot = 0;
   bool m_wii_hashes = true;
