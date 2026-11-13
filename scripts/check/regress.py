@@ -29,6 +29,8 @@ SCENES = {'forest': 'forest.sav', 'gate': 'gate.sav', 'bluetrees': 'bluetrees.sa
 RECORD = {'options': 'a,-,dpad_down,dpad_down,a,-,dpad_down,dpad_right,dpad_down,a,-,b,-,dpad_up,a,-,b,-,b,-',
           'stage': '-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-'}
 TIMEOUT = 300
+# Log lines a scene must print: work the guest RAM hashes don't see (host side).
+EXPECT = {'boot': ['[ui pictures]']}
 
 
 def fresh_user(scene):
@@ -72,7 +74,8 @@ def run(scene, exe):
     hashes = [l[len('[hash] '):].strip() for l in text.splitlines() if l.startswith('[hash] ')]
     ended = '[movie] played to its end' in text
     interp = (re.findall(r'interpreted (\d+)', text) or ['?'])[-1]
-    return hashes, ended, interp
+    missing = [line for line in EXPECT.get(scene, []) if line not in text]
+    return hashes, ended, interp, missing
 
 
 def main():
@@ -89,7 +92,7 @@ def main():
     failed = []
     for scene in a.scenes.split(','):
         t0 = time.time()
-        hashes, ended, interp = run(scene, a.exe)
+        hashes, ended, interp, missing = run(scene, a.exe)
         ref_path = os.path.join(BASE, 'ref', scene + '.txt')
         head = f'{scene:>9}: {len(hashes)} hashes, {"ended" if ended else "NO MOVIE END"}, interpreted {interp}, {time.time() - t0:.0f} s'
         if a.update:
@@ -115,6 +118,8 @@ def main():
             problems.append(f'{len(hashes)} hashes, reference {len(ref)}')
         if first is not None:
             problems.append(f'first difference at hash {first}: {hashes[first]} | ref {ref[first]}')
+        if missing:
+            problems.append('log lacks ' + ', '.join(missing))
         if interp != ref_interp:
             problems.append(f'interpreted {interp}, reference {ref_interp}')
         print(head, '-> OK' if not problems else '-> FAIL: ' + '; '.join(problems), flush=True)

@@ -990,7 +990,7 @@ bool Provide2PText(const aurora::texture::TextureSource& source)
     text.provided = true;
     const bool drawn = !text.texels.empty();
     if (drawn)
-      aurora::texture::set_memory_replacement(text.key, text.width, text.height, text.mips, text.texels);
+      aurora::texture::set_memory_replacement(text.key, text.width, text.height, text.mips, std::move(text.texels));
     text.texels = {};
     return drawn;
   }

@@ -842,8 +842,8 @@ void DrawRows(CPUState* ctx, uint32_t screen)
       }
     }
     uint32_t mips = 0;
-    const std::vector<uint8_t> texels = dualize::GreyMipChain(sharp, mips);
-    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, texels);
+    std::vector<uint8_t> texels = dualize::GreyMipChain(sharp, mips);
+    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, std::move(texels));
     g_page.sharp_key = key;
   }
   for (uint8_t* copy : g_page.labels_found)

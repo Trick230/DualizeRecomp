@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <fstream>
 #include <iterator>
@@ -282,11 +283,12 @@ bool ProvideUiImage(const aurora::texture::TextureSource& source)
   // Registered outside the lock (aurora takes its own); REGISTERING keeps it
   // from being let go meanwhile.
   copy.state = Copy::REGISTERING;
-  const std::vector<uint8_t> texels = std::move(copy.texels);
+  std::vector<uint8_t> texels = std::move(copy.texels);
   copy.texels = {};
   const uint32_t width = copy.width, height = copy.height, mips = copy.mips;
   lock.unlock();
-  aurora::texture::set_memory_replacement(source.key, width, height, mips, texels);
+  aurora::texture::set_memory_replacement(source.key, width, height, mips, std::move(texels));
+  std::fprintf(stderr, "[ui pictures] %ux%u drawn from a %ux%u copy\n", source.key.width, source.key.height, width, height);
   lock.lock();
   copy.state = Copy::REGISTERED;
   copy.order = ++g_order;
