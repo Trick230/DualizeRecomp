@@ -844,6 +844,9 @@ void Machine::DoState(StateIO& io, uint32_t version)
   io.Bytes(memory.mem2, Memory::MEM2_SIZE);
   io.Bytes(memory.l1, Memory::L1_SIZE);
   io.Marker(0x3E3E0001);
+  // A mix in flight lands before the events are saved: its mail schedules the
+  // DSP interrupt that the state must hold.
+  dsp->CompleteMix();
   scheduler.DoState(io);
   cpu.DoState(io);
   if (version <= STATE_VERSION_REGISTER_GX)
