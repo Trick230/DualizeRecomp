@@ -309,10 +309,13 @@ public:
   }
   bool OverrideFile(const fs::path& path, std::vector<uint8_t> bytes) override
   {
+    // Names first: fs::equivalent opens both files, too slow for each of the disc's thousands.
     std::error_code error;
+    const fs::path name = path.filename();
     for (size_t i = 0; i < m_files.size(); ++i)
     {
-      if (!fs::equivalent(m_files[i], path, error) || fs::file_size(m_files[i], error) != bytes.size())
+      if (m_files[i].filename() != name || !fs::equivalent(m_files[i], path, error) ||
+          fs::file_size(m_files[i], error) != bytes.size())
         continue;
       m_overrides[static_cast<int32_t>(i)] = std::move(bytes);
       return true;
