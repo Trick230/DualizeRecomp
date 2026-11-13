@@ -193,3 +193,40 @@ define NIGHTS_GLYPH_SCALE addr(@GlyphNode_Half+14,50)
 @SpriteBatch_AddQuad 358 9421FFB0 CC077866A12C4292
 define NIGHTS_SPRITE_BATCH_ADD_QUAD @SpriteBatch_AddQuad
 nights_GlyphQuad 4 2C030000 B3BE349621357818 at @GlyphSprite_Draw+FC jump
+
+# The pause window (sdk/nights_pause.cpp). CSD members' own place and scale
+# setters (member, value in f1): a value over the one the cast's animation
+# gives it, kept until set again.
+@CsdCast_SetY AC 9421FFE0 804B44D97704937F
+define CSD_CAST_SET_Y @CsdCast_SetY
+@CsdCast_SetScaleX AC 9421FFE0 D3A456FD55E9DBEB
+define CSD_CAST_SET_SCALE_X @CsdCast_SetScaleX
+@CsdCast_SetScaleY AC 9421FFE0 9E8DB6730AF5D24D
+define CSD_CAST_SET_SCALE_Y @CsdCast_SetScaleY
+# The pause task's scene play (r29 the task: its scene at 0x54, its variant
+# at 0x60): once the variant is set from the game's flag, and as it returns.
+@PauseScene_Play 204 9421FFA0 154CCC8659924A8F
+nights_PauseVariant 4 387D0054 DCB4AB3CAC57F5FA at @PauseScene_Play+50 jump
+nights_PauseScenePlay 4 7FEAFB78 7F25E034F9306E17 at @PauseScene_Play+1E8 jump
+# A CSD cast's pattern turned into its quad's texture place (r3 the cast, r4
+# its info, r5 the scene, whose sub-images the pattern indexes).
+@CsdCast_PatternQuad 494 9421FEB0 994057A181464AC5
+nights_CsdPatternQuad 4 80040004 27D592AAA50C6895 at @CsdCast_PatternQuad+14 jump
+# The pause window's pad (r28 the task, r30 the button being added): the
+# large window's buttons added in a loop, then the setup returns 1.
+@PauseScene_Pad 17C 9421FFC0 AAB28F0ACFD4005E
+nights_PausePadCount 4 2C1E0004 24596F9660FD5FFB at @PauseScene_Pad+C8 jump
+define NIGHTS_PAUSE_PAD_DONE @PauseScene_Pad+D0
+# The stage's pause input (play.rso; r31 the controller: actions table at
+# 0x20, chosen action 0x24, cursor 0x2C): A pressed, its sound played.
+@PauseInput 114 9421FFE0 6C78ED3BFA16F4C3
+nights_PauseDecide 4 801F002C 3DF5C1AA2094D084 at @PauseInput+AC jump
+define NIGHTS_PAUSE_INPUT_RETURN @PauseInput+100
+nights_PausePage 4 38630034 1E24713C4068A8D0 at @PauseInput+78 jump
+define NIGHTS_PAUSE_INPUT_NONE @PauseInput+FC
+define NIGHTS_PAUSE_SOUND call(@PauseInput+A8)
+# The pad cursors' move (the user's pad state, then its repeat check).
+@PadMove 150 9421FFE0 B0DD80D9E2DE8CBC
+define NIGHTS_PAD addr(@PadMove+34,3C)
+define NIGHTS_PAD_STATE call(@PadMove+40)
+define NIGHTS_PAD_REPEATED call(@PadMove+50)

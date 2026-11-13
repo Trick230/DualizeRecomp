@@ -39,6 +39,7 @@ add_executable(DualizeRecomp
     sdk/nights_ui_images.cpp
     sdk/nights_message_font.cpp
     sdk/nights_options.cpp
+    sdk/nights_pause.cpp
     sdk/nights_text.cpp
     sdk/nights_weather.cpp
     ui/game_assets.cpp
