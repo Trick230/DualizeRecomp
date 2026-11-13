@@ -59,20 +59,22 @@ constexpr unsigned char LABEL_FONT[] = {
 // The window's labels: image 10 of each language's screen textures, a 128x64
 // RGB5A3 of grey words on black, one per 20-row band (Continue, Retry, Quit;
 // the rest black). Each now has 16 rows, the fourth band Options'; the
-// labels' texture places follow (NewV). The Japanese file lays its labels out
-// otherwise and keeps them.
+// labels' texture places follow (NewV). The sharp copy letters all four. The
+// Japanese file lays its labels out otherwise and keeps them.
 struct LabelsFile
 {
   Language language;
   const char* file;
+  std::array<std::string_view, 3> words;  // the game's, as its texture has them
   std::string_view options;
 };
 constexpr std::array<LabelsFile, 5> LABELS_FILES{{
-    {Language::ENGLISH, "files/csd/textures/pjn_screen_allus.tls", "Options"},
-    {Language::FRENCH, "files/csd/textures/pjn_screen_allfr.tls", "Options"},
-    {Language::GERMAN, "files/csd/textures/pjn_screen_allga.tls", "Optionen"},
-    {Language::ITALIAN, "files/csd/textures/pjn_screen_allit.tls", "Opzioni"},
-    {Language::SPANISH, "files/csd/textures/pjn_screen_allsp.tls", "Opciones"},
+    {Language::ENGLISH, "files/csd/textures/pjn_screen_allus.tls", {"Continue", "Retry", "Quit"}, "Options"},
+    {Language::FRENCH, "files/csd/textures/pjn_screen_allfr.tls", {"Continuer", "Réessayer", "Quitter"}, "Options"},
+    {Language::GERMAN, "files/csd/textures/pjn_screen_allga.tls", {"Fortfahren", "Erneut versuchen", "Verlassen"},
+     "Optionen"},
+    {Language::ITALIAN, "files/csd/textures/pjn_screen_allit.tls", {"Continua", "Riprova", "Abbandona"}, "Opzioni"},
+    {Language::SPANISH, "files/csd/textures/pjn_screen_allsp.tls", {"Continuar", "Reintentar", "Salir"}, "Opciones"},
 }};
 constexpr uint32_t LABELS_IMAGE = 10, LABELS_WIDTH = 128, LABELS_HEIGHT = 64, RGB5A3 = 5;
 constexpr uint32_t OLD_BAND = 20, BAND = 16, GAME_LABELS = 3, OPTIONS_BAND = 3;
@@ -91,7 +93,7 @@ struct Kept
   Language language;
   aurora::texture::TextureSourceKey key;
   Image original;  // the game's
-  std::string_view options;
+  const LabelsFile* labels;
   std::array<float, OLD_BAND> shade{};  // the game's words' brightness per row (Shades)
   float centre = 0;  // where the game centres its words
   std::vector<uint8_t> encoded;  // the texture as the disc serves it
@@ -328,20 +330,33 @@ std::u32string Utf32(std::string_view text)
 void DrawWord(Image& image, uint32_t scale, uint32_t band, std::string_view word,
               const std::array<float, OLD_BAND>& shade, float centre)
 {
-  Place(image, scale, band, Letter(Utf32(word), CAP, BASELINE, NARROW), centre, 0.5f, shade);
+  const std::u32string letters = Utf32(word);
+  Lettering l = Letter(letters, CAP, BASELINE, NARROW);
+  // Pressed narrower if it would run off the texture.
+  const float room = 2.0f * std::min(centre, static_cast<float>(LABELS_WIDTH) - centre) - 2.0f;
+  if (l.Width() > room)
+    l = Letter(letters, CAP, BASELINE, NARROW * room / l.Width());
+  Place(image, scale, band, l, centre, 0.5f, shade);
 }
 
-// The labels texture as it now is, from the game's (either at its own size
-// or a copy of it `scale` times larger).
-Image Relabel(const Image& game, uint32_t scale, std::string_view options, const std::array<float, OLD_BAND>& shade,
+// The labels texture as it now is: at its own size the game's words pressed
+// into the new bands (the texels the disc serves), `scale` times larger all
+// four lettered.
+Image Relabel(const Image& game, uint32_t scale, const LabelsFile& labels, const std::array<float, OLD_BAND>& shade,
               float centre)
 {
-  Image image{game.width, game.height, std::vector<uint8_t>(game.rgba.size(), 0)};
+  Image image{LABELS_WIDTH * scale, LABELS_HEIGHT * scale,
+              std::vector<uint8_t>(size_t{LABELS_WIDTH} * LABELS_HEIGHT * scale * scale * 4, 0)};
   for (size_t i = 3; i < image.rgba.size(); i += 4)
     image.rgba[i] = 255;
   for (uint32_t band = 0; band < GAME_LABELS; ++band)
-    PressRows(game, band * OLD_BAND * scale, OLD_BAND * scale, image, band * BAND * scale, BAND * scale);
-  DrawWord(image, scale, OPTIONS_BAND, options, shade, centre);
+  {
+    if (scale == 1)
+      PressRows(game, band * OLD_BAND, OLD_BAND, image, band * BAND, BAND);
+    else
+      DrawWord(image, scale, band, labels.words[band], shade, centre);
+  }
+  DrawWord(image, scale, OPTIONS_BAND, labels.options, shade, centre);
   return image;
 }
 
@@ -435,9 +450,10 @@ constexpr uint32_t SETTINGS_RUMBLE = 0xB0;
 constexpr uint32_t SOUND_CURSOR = 0, SOUND_DECIDE = 1, SOUND_CANCEL = 2;
 // The pad state's application buttons for the four directions alone (the
 // game's menus use pairs that also turn sideways ones), and its device
-// buttons pressed (the application buttons have A and B as one).
+// buttons pressed (the application buttons have A and B as one), whose bits
+// differ by controller: the Classic Controller's A and B, then the GameCube pad's.
 constexpr uint32_t PAD_UP = 0x1, PAD_DOWN = 0x2, PAD_LEFT = 0x4, PAD_RIGHT = 0x8;
-constexpr uint32_t PAD_DEVICE_PRESSED = 0x34, DEVICE_A = 0x1, DEVICE_B = 0x2;
+constexpr uint32_t PAD_DEVICE_PRESSED = 0x34, DEVICE_A = 0x1 | 0x80000, DEVICE_B = 0x2 | 0x100000;
 constexpr uint32_t PAUSE_PAD = 0x34;  // the controller's pad, its cursor first
 
 struct PageRow
@@ -670,13 +686,13 @@ void PatchPauseLabels(ios::Disc& disc, const std::filesystem::path& game)
       continue;
     const auto shade = Shades(image->image);
     const float centre = Centre(image->image);
-    const Image relabelled = Relabel(image->image, 1, labels.options, shade, centre);
+    const Image relabelled = Relabel(image->image, 1, labels, shade, centre);
     uint8_t* texels = bytes.data() + image->offset;
     EncodeRgb5a3(relabelled, 0, LABELS_HEIGHT, texels);
     const auto key = aurora::texture::source_key(RGB5A3, LABELS_WIDTH, LABELS_HEIGHT, texels);
     std::vector<uint8_t> encoded(texels, texels + LABELS_BYTES);
     if (disc.OverrideFile(path, std::move(bytes)))
-      g_kept.push_back({labels.language, key, std::move(image->image), labels.options, shade, centre, std::move(encoded)});
+      g_kept.push_back({labels.language, key, std::move(image->image), &labels, shade, centre, std::move(encoded)});
   }
 }
 
@@ -689,8 +705,7 @@ bool ProvidePauseLabels(const aurora::texture::TextureSource& source)
     if (kept.provided || !(kept.key == source.key))
       continue;
     kept.provided = true;
-    const Image sharp =
-        Relabel(UpscaleImage(kept.original, SHARP_SCALE), SHARP_SCALE, kept.options, kept.shade, kept.centre);
+    const Image sharp = Relabel(kept.original, SHARP_SCALE, *kept.labels, kept.shade, kept.centre);
     uint32_t mips = 0;
     std::vector<uint8_t> texels = MipChain(sharp, mips);
     aurora::texture::set_memory_replacement(kept.key, sharp.width, sharp.height, mips, std::move(texels));
