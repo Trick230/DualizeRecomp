@@ -77,16 +77,22 @@ target_compile_definitions(DualizeRecompLib PRIVATE GXRUNTIME_FLAT_MEMORY=1)
 
 # Every guest operation stays separately rounded, so results are bit-exact;
 # line tables let a sampling profiler map host code back to guest code.
+# DUALIZE_GUEST_OPT lowers the level for faster dev builds (preset dev).
+set(DUALIZE_GUEST_OPT "-O3" CACHE STRING "Optimization level of the recompiled guest code")
 target_compile_options(DualizeRecompLib PRIVATE
-    -O3 -ffp-contract=off -fno-fast-math -gline-tables-only)
+    ${DUALIZE_GUEST_OPT} -ffp-contract=off -fno-fast-math -gline-tables-only)
 # The CPU target comes from DUALIZE_CPU_TARGET at the top: the inline FP fast
 # paths need a hardware fma(), which x86-64-v2 only reaches through libm.
 
 # ThinLTO across the chunks: cross-chunk calls inline. The cache makes a
 # rebuild re-optimize only what changed; each backend job holds a few large
 # chunks, so a bounded number run (one per core exhausted 16 GiB).
+# DUALIZE_LTO=OFF (preset dev) links without it, for faster iteration.
+option(DUALIZE_LTO "ThinLTO across the recompiled chunks" ON)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    set_property(TARGET DualizeRecompLib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    if(DUALIZE_LTO)
+        set_property(TARGET DualizeRecompLib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
     set(DUALIZE_LTO_JOBS 4 CACHE STRING "Parallel ThinLTO backend jobs at link time")
     target_link_options(DualizeRecompLib INTERFACE
         -fuse-ld=lld

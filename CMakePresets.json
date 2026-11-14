@@ -24,6 +24,12 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
     },
     {
+      "name": "dev",
+      "inherits": "release",
+      "displayName": "Release without ThinLTO, guest code at -O1 (faster builds)",
+      "cacheVariables": { "DUALIZE_LTO": "OFF", "DUALIZE_GUEST_OPT": "-O1" }
+    },
+    {
       "name": "debug",
       "inherits": "base",
       "displayName": "Debug",
@@ -45,6 +51,7 @@
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
     { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo" },
+    { "name": "dev", "configurePreset": "dev" },
     { "name": "debug", "configurePreset": "debug" },
     { "name": "pgo-generate", "configurePreset": "pgo-generate" },
     { "name": "pgo", "configurePreset": "pgo" }
