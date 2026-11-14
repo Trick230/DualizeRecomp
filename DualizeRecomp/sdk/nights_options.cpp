@@ -704,14 +704,30 @@ extern "C" bool nights_HelpSet(CPUState* ctx)
 // file is animating (r3 0 while one is): a file's animation on a cursor move
 // outlasts the line's 10 updates, so the game takes the line away and sets it
 // again a frame later (a blank frame). Keeps the line's own countdown full
-// while a file animates, as setting the same message would. Declines.
+// while a file animates, as setting the same message would.
+// The state reads the pad (B: its pad state's cancel, pressed that update
+// only) only then too, so B pressed while a file animates was lost: it is
+// kept and given as pressed on the first update that reads the pad (r30 the
+// File Select). Declines.
 extern "C" bool nights_FileSelectHelp(CPUState* ctx)
 {
   constexpr uint32_t HELP_LINE = 0x4, HELP_COUNTDOWN = 0x1C, HELP_MESSAGE = 0x20;
   constexpr uint32_t FILE_SELECT_HELP = 6000, HELP_UPDATES = 10;
+  constexpr uint32_t PAD_PRESSED = 0xA4, CANCEL = 0x200;
+  static uint32_t cancel_kept_for = 0;
+  Cpu& cpu = CpuOf(ctx);
+  Memory& memory = GetMachine(cpu).memory;
+  const uint32_t pad = cpu.CallGuest(NIGHTS_PAD_STATE, {dualize::Load32(memory.Effective(NIGHTS_PAD, 4)), 0});
+  uint8_t* pressed = memory.Effective(pad + PAD_PRESSED, 4);
   if (ctx->gpr[3] != 0)
+  {
+    if (cancel_kept_for == ctx->gpr[30])
+      dualize::Store32(pressed, dualize::Load32(pressed) | CANCEL);
+    cancel_kept_for = 0;
     return false;
-  Memory& memory = GetMachine(CpuOf(ctx)).memory;
+  }
+  if (dualize::Load32(pressed) & CANCEL)
+    cancel_kept_for = ctx->gpr[30];
   const uint32_t help = dualize::Load32(memory.Effective(NIGHTS_FILE_SELECT_HELP, 4));
   const uint32_t line = help ? dualize::Load32(memory.Effective(help + HELP_LINE, 4)) : 0;
   if (line == 0)
