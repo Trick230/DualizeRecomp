@@ -939,6 +939,7 @@ bool Machine::LoadState(const std::filesystem::path& path, std::string* error)
   m_throttle_host = m_report_host = Clock::now();
   m_throttle_ticks = m_report_ticks = scheduler.Now();
   m_report_fields = vi.Fields();
+  ++m_state_loads;
   return true;
 }
 }  // namespace dualize

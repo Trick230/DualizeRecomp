@@ -29,6 +29,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -97,6 +98,7 @@ struct Kept
   std::array<float, OLD_BAND> shade{};  // the game's words' brightness per row (Shades)
   float centre = 0;  // where the game centres its words
   std::vector<uint8_t> encoded;  // the texture as the disc serves it
+  std::vector<uint8_t> game;     // the texture as the game's disc had it
   bool provided = false;
 };
 std::vector<Kept> g_kept;
@@ -361,10 +363,14 @@ Image Relabel(const Image& game, uint32_t scale, const LabelsFile& labels, const
 }
 
 constexpr uint32_t PAUSE_SCENE = 0x54, PAUSE_VARIANT = 0x60;
+// Set when the scene updated this frame.
+constexpr uint32_t PAUSE_UPDATED = 0x64;
 // The stage's pause controller: its actions (action, name: 8 bytes each), the
 // chosen action, the cursor.
 constexpr uint32_t PAUSE_ACTIONS = 0x20, PAUSE_ACTION = 0x24, PAUSE_CURSOR = 0x2C;
 constexpr uint32_t CAST_SIZE = 0x144, CAST_PATTERN = 0x40, CAST_GROUP = 0x84;
+// Its scale as animated (before the overrides).
+constexpr uint32_t CAST_SCALE_X = 0x38, CAST_SCALE_Y = 0x3C;
 // A cast's pattern before its first update.
 constexpr float UNSET_PATTERN = -100000.0f;
 
@@ -427,20 +433,64 @@ void Rebanded(const Memory& memory, uint32_t subimages, uint32_t index)
   }
 }
 
-// The pause window's second label cast (Retry; Options in the small window)
-// as the scene last played.
-uint32_t g_label = 0, g_label_group = 0;
-bool g_small = false;
+// The sub-image's band among the labels' three in its scene (one of them
+// may show Options), or -1 if it isn't one of them.
+int NaturalBand(const Memory& memory, uint32_t subimage)
+{
+  for (uint32_t band = 0; band < GAME_LABELS; ++band)
+  {
+    if (subimage < band * SUBIMAGE)
+      break;
+    const uint32_t first = subimage - band * SUBIMAGE;
+    bool labels = true;
+    for (uint32_t k = 0; k < GAME_LABELS && labels; ++k)
+      labels = k == band || IsBand(memory, first + k * SUBIMAGE, k, BAND);
+    if (labels)
+      return static_cast<int>(band);
+  }
+  return -1;
+}
 
-// The small window's Options page: its three buttons become rows "Name
-// < Value >" of the graphics page's options, Subtitles and Rumble, three at a
-// time, scrolled; left and right change the cursor's (A too, going round), B
+// The pause window as its scene last played: the game's own (its language not
+// relabelled), or one of its two sizes with Options among the buttons. The
+// small window takes the large one's first three buttons, Retry's label
+// showing Options; the large one borrows the small one's Quit button (from
+// the scene's second group) as Options between Retry and Quit.
+enum class Window { Game, Small, Large };
+Window g_window = Window::Game;
+// Options' label cast as the scene last played.
+uint32_t g_label = 0, g_label_group = 0;
+// The large and small windows' roots (casts) as the scene last played.
+uint32_t g_large_root = 0, g_small_root = 0;
+
+uint32_t OptionsButton()
+{
+  return g_window == Window::Large ? 2 : 1;
+}
+
+// The Options page: the window's labelled buttons become rows "Name
+// < Value >" of the graphics page's options, Subtitles and Rumble, as many at
+// a time, scrolled; left and right change the cursor's (A too, going round), B
 // goes back. The rows are drawn into the labels texture's bands the buttons'
 // labels show, with a sharp copy, and the texture put back as the page goes.
-constexpr int PAGE_ROWS = 3, SUBTITLES = dualize::GRAPHICS_OPTION_COUNT, RUMBLE = SUBTITLES + 1,
+constexpr int MAX_ROWS = 4, SUBTITLES = dualize::GRAPHICS_OPTION_COUNT, RUMBLE = SUBTITLES + 1,
               PAGE_OPTIONS = RUMBLE + 1;
-// Each row's label cast (continue, restart, quit) and the band it shows.
-constexpr std::array<uint32_t, PAGE_ROWS> ROW_CASTS{0x32, 0x38, 0x3e}, ROW_BANDS{0, OPTIONS_BAND, 2};
+// Each row's label cast (in the scene's group of the large window, 0, or the
+// small one, 1) and the band it shows: the labels Continue, Retry or Options,
+// Options, Quit.
+struct RowLabel
+{
+  uint32_t group, cast, band;
+};
+constexpr std::array<RowLabel, 3> SMALL_ROWS{{{0, 0x32, 0}, {0, 0x38, OPTIONS_BAND}, {0, 0x3e, 2}}};
+constexpr std::array<RowLabel, MAX_ROWS> LARGE_ROWS{
+    {{0, 0x32, 0}, {0, 0x38, 1}, {1, 0x2a, OPTIONS_BAND}, {0, 0x3e, 2}}};
+std::span<const RowLabel> Rows()
+{
+  if (g_window == Window::Large)
+    return LARGE_ROWS;
+  return SMALL_ROWS;
+}
 // The rows' lettering: smaller than the words', the label casts stretched
 // across their buttons and the face pressed back as much; the name from the
 // left, the value between arrows at the right; a locked row dimmer.
@@ -474,7 +524,7 @@ struct PausePage
   std::vector<uint8_t*> textures;  // the labels texture's copies in memory
   std::vector<uint8_t> written;    // the bytes last put in them
   std::optional<aurora::texture::TextureSourceKey> key;  // the drawn rows' sharp copy
-  std::array<PageRow, PAGE_ROWS> drawn;
+  std::array<PageRow, MAX_ROWS> drawn;
 };
 PausePage g_page;
 // The device button that closed the page, kept from the game's input while it
@@ -560,17 +610,18 @@ bool KeepOurs()
 // memory has the new bytes (the renderer runs alongside; see DrawRows).
 void DrawPage(const Machine& machine)
 {
-  std::array<PageRow, PAGE_ROWS> rows;
-  for (int r = 0; r < PAGE_ROWS; ++r)
-    rows[r] = RowOf(machine, g_page.top + r);
+  const auto labels = Rows();
+  std::array<PageRow, MAX_ROWS> rows;
+  for (size_t r = 0; r < labels.size(); ++r)
+    rows[r] = RowOf(machine, g_page.top + static_cast<int>(r));
   if (g_page.key && rows == g_page.drawn)
     return;
   const Language language = dualize::nights::GameLanguage(machine.memory);
   Image image = Blank(1), sharp = Blank(SHARP_SCALE);
-  for (int r = 0; r < PAGE_ROWS; ++r)
+  for (size_t r = 0; r < labels.size(); ++r)
   {
-    DrawRow(image, 1, ROW_BANDS[r], rows[r], language);
-    DrawRow(sharp, SHARP_SCALE, ROW_BANDS[r], rows[r], language);
+    DrawRow(image, 1, labels[r].band, rows[r], language);
+    DrawRow(sharp, SHARP_SCALE, labels[r].band, rows[r], language);
   }
   std::vector<uint8_t> next(LABELS_BYTES);
   EncodeRgb5a3(image, 0, LABELS_HEIGHT, next.data());
@@ -618,12 +669,10 @@ void Stretch(CPUState* ctx, float scale)
     return;
   const Memory& memory = GetMachine(CpuOf(ctx)).memory;
   Layout layout(CpuOf(ctx), ctx, g_task + PAUSE_SCENE);
-  const uint32_t root = layout.Cast("Root_Pause_L");
-  if (root == 0)
-    return;
-  const uint32_t casts = Load(memory, Load(memory, root + CAST_GROUP) + 4);
-  for (uint32_t cast : ROW_CASTS)
-    layout.SetScaleX(casts + cast * CAST_SIZE, scale);
+  const std::array<uint32_t, 2> roots{layout.Cast("Root_Pause_L"), layout.Cast("Root_Pause_S")};
+  for (const RowLabel& row : Rows())
+    if (roots[row.group] != 0)
+      layout.SetScaleX(Load(memory, Load(memory, roots[row.group] + CAST_GROUP) + 4) + row.cast * CAST_SIZE, scale);
 }
 
 uint32_t PadState(dualize::Cpu& cpu, const Memory& memory)
@@ -660,6 +709,20 @@ bool OpenPage(CPUState* ctx, uint32_t controller)
   return true;
 }
 
+// The game's labels texture still in memory (a stage loaded before the disc
+// served it relabelled: a savestate) relabelled there, as the bands are.
+uint32_t g_state_loads = 0;  // the machine's savestate loads when last looked
+void RelabelLoaded(const Memory& memory)
+{
+  const Language language = dualize::nights::GameLanguage(memory);
+  const auto kept = std::ranges::find(g_kept, language, &Kept::language);
+  if (kept == g_kept.end())
+    return;
+  for (uint8_t* copy : FindTextures(memory, kept->game))
+    if (std::memcmp(copy, kept->game.data(), LABELS_BYTES) == 0)
+      std::memcpy(copy, kept->encoded.data(), LABELS_BYTES);
+}
+
 void ClosePage(CPUState* ctx)
 {
   KeepOurs();
@@ -688,11 +751,13 @@ void PatchPauseLabels(ios::Disc& disc, const std::filesystem::path& game)
     const float centre = Centre(image->image);
     const Image relabelled = Relabel(image->image, 1, labels, shade, centre);
     uint8_t* texels = bytes.data() + image->offset;
+    std::vector<uint8_t> game(texels, texels + LABELS_BYTES);
     EncodeRgb5a3(relabelled, 0, LABELS_HEIGHT, texels);
     const auto key = aurora::texture::source_key(RGB5A3, LABELS_WIDTH, LABELS_HEIGHT, texels);
     std::vector<uint8_t> encoded(texels, texels + LABELS_BYTES);
     if (disc.OverrideFile(path, std::move(bytes)))
-      g_kept.push_back({labels.language, key, std::move(image->image), &labels, shade, centre, std::move(encoded)});
+      g_kept.push_back(
+          {labels.language, key, std::move(image->image), &labels, shade, centre, std::move(encoded), std::move(game)});
   }
 }
 
@@ -732,38 +797,73 @@ extern "C" bool nights_CsdPatternQuad(CPUState* ctx)
     if (index < 0)
       continue;
     Rebanded(memory, subimages, static_cast<uint32_t>(index));
-    // The pause window's second label: Options in the small window.
+    // The pause window's Options label shows its band, put back for the
+    // others sharing its sub-image (Retry's or Quit's); each quad keeps the
+    // place it takes here.
     const uint32_t subimage = subimages + static_cast<uint32_t>(index) * SUBIMAGE;
-    if (cast == g_label && Load(memory, cast + CAST_GROUP) == g_label_group &&
-        (IsBand(memory, subimage, 1, BAND) || IsBand(memory, subimage, OPTIONS_BAND, BAND)))
-      SetBand(memory, subimage, g_small ? OPTIONS_BAND : 1);
+    const bool options = cast == g_label && Load(memory, cast + CAST_GROUP) == g_label_group;
+    if (options == IsBand(memory, subimage, OPTIONS_BAND, BAND))
+      continue;
+    if (const int band = NaturalBand(memory, subimage); band >= 0)
+      SetBand(memory, subimage, options ? OPTIONS_BAND : static_cast<uint32_t>(band));
   }
   return false;
 }
 
-// The small window's buttons: Continue, Options, Quit (the large layout's
-// first three; its fourth, the hint, hidden).
-constexpr uint32_t SMALL_BUTTONS = 3, SMALL_OPTIONS = 1;
+// The large window's buttons by their places in the game's names table
+// (0-3 Continue, Restart, Quit, Owl; the small window's from 10, its Quit
+// 11): its Options the small window's Quit. The small window has the first three of
+// the game's.
+constexpr std::array<uint32_t, 5> LARGE_NAMES{0, 1, 11, 2, 3};
+constexpr uint32_t SMALL_BUTTONS = 3;
 
-// The pad's buttons added: the small window's three.
+// The pad's buttons added: the window's.
 extern "C" bool nights_PausePadCount(CPUState* ctx)
 {
-  if (!g_small || ctx->gpr[30] < SMALL_BUTTONS)
+  if (g_window == Window::Game)
     return false;
-  ctx->pc = NIGHTS_PAUSE_PAD_DONE;
+  const uint32_t buttons = g_window == Window::Large ? LARGE_NAMES.size() : SMALL_BUTTONS;
+  ctx->pc = ctx->gpr[30] < buttons ? NIGHTS_PAUSE_PAD_LOOP : NIGHTS_PAUSE_PAD_DONE;
   return true;
 }
 
-// A on a button of the small window: Options opens its page; the others take
-// the game's action, their place past Options moved back
-// one (the game's table holds Continue and Quit).
+// A large window's button found by its name (r0 the name's place in the table).
+bool LargeName(CPUState* ctx, uint32_t button)
+{
+  if (g_window == Window::Large && button < LARGE_NAMES.size())
+    ctx->gpr[0] = LARGE_NAMES[button] * 4;
+  return false;
+}
+
+extern "C" bool nights_PausePadName(CPUState* ctx)
+{
+  return LargeName(ctx, ctx->gpr[30]);
+}
+
+extern "C" bool nights_PauseHighlightName(CPUState* ctx)
+{
+  return LargeName(ctx, ctx->gpr[28]);
+}
+
+// The buttons lit or not: the large window's.
+extern "C" bool nights_PauseHighlightCount(CPUState* ctx)
+{
+  if (g_window != Window::Large)
+    return false;
+  ctx->pc = ctx->gpr[28] < LARGE_NAMES.size() ? NIGHTS_PAUSE_HIGHLIGHT_LOOP : NIGHTS_PAUSE_HIGHLIGHT_DONE;
+  return true;
+}
+
+// A on a button: Options opens its page; the others take the game's action,
+// their place past Options moved back one (the game's table hasn't it).
 extern "C" bool nights_PauseDecide(CPUState* ctx)
 {
-  if (!g_small)
+  if (g_window == Window::Game)
     return false;
   const Memory& memory = GetMachine(CpuOf(ctx)).memory;
   const uint32_t controller = ctx->gpr[31], cursor = Load(memory, controller + PAUSE_CURSOR);
-  if (cursor == SMALL_OPTIONS)
+  const uint32_t options = OptionsButton();
+  if (cursor == options)
   {
     // B decides too in the game's pause (its application buttons make A and B
     // one): only A opens the page, so the B that closed it doesn't open it again.
@@ -773,7 +873,7 @@ extern "C" bool nights_PauseDecide(CPUState* ctx)
     ctx->pc = NIGHTS_PAUSE_INPUT_RETURN;
     return true;
   }
-  const uint32_t action = Load(memory, Load(memory, controller + PAUSE_ACTIONS) + (cursor - (cursor > SMALL_OPTIONS)) * 8);
+  const uint32_t action = Load(memory, Load(memory, controller + PAUSE_ACTIONS) + (cursor - (cursor > options)) * 8);
   dualize::Store32(memory.Effective(controller + PAUSE_ACTION, 4), action);
   ctx->gpr[3] = 1;
   ctx->pc = NIGHTS_PAUSE_INPUT_RETURN;
@@ -820,7 +920,7 @@ extern "C" bool nights_PausePage(CPUState* ctx)
   {
     ClosePage(ctx);
     g_held = DEVICE_B;
-    SetCursor(memory, controller, SMALL_OPTIONS);
+    SetCursor(memory, controller, OptionsButton());
     sound(SOUND_CANCEL);
     return true;
   }
@@ -829,7 +929,8 @@ extern "C" bool nights_PausePage(CPUState* ctx)
   {
     // Past the rows' ends it scrolls; past the options' it goes round.
     const int to = (option + move + PAGE_OPTIONS) % PAGE_OPTIONS;
-    g_page.top = std::clamp(std::clamp(g_page.top, to - (PAGE_ROWS - 1), to), 0, PAGE_OPTIONS - PAGE_ROWS);
+    const int rows = static_cast<int>(Rows().size());
+    g_page.top = std::clamp(std::clamp(g_page.top, to - (rows - 1), to), 0, PAGE_OPTIONS - rows);
     g_page.row = to - g_page.top;
     SetCursor(memory, controller, static_cast<uint32_t>(g_page.row));
     sound(SOUND_CURSOR);
@@ -852,9 +953,35 @@ extern "C" bool nights_PauseVariant(CPUState* ctx)
   Memory& memory = GetMachine(CpuOf(ctx)).memory;
   const uint32_t task = ctx->gpr[29];
   // Without the Options label (a language not relabelled) the game's own window.
-  g_small = Load(memory, task + PAUSE_VARIANT) == 1 && Relabelled(memory);
-  if (g_small)
+  const uint32_t variant = Load(memory, task + PAUSE_VARIANT);
+  g_window = !Relabelled(memory) ? Window::Game
+             : variant == 1      ? Window::Small
+             : variant == 0      ? Window::Large
+                                 : Window::Game;
+  if (g_window == Window::Small)
     dualize::Store32(memory.Effective(task + PAUSE_VARIANT, 4), 0);
+  return false;
+}
+
+// After the pause scene's update: the small window's root (holding the
+// borrowed Options button) takes the large root's animated scale, so the
+// button opens and closes with the window (a frame late: the scene's next
+// update applies it).
+extern "C" bool nights_PauseFollow(CPUState* ctx)
+{
+  const uint32_t task = ctx->gpr[31];
+  if (g_window != Window::Large || task != g_task || g_large_root == 0)
+    return false;
+  auto& cpu = CpuOf(ctx);
+  // A savestate loaded since the scene played: its casts may be elsewhere.
+  if (GetMachine(cpu).StateLoads() != g_state_loads)
+    return false;
+  const Memory& memory = GetMachine(cpu).memory;
+  if (memory.Effective(task + PAUSE_UPDATED, 1)[0] == 0)
+    return false;
+  Layout layout(cpu, ctx, task + PAUSE_SCENE);
+  layout.SetScaleX(g_small_root, LoadFloat(memory, g_large_root + CAST_SCALE_X));
+  layout.SetScaleY(g_small_root, LoadFloat(memory, g_large_root + CAST_SCALE_Y));
   return false;
 }
 
@@ -867,17 +994,31 @@ extern "C" bool nights_PauseScenePlay(CPUState* ctx)
   g_held = 0;
   if (g_page.open)
     ClosePage(ctx);
-  Layout layout(cpu, ctx, task + PAUSE_SCENE);
-  const uint32_t root = layout.Cast("Root_Pause_L");
-  if (g_small && root != 0)
+  // Only a savestate brings the game's texture back (~50 ms to look).
+  if (const uint32_t loads = GetMachine(cpu).StateLoads(); loads != g_state_loads)
   {
-    const uint32_t group = Load(memory, root + CAST_GROUP);
-    const uint32_t count = Load(memory, group), casts = Load(memory, group + 4);
-    auto at = [&](uint32_t i) { return casts + i * CAST_SIZE; };
-    auto mission = [](uint32_t i) { return (i >= 4 && i <= 9) || (i >= 0x24 && i <= 0x2c && i != 0x27) || i >= 0x3f; };
-    for (uint32_t i = 0; i < count; ++i)
-      layout.SetHidden(at(i), mission(i));
-    const float lift = -81.0f, centre = (-160.0f + 160.0f + lift) / 2, k = (320.0f + lift) / 320.0f;
+    g_state_loads = loads;
+    RelabelLoaded(memory);
+  }
+  g_label = g_label_group = 0;
+  g_large_root = g_small_root = 0;
+  if (g_window == Window::Game)
+    return false;
+  Layout layout(cpu, ctx, task + PAUSE_SCENE);
+  const std::array<uint32_t, 2> roots{layout.Cast("Root_Pause_L"), layout.Cast("Root_Pause_S")};
+  if (roots[0] == 0 || roots[1] == 0)
+  {
+    g_window = Window::Game;
+    return false;
+  }
+  const auto casts_of = [&](uint32_t root) { return Load(memory, Load(memory, root + CAST_GROUP) + 4); };
+  const uint32_t root = roots[0], count = Load(memory, Load(memory, root + CAST_GROUP)), casts = casts_of(root);
+  auto at = [&](uint32_t i) { return casts + i * CAST_SIZE; };
+  // The frame's bottom `lift` pixels lower (its sides stretched as much), the
+  // window kept centred; the root's place returned.
+  const auto resize = [&](float lift)
+  {
+    const float centre = lift / 2, k = (320.0f + lift) / 320.0f;
     for (uint32_t i : {0xeu, 0xfu, 0x10u, 0x20u})
       layout.SetY(at(i), (160.0f + lift) / 480.0f);
     for (uint32_t i : {0x1au, 0x1bu, 0x1du})
@@ -889,16 +1030,44 @@ extern "C" bool nights_PauseScenePlay(CPUState* ctx)
     layout.SetScaleX(at(0x17), 19.0f * k);
     layout.SetScaleY(at(0x1e), 9.0f * k);
     layout.SetScaleY(at(0x1f), 9.0f * k);
-    layout.SetY(root, (240.0f - centre) / 480.0f);
-  }
-  g_label = g_label_group = 0;
-  if (root != 0 && Relabelled(memory))
+    const float y = (240.0f - centre) / 480.0f;
+    layout.SetY(root, y);
+    return y;
+  };
+  if (g_window == Window::Small)
   {
-    const uint32_t group = Load(memory, root + CAST_GROUP), casts = Load(memory, group + 4);
-    g_label = casts + 0x38 * CAST_SIZE;
-    g_label_group = group;
-    // Its pattern read again on the next update, which takes its band.
-    StoreFloat(memory, g_label + CAST_PATTERN, UNSET_PATTERN);
+    auto mission = [](uint32_t i) { return (i >= 4 && i <= 9) || (i >= 0x24 && i <= 0x2c && i != 0x27) || i >= 0x3f; };
+    for (uint32_t i = 0; i < count; ++i)
+      layout.SetHidden(at(i), mission(i));
+    resize(-81.0f);
   }
+  else
+  {
+    // A button lower: Quit and the mission below it (their places in the
+    // game's layout, in pixels from the window's centre).
+    constexpr float BUTTON = 57.0f;
+    const float y = resize(BUTTON);
+    for (const auto& [i, from] : {std::pair{0x39u, 33.0f}, std::pair{4u, 82.0f}, std::pair{0x24u, 116.0f},
+                                  std::pair{0x25u, 100.0f}, std::pair{0x26u, 109.0f}, std::pair{0x28u, 72.0f},
+                                  std::pair{0x29u, 0.0f}, std::pair{0x3fu, 116.0f}})
+      layout.SetY(at(i), (from + BUTTON) / 480.0f);
+    // The small window's Quit button alone of its group, as Options where
+    // Quit was.
+    const uint32_t small = roots[1], small_count = Load(memory, Load(memory, small + CAST_GROUP)),
+                   small_casts = casts_of(small);
+    // Its root shown too: the large window's motion hides it.
+    for (uint32_t i = 0; i < small_count; ++i)
+      layout.SetHidden(small_casts + i * CAST_SIZE, i != 0 && (i < 0x25 || i > 0x2a));
+    layout.SetY(small, y);
+    g_large_root = root;
+    g_small_root = small;
+    layout.SetY(small_casts + 0x25 * CAST_SIZE, 33.0f / 480.0f);
+  }
+  // The labels' patterns read again on the next update, which takes their bands.
+  for (const RowLabel& row : Rows())
+    StoreFloat(memory, casts_of(roots[row.group]) + row.cast * CAST_SIZE + CAST_PATTERN, UNSET_PATTERN);
+  const RowLabel& options = Rows()[OptionsButton()];
+  g_label_group = Load(memory, roots[options.group] + CAST_GROUP);
+  g_label = casts_of(roots[options.group]) + options.cast * CAST_SIZE;
   return false;
 }

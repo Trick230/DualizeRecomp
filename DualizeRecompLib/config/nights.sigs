@@ -215,15 +215,28 @@ define CSD_CAST_SET_SCALE_Y @CsdCast_SetScaleY
 @PauseScene_Play 204 9421FFA0 154CCC8659924A8F
 nights_PauseVariant 4 387D0054 DCB4AB3CAC57F5FA at @PauseScene_Play+50 jump
 nights_PauseScenePlay 4 7FEAFB78 7F25E034F9306E17 at @PauseScene_Play+1E8 jump
+# The pause task's update (r31 the task), as it returns.
+@PauseTask_Update 1E4 9421FFE0 51D0F1629812BD86
+nights_PauseFollow 4 BBC10018 1DA8F9719C1BD051 at @PauseTask_Update+1D0 jump
 # A CSD cast's pattern turned into its quad's texture place (r3 the cast, r4
 # its info, r5 the scene, whose sub-images the pattern indexes).
 @CsdCast_PatternQuad 494 9421FEB0 994057A181464AC5
 nights_CsdPatternQuad 4 80040004 27D592AAA50C6895 at @CsdCast_PatternQuad+14 jump
 # The pause window's pad (r28 the task, r30 the button being added): the
-# large window's buttons added in a loop, then the setup returns 1.
+# large window's buttons added in a loop, each found by its name (r5 the names
+# table, r0 the name's place in it), then the setup returns 1.
 @PauseScene_Pad 17C 9421FFC0 AAB28F0ACFD4005E
+nights_PausePadName 4 7CA5002E 259B0B33066FFC20 at @PauseScene_Pad+78 jump
 nights_PausePadCount 4 2C1E0004 24596F9660FD5FFB at @PauseScene_Pad+C8 jump
+define NIGHTS_PAUSE_PAD_LOOP @PauseScene_Pad+5C
 define NIGHTS_PAUSE_PAD_DONE @PauseScene_Pad+D0
+# The pause window's buttons lit (r28 the button, its name as in the pad's
+# setup; r29 the cursor's): the large window's in a loop.
+@PauseScene_Highlight 1AC 9421FFC0 DC22488E94A81FD9
+nights_PauseHighlightName 4 7CA5002E 259B0B33066FFC20 at @PauseScene_Highlight+B0 jump
+nights_PauseHighlightCount 4 2C1C0004 35AC65966ACD5D51 at @PauseScene_Highlight+FC jump
+define NIGHTS_PAUSE_HIGHLIGHT_LOOP @PauseScene_Highlight+94
+define NIGHTS_PAUSE_HIGHLIGHT_DONE @PauseScene_Highlight+104
 # The stage's pause input (play.rso; r31 the controller: actions table at
 # 0x20, chosen action 0x24, cursor 0x2C): A pressed, its sound played.
 @PauseInput 114 9421FFE0 6C78ED3BFA16F4C3

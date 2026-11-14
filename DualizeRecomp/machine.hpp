@@ -73,6 +73,8 @@ public:
   // Savestates (CPU thread, between slices: see RequestSave/RequestLoad).
   bool SaveState(const std::filesystem::path& path, std::string* error);
   bool LoadState(const std::filesystem::path& path, std::string* error);
+  // Savestates loaded so far (CPU thread).
+  uint32_t StateLoads() const { return m_state_loads; }
   // Any thread: performed by the CPU thread at its next event boundary.
   void RequestSave(std::filesystem::path path);
   void RequestLoad(std::filesystem::path path);
@@ -182,6 +184,7 @@ private:
   std::array<std::atomic<bool>, AUTOMATION_PORTS> m_automation_active{};
   std::mutex m_automation_mutex;
   std::atomic<uint64_t> m_fields{0};
+  uint32_t m_state_loads = 0;
 
   std::atomic<bool> m_stop{false};
   std::atomic<bool> m_requests{false};
