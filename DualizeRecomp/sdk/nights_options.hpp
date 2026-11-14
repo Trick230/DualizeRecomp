@@ -41,10 +41,16 @@ inline std::u16string BigEndian(std::u16string_view text)
 // on up to `threads` threads: the game waits for the searches of MEM1 and
 // MEM2 (a search ahead of time, which it doesn't, takes fewer).
 std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n, uint32_t threads = 8);
+// The same for several needles in one pass over memory: each one's places.
+std::vector<std::vector<uint8_t*>> FindAllOf(uint8_t* data, size_t size, std::span<const std::span<const uint8_t>> needles,
+                                             uint32_t threads = 8);
 
 // Every copy of an English message's first line in MEM2, where the game keeps
 // its message data (the line ends the message, or a newline follows it).
 std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line, uint32_t threads = 8);
+// The same for several lines in one pass: each one's copies.
+std::vector<std::vector<uint8_t*>> FindMessageLinesOf(const Memory& memory, std::span<const std::u16string_view> lines,
+                                                      uint32_t threads = 8);
 // How many times the game has read a message file: copies of a message
 // found before it changes may be gone.
 uint32_t MessageReads();

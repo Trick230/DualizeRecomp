@@ -103,46 +103,73 @@ using dualize::nights::BigEndian;
 
 namespace dualize::nights
 {
-std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n, uint32_t most)
+std::vector<std::vector<uint8_t*>> FindAllOf(uint8_t* data, size_t size, std::span<const std::span<const uint8_t>> needles,
+                                             uint32_t most)
 {
-  std::vector<uint8_t*> found;
-  if (n == 0 || size < n)
+  // Each needle's screening bytes, and the places it can start at.
+  struct Screen
+  {
+    const uint8_t* needle;
+    size_t n, a, b, places;
+  };
+  std::vector<Screen> screens;
+  size_t common = SIZE_MAX;  // places every needle can start at
+  for (const std::span<const uint8_t> needle : needles)
+  {
+    const size_t n = needle.size();
+    if (n == 0 || size < n)
+    {
+      screens.push_back({needle.data(), n, 0, 0, 0});  // never found
+      continue;
+    }
+    size_t a = 0;
+    while (a + 1 < n && needle[a] == 0)
+      ++a;
+    size_t b = n - 1;
+    while (b > a && (needle[b] == 0 || needle[b] == needle[a]))
+      --b;
+    screens.push_back({needle.data(), n, a, b, size - n + 1});
+    common = std::min(common, size - n + 1);
+  }
+  std::vector<std::vector<uint8_t*>> found(needles.size());
+  if (common == SIZE_MAX)
     return found;
-  size_t a = 0;
-  while (a + 1 < n && needle[a] == 0)
-    ++a;
-  size_t b = n - 1;
-  while (b > a && (needle[b] == 0 || needle[b] == needle[a]))
-    --b;
-  const size_t places = size - n + 1;
+  const size_t places = std::ranges::max(screens, {}, &Screen::places).places;
   const uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 1u, std::max(most, 1u));
   const size_t step = (places + threads - 1) / threads;
-  std::vector<std::vector<uint8_t*>> parts(threads);
+  std::vector<std::vector<std::vector<uint8_t*>>> parts(threads, std::vector<std::vector<uint8_t*>>(screens.size()));
   const auto scan = [&](uint32_t part) {
-    const size_t to = std::min(places, (part + 1) * step);
-    size_t i = std::min(places, part * step);
-    std::vector<uint8_t*>& out = parts[part];
+    const size_t from = part * step;
+    size_t i = std::min(common, from);
 #ifdef __AVX2__
-    const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[a]));
-    const __m256i second = _mm256_set1_epi8(static_cast<char>(needle[b]));
+    const size_t to = std::min(common, (part + 1) * step);
     for (; i + 32 <= to; i += 32)
-    {
-      const __m256i at_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + a));
-      const __m256i at_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + b));
-      for (auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-               _mm256_and_si256(_mm256_cmpeq_epi8(at_a, first), _mm256_cmpeq_epi8(at_b, second))));
-           mask != 0; mask &= mask - 1)
+      for (size_t k = 0; k < screens.size(); ++k)
       {
-        uint8_t* at = data + i + static_cast<size_t>(std::countr_zero(mask));
-        if (std::memcmp(at, needle, n) == 0)
-          out.push_back(at);
+        const Screen& s = screens[k];
+        if (s.places == 0)
+          continue;
+        const __m256i at_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + s.a));
+        const __m256i at_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + s.b));
+        for (auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+                 _mm256_and_si256(_mm256_cmpeq_epi8(at_a, _mm256_set1_epi8(static_cast<char>(s.needle[s.a]))),
+                                  _mm256_cmpeq_epi8(at_b, _mm256_set1_epi8(static_cast<char>(s.needle[s.b]))))));
+             mask != 0; mask &= mask - 1)
+        {
+          uint8_t* at = data + i + static_cast<size_t>(std::countr_zero(mask));
+          if (std::memcmp(at, s.needle, s.n) == 0)
+            parts[part][k].push_back(at);
+        }
       }
-    }
 #endif
-    for (; i < to; ++i)
+    // The rest of the part, needle by needle (to its own last place).
+    for (size_t k = 0; k < screens.size(); ++k)
     {
-      if (data[i + a] == needle[a] && data[i + b] == needle[b] && std::memcmp(data + i, needle, n) == 0)
-        out.push_back(data + i);
+      const Screen& s = screens[k];
+      const size_t to = std::min(s.places, (part + 1) * step);
+      for (size_t j = std::max(i, std::min(s.places, from)); j < to; ++j)
+        if (data[j + s.a] == s.needle[s.a] && data[j + s.b] == s.needle[s.b] && std::memcmp(data + j, s.needle, s.n) == 0)
+          parts[part][k].push_back(data + j);
     }
   };
   std::vector<std::thread> pool;
@@ -151,33 +178,55 @@ std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle,
   scan(0);
   for (std::thread& thread : pool)
     thread.join();
-  for (const std::vector<uint8_t*>& part : parts)
-    found.insert(found.end(), part.begin(), part.end());
+  for (const auto& part : parts)
+    for (size_t k = 0; k < screens.size(); ++k)
+      found[k].insert(found[k].end(), part[k].begin(), part[k].end());
   return found;
 }
 
-// Messages are 2-byte aligned; the line ends at a terminator or a newline.
-std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line, uint32_t threads)
+std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n, uint32_t threads)
 {
-  std::vector<uint8_t*> found;
+  const std::span<const uint8_t> one[] = {{needle, n}};
+  return std::move(FindAllOf(data, size, one, threads)[0]);
+}
+
+// Messages are 2-byte aligned; the line ends at a terminator or a newline.
+std::vector<std::vector<uint8_t*>> FindMessageLinesOf(const Memory& memory, std::span<const std::u16string_view> lines,
+                                                      uint32_t threads)
+{
+  std::vector<std::vector<uint8_t*>> found(lines.size());
   uint8_t* const data = memory.Effective(0x90000000u, Memory::MEM2_SIZE);
-  if (data == nullptr || line.empty())
+  if (data == nullptr)
     return found;
   uint8_t* const end = data + Memory::MEM2_SIZE;
-  const std::u16string text = BigEndian(line);
-  const size_t bytes = text.size() * 2;
-  const uint8_t* after = data;  // a copy found ends here: the next starts after it
-  for (uint8_t* at : FindAll(data, Memory::MEM2_SIZE, reinterpret_cast<const uint8_t*>(text.data()), bytes, threads))
+  std::vector<std::u16string> texts;
+  std::vector<std::span<const uint8_t>> needles;
+  for (const std::u16string_view line : lines)
+    texts.push_back(BigEndian(line));
+  for (const std::u16string& text : texts)
+    needles.emplace_back(reinterpret_cast<const uint8_t*>(text.data()), text.size() * 2);
+  const std::vector<std::vector<uint8_t*>> places = FindAllOf(data, Memory::MEM2_SIZE, needles, threads);
+  for (size_t k = 0; k < lines.size(); ++k)
   {
-    if (at < after || (reinterpret_cast<uintptr_t>(at) & 1) != 0 || static_cast<size_t>(end - at) < bytes + 2)
-      continue;
-    if (at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A))
+    const size_t bytes = needles[k].size();
+    const uint8_t* after = data;  // a copy found ends here: the next starts after it
+    for (uint8_t* at : places[k])
     {
-      found.push_back(at);
-      after = at + bytes;
+      if (bytes == 0 || at < after || (reinterpret_cast<uintptr_t>(at) & 1) != 0 || static_cast<size_t>(end - at) < bytes + 2)
+        continue;
+      if (at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A))
+      {
+        found[k].push_back(at);
+        after = at + bytes;
+      }
     }
   }
   return found;
+}
+
+std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line, uint32_t threads)
+{
+  return std::move(FindMessageLinesOf(memory, {&line, 1}, threads)[0]);
 }
 }  // namespace dualize::nights
 
@@ -189,24 +238,35 @@ void RenameMessages(const Memory& memory)
 {
   uint8_t* const end = memory.Effective(0x90000000u, Memory::MEM2_SIZE) + Memory::MEM2_SIZE;
   const Language language = dualize::nights::GameLanguage(memory);
+  std::vector<const Message*> messages;
+  std::vector<std::u16string_view> lines;
   for (const Message& message : MESSAGES)
-  {
-    if (message.language != language)
-      continue;
-    const std::u16string to = BigEndian(message.to);
-    const size_t bytes = message.from.size() * 2;
-    for (uint8_t* at : dualize::nights::FindMessageLines(memory, message.from))
+    if (message.language == language)
     {
-      uint8_t* tail = at + bytes;
-      uint8_t* stop = tail;
-      while (stop + 1 < end && (stop[0] | stop[1]) != 0)
-        stop += 2;
-      const size_t tail_bytes = static_cast<size_t>(stop - tail);
-      const size_t to_bytes = to.size() * 2;
-      std::memcpy(at, to.data(), to_bytes);
-      std::memmove(at + to_bytes, tail, tail_bytes);
-      std::memset(at + to_bytes + tail_bytes, 0, bytes - to_bytes);
+      messages.push_back(&message);
+      lines.push_back(message.from);
     }
+  // All searched at once; renamed from the last copy back, as a rename moves
+  // what follows it in its message.
+  const std::vector<std::vector<uint8_t*>> found = dualize::nights::FindMessageLinesOf(memory, lines);
+  std::vector<std::pair<uint8_t*, const Message*>> copies;
+  for (size_t k = 0; k < messages.size(); ++k)
+    for (uint8_t* at : found[k])
+      copies.emplace_back(at, messages[k]);
+  std::ranges::sort(copies, std::greater{}, &std::pair<uint8_t*, const Message*>::first);
+  for (const auto& [at, message] : copies)
+  {
+    const std::u16string to = BigEndian(message->to);
+    const size_t bytes = message->from.size() * 2;
+    uint8_t* tail = at + bytes;
+    uint8_t* stop = tail;
+    while (stop + 1 < end && (stop[0] | stop[1]) != 0)
+      stop += 2;
+    const size_t tail_bytes = static_cast<size_t>(stop - tail);
+    const size_t to_bytes = to.size() * 2;
+    std::memcpy(at, to.data(), to_bytes);
+    std::memmove(at + to_bytes, tail, tail_bytes);
+    std::memset(at + to_bytes + tail_bytes, 0, bytes - to_bytes);
   }
 }
 

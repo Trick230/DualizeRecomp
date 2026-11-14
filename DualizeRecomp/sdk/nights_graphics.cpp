@@ -318,16 +318,16 @@ struct HelpMessage
   std::vector<Copy> Copies(const Memory& memory, Language language, uint32_t threads = 8) const
   {
     std::vector<Copy> found;
-    for (const std::u16string_view line : {lines[static_cast<size_t>(language)], others[static_cast<size_t>(language)]})
-    {
-      for (uint8_t* at : dualize::nights::FindMessageLines(memory, line, threads))
+    const std::u16string_view both[] = {lines[static_cast<size_t>(language)], others[static_cast<size_t>(language)]};
+    const std::vector<std::vector<uint8_t*>> places = dualize::nights::FindMessageLinesOf(memory, both, threads);
+    for (size_t k = 0; k < std::size(both); ++k)
+      for (uint8_t* at : places[k])
       {
         uint8_t* end = at;
         while ((end[0] | end[1]) != 0)
           end += 2;
-        found.push_back({at, {at, end}, line.size() * 2});
+        found.push_back({at, {at, end}, both[k].size() * 2});
       }
-    }
     return found;
   }
 
