@@ -60,16 +60,17 @@ else()
 endif()
 aurora_copy_runtime_dlls(DualizeRecomp)
 # The pipelines seen in play (scripts/pipeline_seed.py), merged into the
-# user's cache and compiled before the game starts.
-add_custom_command(TARGET DualizeRecomp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
-        "$<TARGET_FILE_DIR:DualizeRecomp>/initial_pipeline_cache.db")
-# Their shaders, compiled for every backend so play doesn't wait on DXC.
+# user's cache and compiled before the game starts, and their shaders,
+# compiled for every backend so play doesn't wait on DXC. Both are redone
+# whenever the seed changes, even when the executable doesn't relink.
 set(DUALIZE_SHADER_PACKS
+    "${CMAKE_CURRENT_BINARY_DIR}/initial_pipeline_cache.db"
     "${CMAKE_CURRENT_BINARY_DIR}/shaders_d3d12.bin"
     "${CMAKE_CURRENT_BINARY_DIR}/shaders_vulkan.bin")
 add_custom_command(OUTPUT ${DUALIZE_SHADER_PACKS}
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
+        "${CMAKE_CURRENT_BINARY_DIR}/initial_pipeline_cache.db"
     COMMAND aurora_shader_pack
         "${CMAKE_CURRENT_SOURCE_DIR}/resources/initial_pipeline_cache.db"
         "${CMAKE_CURRENT_BINARY_DIR}"
