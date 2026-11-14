@@ -363,14 +363,12 @@ Image Relabel(const Image& game, uint32_t scale, const LabelsFile& labels, const
 }
 
 constexpr uint32_t PAUSE_SCENE = 0x54, PAUSE_VARIANT = 0x60;
-// Set when the scene updated this frame.
-constexpr uint32_t PAUSE_UPDATED = 0x64;
 // The stage's pause controller: its actions (action, name: 8 bytes each), the
 // chosen action, the cursor.
 constexpr uint32_t PAUSE_ACTIONS = 0x20, PAUSE_ACTION = 0x24, PAUSE_CURSOR = 0x2C;
 constexpr uint32_t CAST_SIZE = 0x144, CAST_PATTERN = 0x40, CAST_GROUP = 0x84;
-// Its scale as animated (before the overrides).
-constexpr uint32_t CAST_SCALE_X = 0x38, CAST_SCALE_Y = 0x3C;
+// Its scale and colour as animated (before the overrides).
+constexpr uint32_t CAST_SCALE_X = 0x38, CAST_SCALE_Y = 0x3C, CAST_COLOR = 0x44;
 // A cast's pattern before its first update.
 constexpr float UNSET_PATTERN = -100000.0f;
 
@@ -963,25 +961,42 @@ extern "C" bool nights_PauseVariant(CPUState* ctx)
   return false;
 }
 
-// After the pause scene's update: the small window's root (holding the
-// borrowed Options button) takes the large root's animated scale, so the
-// button opens and closes with the window (a frame late: the scene's next
-// update applies it).
-extern "C" bool nights_PauseFollow(CPUState* ctx)
+// The pause task whose update is running (its scene animated only there), 0
+// outside it: the casts below are known alive only then.
+uint32_t g_updating = 0;
+
+// The pause task's update begins (r3 the task) and ends (r31 the task).
+extern "C" bool nights_PauseUpdateBegin(CPUState* ctx)
 {
-  const uint32_t task = ctx->gpr[31];
-  if (g_window != Window::Large || task != g_task || g_large_root == 0)
+  g_updating = ctx->gpr[3];
+  return false;
+}
+extern "C" bool nights_PauseUpdateEnd(CPUState*)
+{
+  g_updating = 0;
+  return false;
+}
+
+// A scene's cast group about to be animated (r3 the group), its groups in
+// order: when it is the small window's, in the large window (holding the
+// borrowed Options button), its root takes the large root's scale and colour
+// the large group was just animated to, so the button opens and closes with
+// the window on the same frame.
+extern "C" bool nights_PauseGroup(CPUState* ctx)
+{
+  if (g_updating == 0 || g_updating != g_task || g_window != Window::Large || g_small_root == 0)
     return false;
   auto& cpu = CpuOf(ctx);
+  const Memory& memory = GetMachine(cpu).memory;
+  if (ctx->gpr[3] != Load(memory, g_small_root + CAST_GROUP))
+    return false;
   // A savestate loaded since the scene played: its casts may be elsewhere.
   if (GetMachine(cpu).StateLoads() != g_state_loads)
     return false;
-  const Memory& memory = GetMachine(cpu).memory;
-  if (memory.Effective(task + PAUSE_UPDATED, 1)[0] == 0)
-    return false;
-  Layout layout(cpu, ctx, task + PAUSE_SCENE);
+  Layout layout(cpu, ctx, g_task + PAUSE_SCENE);
   layout.SetScaleX(g_small_root, LoadFloat(memory, g_large_root + CAST_SCALE_X));
   layout.SetScaleY(g_small_root, LoadFloat(memory, g_large_root + CAST_SCALE_Y));
+  layout.SetColor(g_small_root, Load(memory, g_large_root + CAST_COLOR));
   return false;
 }
 

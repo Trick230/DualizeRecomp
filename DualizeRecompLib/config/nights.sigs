@@ -215,9 +215,14 @@ define CSD_CAST_SET_SCALE_Y @CsdCast_SetScaleY
 @PauseScene_Play 204 9421FFA0 154CCC8659924A8F
 nights_PauseVariant 4 387D0054 DCB4AB3CAC57F5FA at @PauseScene_Play+50 jump
 nights_PauseScenePlay 4 7FEAFB78 7F25E034F9306E17 at @PauseScene_Play+1E8 jump
-# The pause task's update (r31 the task), as it returns.
+# The pause task's update (r3 the task) as it begins, and as it returns (r31).
 @PauseTask_Update 1E4 9421FFE0 51D0F1629812BD86
-nights_PauseFollow 4 BBC10018 1DA8F9719C1BD051 at @PauseTask_Update+1D0 jump
+nights_PauseUpdateBegin 4 7C0802A6 86CB0230F97D9975 at @PauseTask_Update+4
+nights_PauseUpdateEnd 4 BBC10018 1DA8F9719C1BD051 at @PauseTask_Update+1D0
+# A CSD scene's cast group animated to a frame (r3 the group), the scene's
+# groups in order.
+@CsdGroup_Animate A4 9421FFD0 796138DD2356F9F1
+nights_PauseGroup 4 7C0802A6 86CB0230F97D9975 at @CsdGroup_Animate+4
 # A CSD cast's pattern turned into its quad's texture place (r3 the cast, r4
 # its info, r5 the scene, whose sub-images the pattern indexes).
 @CsdCast_PatternQuad 494 9421FEB0 994057A181464AC5
