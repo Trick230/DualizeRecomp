@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <queue>
 #include <string>
 #include <thread>
@@ -846,47 +847,66 @@ std::vector<uint8_t> Draw(const Text& text, uint32_t& mips, uint32_t& width, uin
 
 std::vector<Text> g_texts;
 std::array<std::array<bool, LANGUAGES.size()>, FILES.size()> g_kept{};
-std::atomic<bool> g_ready = false, g_read = false;
+std::atomic<bool> g_ready = false;
+// Each text's state: queued, then read by a reader or by the first draw that
+// needs it, whichever claims it first, then done.
+enum : uint8_t
+{
+  QUEUED,
+  READING,
+  DONE,
+};
+std::unique_ptr<std::atomic<uint8_t>[]> g_state;
+std::atomic<size_t> g_done = 0, g_lines = 0, g_lines_read = 0;
 std::jthread g_reader;  // last: stops before the rest goes
 
-// Reads every kept text's lines and draws its sharp copy, a few texts at a
-// time (off the render thread: a menu's copies take tens of ms).
+bool Claim(size_t t)
+{
+  uint8_t queued = QUEUED;
+  return g_state[t].compare_exchange_strong(queued, READING);
+}
+
+// Reads a claimed text's lines and draws its sharp copy.
+void ReadText(size_t t, std::stop_token stop)
+{
+  Text& text = g_texts[t];
+  Grid m(static_cast<int>(text.image.width), static_cast<int>(text.image.height));
+  for (size_t i = 0; i < m.v.size(); ++i)
+    m.v[i] = std::clamp((text.image.rgba[i * 4] / 255.0f - 0.15f) / 0.85f, 0.0f, 1.0f);
+  for (const Line* line : text.lines)
+  {
+    if (stop.stop_requested())
+      break;
+    ++g_lines;
+    if (auto r = ReadLine(*line, text.image, m, stop))
+    {
+      text.reads.push_back(std::move(*r));
+      ++g_lines_read;
+    }
+  }
+  if (!stop.stop_requested())
+    text.texels = Draw(text, text.mips, text.width, text.height);
+  text.image = {};
+  g_state[t] = DONE;
+  g_state[t].notify_all();
+  if (++g_done == g_texts.size() && g_lines_read != g_lines && !stop.stop_requested())
+    std::fprintf(stderr, "[2p text] %zu of %zu lines read; the rest keep the game's lettering\n", g_lines_read.load(),
+                 g_lines.load());
+}
+
+// Reads every kept text a few at a time, off the render thread (a menu's
+// copies take tens of ms).
 void ReadTexts(std::stop_token stop)
 {
-  std::atomic<size_t> next = 0, read = 0, lines = 0;
-  {
-    std::vector<std::jthread> workers;
-    const unsigned count = std::clamp(std::thread::hardware_concurrency() / 2, 1u, READERS);
-    for (unsigned w = 0; w < count; ++w)
-      workers.emplace_back([&] {
-        for (size_t t; !stop.stop_requested() && (t = next++) < g_texts.size();)
-        {
-          Text& text = g_texts[t];
-          Grid m(static_cast<int>(text.image.width), static_cast<int>(text.image.height));
-          for (size_t i = 0; i < m.v.size(); ++i)
-            m.v[i] = std::clamp((text.image.rgba[i * 4] / 255.0f - 0.15f) / 0.85f, 0.0f, 1.0f);
-          for (const Line* line : text.lines)
-          {
-            if (stop.stop_requested())
-              break;
-            ++lines;
-            if (auto r = ReadLine(*line, text.image, m, stop))
-            {
-              text.reads.push_back(std::move(*r));
-              ++read;
-            }
-          }
-          if (stop.stop_requested())
-            break;
-          text.texels = Draw(text, text.mips, text.width, text.height);
-          text.image = {};
-        }
-      });
-  }
-  if (read != lines && !stop.stop_requested())
-    std::fprintf(stderr, "[2p text] %zu of %zu lines read; the rest keep the game's lettering\n", read.load(), lines.load());
-  g_read = true;
-  g_read.notify_all();
+  std::atomic<size_t> next = 0;
+  std::vector<std::jthread> workers;
+  const unsigned count = std::clamp(std::thread::hardware_concurrency() / 2, 1u, READERS);
+  for (unsigned w = 0; w < count; ++w)
+    workers.emplace_back([&] {
+      for (size_t t; !stop.stop_requested() && (t = next++) < g_texts.size();)
+        if (Claim(t))
+          ReadText(t, stop);
+    });
 }
 
 // The image four times larger, sharpened, each line read set anew.
@@ -974,6 +994,7 @@ void Load2PText(const std::filesystem::path& game)
         if (!bytes.empty())
           Keep2PText(file, bytes);
       }
+  g_state = std::make_unique<std::atomic<uint8_t>[]>(g_texts.size());
   g_ready = true;
   g_reader = std::jthread(ReadTexts);
 }
@@ -982,11 +1003,15 @@ bool Provide2PText(const aurora::texture::TextureSource& source)
 {
   if (source.format != CMPR || !g_ready)
     return false;
-  for (Text& text : g_texts)
+  for (size_t t = 0; t < g_texts.size(); ++t)
   {
+    Text& text = g_texts[t];
     if (text.provided || !(text.key == source.key))
       continue;
-    g_read.wait(false);
+    if (Claim(t))
+      ReadText(t, {});
+    for (uint8_t state; (state = g_state[t].load()) != DONE;)
+      g_state[t].wait(state);
     text.provided = true;
     const bool drawn = !text.texels.empty();
     if (drawn)
