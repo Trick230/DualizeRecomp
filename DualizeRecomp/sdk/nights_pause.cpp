@@ -25,9 +25,9 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
-#include <functional>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -285,10 +285,15 @@ void Place(Image& image, uint32_t scale, uint32_t band, const Lettering& l, floa
   const int offset = static_cast<int>(std::lround(anchor * SUB - (l.ink0 + (l.ink1 - l.ink0) * align)));
   const uint32_t columns = SUB / scale;
   const double rows = static_cast<double>(l.height) / (BAND * scale);
+  // Only the texels over the ink: the others would keep what they have.
+  const int lo = l.ink0 + offset, hi = l.ink1 + offset, wide = static_cast<int>(LABELS_WIDTH * scale);
+  const int step = static_cast<int>(columns);
+  const auto first = static_cast<uint32_t>(std::clamp(lo >= 0 ? lo / step : 0, 0, wide));
+  const auto last = static_cast<uint32_t>(std::clamp((hi + step - 1) / step, 0, wide));
   for (uint32_t r = 0; r < BAND * scale; ++r)
   {
     const double y0 = r * rows, y1 = y0 + rows;
-    for (uint32_t tx = 0; tx < LABELS_WIDTH * scale; ++tx)
+    for (uint32_t tx = first; tx < last; ++tx)
     {
       double sum = 0;
       for (auto y = static_cast<int>(y0); y < l.height && y < y1; ++y)
@@ -561,14 +566,19 @@ void Change(Machine& machine, int option, int direction, bool wrap)
     machine.SetGraphics(settings);
 }
 
-// `text` in the rows' lettering, pressed narrower if wider than `room`.
-Lettering Fitted(std::string_view text, float room)
+// `text` in the rows' lettering, pressed narrower if wider than `room`; kept
+// while the page is up, as both sizes and every redraw letter the same texts.
+std::map<std::pair<std::string, float>, Lettering> g_fitted;
+const Lettering& Fitted(std::string_view text, float room)
 {
+  auto [kept, added] = g_fitted.try_emplace({std::string(text), room});
+  if (!added)
+    return kept->second;
   const std::u32string letters = Utf32(text);
   Lettering l = Letter(letters, ROW_CAP, ROW_BASELINE, NARROW / STRETCH);
   if (l.Width() > room)
     l = Letter(letters, ROW_CAP, ROW_BASELINE, NARROW / STRETCH * room / l.Width());
-  return l;
+  return kept->second = std::move(l);
 }
 
 void DrawRow(Image& image, uint32_t scale, uint32_t band, const PageRow& row, Language language)
@@ -648,11 +658,10 @@ std::vector<uint8_t*> FindTextures(const Memory& memory, const std::vector<uint8
   constexpr size_t KEY = 1024, KEY_BYTES = 1024;  // texel rows 4-7: Continue's
   constexpr ptrdiff_t TEXTURE_ALIGN = 32;
   std::vector<uint8_t*> found;
-  const std::boyer_moore_horspool_searcher search(encoded.begin() + KEY, encoded.begin() + KEY + KEY_BYTES);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
-    for (uint8_t* at = data; (at = std::search(at, data + size, search)) != data + size; ++at)
+    for (uint8_t* at : dualize::nights::FindAll(data, size, encoded.data() + KEY, KEY_BYTES))
       if (static_cast<size_t>(at - data) >= KEY && (at - KEY - data) % TEXTURE_ALIGN == 0 &&
           static_cast<size_t>(data + size - (at - KEY)) >= encoded.size())
         found.push_back(at - KEY);
@@ -729,6 +738,7 @@ void ClosePage(CPUState* ctx)
   if (g_page.key)
     aurora::texture::remove_memory_replacement(*g_page.key);
   g_page = {};
+  g_fitted.clear();
   Stretch(ctx, 1.0f);
 }
 }  // namespace
