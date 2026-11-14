@@ -11,6 +11,11 @@ nights_ModeOptionCtor 160 9421FFC0 A6834A5B964A1AB5
 # first when the game has loaded them again.
 @Help_Set 5C 9421FFE0 23E9C7EAAB5A3E3C
 nights_HelpSet 4 9421FFE0 D9FC220F5E082681 at @Help_Set jump
+# File Select's update (title module): in its choosing state, the check that
+# no file is animating (r3), then the help object and its message set.
+@FileSelect_Update 718 9421FF80 BE57568E7F7CB4B1
+nights_FileSelectHelp 4 2C030000 B3BE349621357818 at @FileSelect_Update+3A8
+define NIGHTS_FILE_SELECT_HELP addr(@FileSelect_Update+3B0,3B8)
 # Where the update ends when nothing was chosen.
 define NIGHTS_MODE_OPTION_UPDATE_DONE @ModeOption_Update+AC8
 

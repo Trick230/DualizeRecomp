@@ -700,6 +700,28 @@ extern "C" bool nights_HelpSet(CPUState* ctx)
   return false;
 }
 
+// File Select's choosing state, where it sets its help line only while no
+// file is animating (r3 0 while one is): a file's animation on a cursor move
+// outlasts the line's 10 updates, so the game takes the line away and sets it
+// again a frame later (a blank frame). Keeps the line's own countdown full
+// while a file animates, as setting the same message would. Declines.
+extern "C" bool nights_FileSelectHelp(CPUState* ctx)
+{
+  constexpr uint32_t HELP_LINE = 0x4, HELP_COUNTDOWN = 0x1C, HELP_MESSAGE = 0x20;
+  constexpr uint32_t FILE_SELECT_HELP = 6000, HELP_UPDATES = 10;
+  if (ctx->gpr[3] != 0)
+    return false;
+  Memory& memory = GetMachine(CpuOf(ctx)).memory;
+  const uint32_t help = dualize::Load32(memory.Effective(NIGHTS_FILE_SELECT_HELP, 4));
+  const uint32_t line = help ? dualize::Load32(memory.Effective(help + HELP_LINE, 4)) : 0;
+  if (line == 0)
+    return false;
+  uint8_t* state = memory.Effective(line + HELP_COUNTDOWN, 8);
+  if (dualize::Load32(state) != 0 && dualize::Load32(state + 4) == FILE_SELECT_HELP)
+    dualize::Store32(state, HELP_UPDATES);
+  return false;
+}
+
 // A screen's layout animation (its holder at `holder`): the animation the
 // holder points to, its current frame (two copies) and its last frame.
 constexpr uint32_t ANIMATION_FRAME = 0x90, ANIMATION_PREVIOUS_FRAME = 0x94, ANIMATION_END = 0xA0;
