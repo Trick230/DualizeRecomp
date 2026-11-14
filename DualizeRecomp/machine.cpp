@@ -3,6 +3,7 @@
 #include "boot.hpp"
 #include "kernel/ios/directory_disc.hpp"
 #include "profiler.hpp"
+#include "sdk/nights_options.hpp"
 
 #include <aurora/fifo.h>
 
@@ -196,6 +197,7 @@ Machine::Machine(MachineConfig config_)
 
 Machine::~Machine()
 {
+  dualize::nights::StopPreparingOptionList();
   // Audio and gamepads first: the renderer's shutdown ends with SDL_Quit,
   // which frees their streams and devices under them.
   m_gamepads.Stop();
@@ -215,7 +217,7 @@ bool Machine::Start(std::string* error)
   std::shared_ptr<ios::Disc> opened = ios::OpenDirectoryDisc(config.game, error);
   if (!opened)
     return false;
-  PatchNightsDisc(*opened, config.game);
+  PatchNightsDisc(*this, *opened, config.game);
   disc = std::move(opened);
   if (!cpu.AttachModule(config.idle_pc, config.rso_list, error))
     return false;

@@ -35,7 +35,12 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 namespace
 {
@@ -98,8 +103,61 @@ using dualize::nights::BigEndian;
 
 namespace dualize::nights
 {
+std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n, uint32_t most)
+{
+  std::vector<uint8_t*> found;
+  if (n == 0 || size < n)
+    return found;
+  size_t a = 0;
+  while (a + 1 < n && needle[a] == 0)
+    ++a;
+  size_t b = n - 1;
+  while (b > a && (needle[b] == 0 || needle[b] == needle[a]))
+    --b;
+  const size_t places = size - n + 1;
+  const uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 1u, std::max(most, 1u));
+  const size_t step = (places + threads - 1) / threads;
+  std::vector<std::vector<uint8_t*>> parts(threads);
+  const auto scan = [&](uint32_t part) {
+    const size_t to = std::min(places, (part + 1) * step);
+    size_t i = std::min(places, part * step);
+    std::vector<uint8_t*>& out = parts[part];
+#ifdef __AVX2__
+    const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[a]));
+    const __m256i second = _mm256_set1_epi8(static_cast<char>(needle[b]));
+    for (; i + 32 <= to; i += 32)
+    {
+      const __m256i at_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + a));
+      const __m256i at_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + b));
+      for (auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+               _mm256_and_si256(_mm256_cmpeq_epi8(at_a, first), _mm256_cmpeq_epi8(at_b, second))));
+           mask != 0; mask &= mask - 1)
+      {
+        uint8_t* at = data + i + static_cast<size_t>(std::countr_zero(mask));
+        if (std::memcmp(at, needle, n) == 0)
+          out.push_back(at);
+      }
+    }
+#endif
+    for (; i < to; ++i)
+    {
+      if (data[i + a] == needle[a] && data[i + b] == needle[b] && std::memcmp(data + i, needle, n) == 0)
+        out.push_back(data + i);
+    }
+  };
+  std::vector<std::thread> pool;
+  for (uint32_t part = 1; part < threads; ++part)
+    pool.emplace_back(scan, part);
+  scan(0);
+  for (std::thread& thread : pool)
+    thread.join();
+  for (const std::vector<uint8_t*>& part : parts)
+    found.insert(found.end(), part.begin(), part.end());
+  return found;
+}
+
 // Messages are 2-byte aligned; the line ends at a terminator or a newline.
-std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line)
+std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view line, uint32_t threads)
 {
   std::vector<uint8_t*> found;
   uint8_t* const data = memory.Effective(0x90000000u, Memory::MEM2_SIZE);
@@ -107,25 +165,17 @@ std::vector<uint8_t*> FindMessageLines(const Memory& memory, std::u16string_view
     return found;
   uint8_t* const end = data + Memory::MEM2_SIZE;
   const std::u16string text = BigEndian(line);
-  const auto* needle = reinterpret_cast<const uint8_t*>(text.data());
   const size_t bytes = text.size() * 2;
-  uint8_t* at = data;
-  while (static_cast<size_t>(end - at) >= bytes + 2)
+  const uint8_t* after = data;  // a copy found ends here: the next starts after it
+  for (uint8_t* at : FindAll(data, Memory::MEM2_SIZE, reinterpret_cast<const uint8_t*>(text.data()), bytes, threads))
   {
-    // Keyed on the first character's low byte: the high byte of big-endian
-    // UTF-16 text is 0, as is most of MEM2, so a search for it stops everywhere.
-    uint8_t* low = static_cast<uint8_t*>(std::memchr(at + 1, needle[1], static_cast<size_t>(end - at) - bytes - 2));
-    if (low == nullptr)
-      break;
-    at = low - 1;
-    const bool line_end = at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A);
-    if ((reinterpret_cast<uintptr_t>(at) & 1) == 0 && line_end && std::memcmp(at, needle, bytes) == 0)
+    if (at < after || (reinterpret_cast<uintptr_t>(at) & 1) != 0 || static_cast<size_t>(end - at) < bytes + 2)
+      continue;
+    if (at[bytes] == 0 && (at[bytes + 1] == 0 || at[bytes + 1] == 0x0A))
     {
       found.push_back(at);
-      at += bytes;
+      after = at + bytes;
     }
-    else
-      ++at;
   }
   return found;
 }
@@ -613,10 +663,11 @@ void KeepTitles(const std::filesystem::path& game, std::span<const uint8_t> engl
 
 namespace dualize
 {
-void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
+void PatchNightsDisc(const Machine& machine, ios::Disc& disc, const std::filesystem::path& game)
 {
   disc.CountReads(game / MESSAGE_FOLDER, &g_message_reads);
   nights::WatchUiImages(disc, game);
+  nights::PrepareOptionList(machine);
   nights::PatchPauseLabels(disc, game);
   nights::LoadMessageFont(game);
   {
@@ -667,6 +718,11 @@ void PatchNightsDisc(ios::Disc& disc, const std::filesystem::path& game)
     disc.OverrideFile(path, std::move(bytes));
   }
   nights::Load2PText(game);
+}
+
+uint32_t nights::MessageReads()
+{
+  return g_message_reads.load(std::memory_order_relaxed);
 }
 }  // namespace dualize
 

@@ -66,6 +66,8 @@ std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_read;
 unsigned g_listing = 0;  // files read whose images aren't listed yet
 uint64_t g_held = 0, g_order = 0;
 bool g_watching = false;
+void (*g_also)(const std::filesystem::path&, void*) = nullptr;
+void* g_also_data = nullptr;
 std::vector<std::jthread> g_workers;  // last: stop before the rest goes
 
 std::vector<uint8_t> ReadFile(const std::filesystem::path& path)
@@ -83,14 +85,18 @@ uint32_t Be32(const uint8_t* p)
 void OnRead(const std::filesystem::path& file, void*)
 {
   const auto now = std::chrono::steady_clock::now();
-  std::lock_guard lock(g_mutex);
-  auto [it, added] = g_read.try_emplace(file.generic_string(), now);
-  if (!added && now - it->second < SAME_LOAD)
-    return;
-  it->second = now;
-  g_files.push_back(file);
-  ++g_listing;
-  g_changed.notify_all();
+  {
+    std::lock_guard lock(g_mutex);
+    auto [it, added] = g_read.try_emplace(file.generic_string(), now);
+    if (!added && now - it->second < SAME_LOAD)
+      return;
+    it->second = now;
+    g_files.push_back(file);
+    ++g_listing;
+    g_changed.notify_all();
+  }
+  if (g_also != nullptr)
+    g_also(file, g_also_data);
 }
 
 // Under the lock.
@@ -248,6 +254,12 @@ void WatchUiImages(ios::Disc& disc, const std::filesystem::path& game)
   for (unsigned w = 0; w < count; ++w)
     g_workers.emplace_back(Work);
   g_watching = true;
+}
+
+void AlsoOnUiFileRead(void (*listener)(const std::filesystem::path& file, void* data), void* data)
+{
+  g_also = listener;
+  g_also_data = data;
 }
 
 bool ProvideUiImage(const aurora::texture::TextureSource& source)

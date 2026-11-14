@@ -22,6 +22,7 @@
 #include "sdk/csd_layout.hpp"
 #include "sdk/nights_options.hpp"
 #include "sdk/nights_text.hpp"
+#include "sdk/nights_ui_images.hpp"
 
 #include "cpu/cpu.hpp"
 #include "machine.hpp"
@@ -34,14 +35,20 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #pragma clang diagnostic push
@@ -308,19 +315,20 @@ struct HelpMessage
   };
   std::vector<Copy> copies;
 
-  void Find(const Memory& memory, Language language)
+  std::vector<Copy> Copies(const Memory& memory, Language language, uint32_t threads = 8) const
   {
-    copies.clear();
+    std::vector<Copy> found;
     for (const std::u16string_view line : {lines[static_cast<size_t>(language)], others[static_cast<size_t>(language)]})
     {
-      for (uint8_t* at : dualize::nights::FindMessageLines(memory, line))
+      for (uint8_t* at : dualize::nights::FindMessageLines(memory, line, threads))
       {
         uint8_t* end = at;
         while ((end[0] | end[1]) != 0)
           end += 2;
-        copies.push_back({at, {at, end}, line.size() * 2});
+        found.push_back({at, {at, end}, line.size() * 2});
       }
     }
+    return found;
   }
 
   void Write(std::u16string_view text)
@@ -438,61 +446,23 @@ const LabelFont& ValueLettering()
   return font;
 }
 
-// Every place `needle` is at in [data, data + size), in order. Two of its
-// bytes (non-zero ones: much of memory is zeros) screen 32 places at once,
-// on a few threads: the page searches all of MEM1 and MEM2 while the game
-// waits for it.
-std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n)
+// Every copy of the labels texture in `language` the screen loaded (by its
+// words' rows, as the rows above are drawn over). Safe off the CPU thread.
+std::vector<uint8_t*> SearchLabels(const Memory& memory, Language language, uint32_t threads = 8)
 {
-  std::vector<uint8_t*> found;
-  if (n == 0 || size < n)
-    return found;
-  size_t a = 0;
-  while (a + 1 < n && needle[a] == 0)
-    ++a;
-  size_t b = n - 1;
-  while (b > a && (needle[b] == 0 || needle[b] == needle[a]))
-    --b;
-  const size_t places = size - n + 1;
-  const uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
-  const size_t step = (places + threads - 1) / threads;
-  std::vector<std::vector<uint8_t*>> parts(threads);
-  const auto scan = [&](uint32_t part) {
-    const size_t to = std::min(places, (part + 1) * step);
-    size_t i = std::min(places, part * step);
-    std::vector<uint8_t*>& out = parts[part];
-#ifdef __AVX2__
-    const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[a]));
-    const __m256i second = _mm256_set1_epi8(static_cast<char>(needle[b]));
-    for (; i + 32 <= to; i += 32)
+  std::vector<uint8_t*> copies;
+  const size_t before = WORDS_FIRST_TILE_ROW * TILE_ROW_BYTES;
+  const uint8_t* words = g_page.labels_encoded[static_cast<size_t>(language)].data() + before;
+  for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
+  {
+    uint8_t* data = memory.Effective(base, size);
+    for (uint8_t* found : dualize::nights::FindAll(data, size, words, WORDS_TILE_ROWS * TILE_ROW_BYTES, threads))
     {
-      const __m256i at_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + a));
-      const __m256i at_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + b));
-      for (auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-               _mm256_and_si256(_mm256_cmpeq_epi8(at_a, first), _mm256_cmpeq_epi8(at_b, second))));
-           mask != 0; mask &= mask - 1)
-      {
-        uint8_t* at = data + i + static_cast<size_t>(std::countr_zero(mask));
-        if (std::memcmp(at, needle, n) == 0)
-          out.push_back(at);
-      }
+      if (static_cast<size_t>(found - data) >= before)
+        copies.push_back(found - before);
     }
-#endif
-    for (; i < to; ++i)
-    {
-      if (data[i + a] == needle[a] && data[i + b] == needle[b] && std::memcmp(data + i, needle, n) == 0)
-        out.push_back(data + i);
-    }
-  };
-  std::vector<std::thread> pool;
-  for (uint32_t part = 1; part < threads; ++part)
-    pool.emplace_back(scan, part);
-  scan(0);
-  for (std::thread& thread : pool)
-    thread.join();
-  for (const std::vector<uint8_t*>& part : parts)
-    found.insert(found.end(), part.begin(), part.end());
-  return found;
+  }
+  return copies;
 }
 
 // The labels texture of the page's language where the screen loaded it (its
@@ -509,17 +479,8 @@ uint8_t* FindLabels(const Memory& memory)
         return std::memcmp(copy + before, words, words_bytes) == 0;
       }))
     return g_page.labels_found.front();
-  g_page.labels_found.clear();
+  g_page.labels_found = SearchLabels(memory, g_page.language);
   g_page.labels_found_language = g_page.language;
-  for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
-  {
-    uint8_t* data = memory.Effective(base, size);
-    for (uint8_t* found : FindAll(data, size, words, words_bytes))
-    {
-      if (static_cast<size_t>(found - data) >= before)
-        g_page.labels_found.push_back(found - before);
-    }
-  }
   return g_page.labels_found.empty() ? nullptr : g_page.labels_found.front();
 }
 
@@ -547,7 +508,7 @@ const std::vector<uint8_t*>& FindTitle(const Memory& memory)
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
-    for (uint8_t* at : FindAll(data, size, title.data() + KEY, KEY_BYTES))
+    for (uint8_t* at : dualize::nights::FindAll(data, size, title.data() + KEY, KEY_BYTES))
     {
       if (static_cast<size_t>(at - data) >= KEY && static_cast<size_t>(data + size - (at - KEY)) >= title.size() &&
           std::memcmp(at - KEY, title.data(), title.size()) == 0)
@@ -727,46 +688,58 @@ constexpr std::array<std::array<std::string_view, 2>, dualize::nights::LANGUAGE_
 // The languages' names as the game writes them.
 constexpr std::array<std::string_view, 6> LANGUAGE_NAMES{"日本語", "English", "Français", "Español", "Deutsch", "Italiano"};
 
-// The list's four lines, from option `top` on: each label (pressed narrower
-// when too long), and its value in its value line, centred in the cell its
-// box's word shows (pressed narrower when too long), both in the game's
-// language. The texture gets the game's own lettering where it has the same
-// words; the renderer draws it from a copy SHARP_SCALE times larger, every
-// word set by the face at that size (the Japanese ON and OFF, which it lacks,
-// from the texture's, sharpened). A row with no value has its box hidden.
-void DrawRows(CPUState* ctx, uint32_t screen)
+// A value's words as the face sets them; none for a word only the texture has.
+std::optional<std::u32string> ValueText(std::string_view value, Language language)
 {
-  if (g_page.labels_in_ram == nullptr)
-    return;
-  const Machine& machine = GetMachine(CpuOf(ctx));
-  const Language language = g_page.language;
-  const auto index = static_cast<size_t>(language);
-  const Image& source = *g_page.labels[index];
-  Image image = source;
+  if (value == "ON" || value == "OFF")
+  {
+    const std::string_view word = SWITCH_WORDS[static_cast<size_t>(language)][value == "ON" ? 0 : 1];
+    return word.empty() ? std::nullopt : std::optional(Utf32(word));
+  }
+  if (const auto it = std::ranges::find(LANGUAGES, value); it != LANGUAGES.end())
+    return Utf32(LANGUAGE_NAMES[static_cast<size_t>(it - LANGUAGES.begin())]);
+  return Utf32(dualize::nights::Translate(value, language));
+}
+
+void DrawLabel(Image& target, uint32_t scale, int row, std::string_view label, Language language, uint8_t level)
+{
+  const std::u32string text = Utf32(dualize::nights::Translate(label, language));
+  const float width = LabelLettering().Width(text), room = LABEL_RIGHT - LABEL_X;
+  LabelLettering().Draw(target, static_cast<uint32_t>(row), LABEL_BASELINE, text, LABEL_X,
+                        width > room ? room / width : 1.0f, level, scale);
+}
+
+void DrawValue(Image& target, uint32_t scale, int row, std::u32string_view value, uint8_t level)
+{
+  const float squeeze = std::min(1.0f, VALUE_ROOM / ValueLettering().Width(value));
+  ValueLettering().Draw(target, VALUE_LINE + static_cast<uint32_t>(row), VALUE_BASELINE, value,
+                        (VALUE_WIDTH - ValueLettering().Width(value, squeeze)) / 2, squeeze, level, scale);
+}
+
+// The labels texture with rows drawn: as the game's memory gets it, and the
+// renderer's sharp copy of it (made apart, as it takes most of the time).
+struct Drawn
+{
+  Language language = Language::COUNT;
+  std::array<Row, ROWS> rows;
+  Image image;
+  std::vector<uint8_t> bytes;  // the whole texture, encoded
+  aurora::texture::TextureSourceKey key{};
+  std::vector<uint8_t> sharp;  // its mips; none: not made
+  uint32_t sharp_width = 0, sharp_height = 0, sharp_mips = 0;
+};
+
+// The list's four lines over `base` (the texture's bytes): each label
+// (pressed narrower when too long), and its value in its value line, centred
+// in the cell its box's word shows (pressed narrower when too long), both in
+// `language`. The texture gets the game's own lettering where it has the same
+// words. Safe off the CPU thread: it reads only what the disc gave at boot.
+Drawn Compose(Language language, const std::array<Row, ROWS>& rows, const uint8_t* base)
+{
+  Drawn drawn{.language = language, .rows = rows};
+  const Image& source = *g_page.labels[static_cast<size_t>(language)];
+  Image& image = drawn.image = source;
   std::fill_n(image.rgba.begin(), static_cast<size_t>(DRAWN_LINES) * LINE * WIDTH * 4, 0);
-  const std::array<Row, ROWS> rows = RowsShown(machine);
-  const auto draw_label = [&](Image& target, uint32_t scale, int row, uint8_t level) {
-    const std::u32string label = Utf32(dualize::nights::Translate(rows[row].label, language));
-    const float width = LabelLettering().Width(label), room = LABEL_RIGHT - LABEL_X;
-    LabelLettering().Draw(target, static_cast<uint32_t>(row), LABEL_BASELINE, label, LABEL_X,
-                          width > room ? room / width : 1.0f, level, scale);
-  };
-  const auto draw_value = [&](Image& target, uint32_t scale, int row, std::u32string_view value, uint8_t level) {
-    const float squeeze = std::min(1.0f, VALUE_ROOM / ValueLettering().Width(value));
-    ValueLettering().Draw(target, VALUE_LINE + static_cast<uint32_t>(row), VALUE_BASELINE, value,
-                          (VALUE_WIDTH - ValueLettering().Width(value, squeeze)) / 2, squeeze, level, scale);
-  };
-  // A value's words as the face sets them; none for a word only the texture has.
-  const auto value_text = [&](std::string_view value) -> std::optional<std::u32string> {
-    if (value == "ON" || value == "OFF")
-    {
-      const std::string_view word = SWITCH_WORDS[index][value == "ON" ? 0 : 1];
-      return word.empty() ? std::nullopt : std::optional(Utf32(word));
-    }
-    if (const auto it = std::ranges::find(LANGUAGES, value); it != LANGUAGES.end())
-      return Utf32(LANGUAGE_NAMES[static_cast<size_t>(it - LANGUAGES.begin())]);
-    return Utf32(dualize::nights::Translate(value, language));
-  };
   for (int row = 0; row < ROWS; ++row)
   {
     if (rows[row].label.empty())
@@ -778,7 +751,7 @@ void DrawRows(CPUState* ctx, uint32_t screen)
            static_cast<float>(WIDTH), level);
     }
     else
-      draw_label(image, 1, row, level);
+      DrawLabel(image, 1, row, rows[row].label, language, level);
     if (rows[row].value.empty())
       continue;
     const uint32_t value_y = (VALUE_LINE + static_cast<uint32_t>(row)) * LINE;
@@ -794,48 +767,200 @@ void DrawRows(CPUState* ctx, uint32_t screen)
         continue;
       }
     }
-    if (const auto value = value_text(rows[row].value))
-      draw_value(image, 1, row, *value, level);
+    if (const auto value = ValueText(rows[row].value, language))
+      DrawValue(image, 1, row, *value, level);
   }
+  drawn.bytes.assign(base, base + static_cast<size_t>(image.width) * image.height / 2);
+  dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, drawn.bytes.data());
+  drawn.key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, drawn.bytes.data());
+  return drawn;
+}
+
+// The renderer's copy, SHARP_SCALE times larger: every word set by the face
+// at that size (the Japanese ON and OFF, which it lacks, from the texture's,
+// sharpened).
+void MakeSharp(Drawn& drawn)
+{
+  Image sharp = dualize::SharpenGreyMask(drawn.image, SHARP_SCALE, LINE);
+  const auto clear = [&](uint32_t line) {
+    const size_t from = static_cast<size_t>(line) * LINE * SHARP_SCALE * sharp.width;
+    for (size_t i = from; i < from + static_cast<size_t>(LINE) * SHARP_SCALE * sharp.width; ++i)
+      sharp.rgba[i * 4] = sharp.rgba[i * 4 + 1] = sharp.rgba[i * 4 + 2] = 0;
+  };
+  for (int row = 0; row < ROWS; ++row)
+  {
+    const Row& r = drawn.rows[row];
+    if (r.label.empty())
+      continue;
+    const uint8_t level = r.locked ? LOCKED_LEVEL : 255;
+    clear(static_cast<uint32_t>(row));
+    DrawLabel(sharp, SHARP_SCALE, row, r.label, drawn.language, level);
+    if (r.value.empty())
+      continue;
+    if (const auto value = ValueText(r.value, drawn.language))
+    {
+      clear(VALUE_LINE + static_cast<uint32_t>(row));
+      DrawValue(sharp, SHARP_SCALE, row, *value, level);
+    }
+  }
+  drawn.sharp = dualize::GreyMipChain(sharp, drawn.sharp_mips);
+  drawn.sharp_width = sharp.width;
+  drawn.sharp_height = sharp.height;
+}
+
+// The main page's first rows drawn, and the texture and help messages found,
+// while the screen loads: the game reads the labels texture's file a moment
+// before the list opens (the help messages are in memory by then), and doing
+// it as the list opens would hold up that frame. Checked against memory as
+// the list opens. Searched on a couple of threads: the game goes on meanwhile.
+constexpr uint32_t PREPARING_THREADS = 2;
+struct Prepared
+{
+  Drawn drawn;
+  std::vector<uint8_t*> labels;  // the texture's copies (none: not found yet)
+  std::array<std::vector<HelpMessage::Copy>, 2> help;
+  uint32_t message_reads = 0;  // as the help messages were found
+};
+std::mutex g_prepared_mutex;
+std::optional<Prepared> g_prepared;
+std::jthread g_preparing;
+std::optional<Drawn> g_prepared_rows;  // the CPU thread's, for the list's first DrawRows
+
+void PrepareMainRows(const std::filesystem::path& file, void* data)
+{
+  if (!file.filename().string().starts_with("option_all"))
+    return;
+  const Machine& machine = *static_cast<const Machine*>(data);
+  const Language language = dualize::nights::GameLanguage(machine.memory);
+  if (!g_page.labels[static_cast<size_t>(language)] || g_page.labels_encoded[static_cast<size_t>(language)].empty())
+    return;
+  std::array<Row, ROWS> rows;
+  for (int row = 0; row < ROWS && row < MAIN_OPTION_COUNT; ++row)
+    rows[row] = MainRow(machine, static_cast<MainOption>(row));
+  std::jthread before;
+  {
+    std::lock_guard lock(g_prepared_mutex);
+    before = std::move(g_preparing);
+    g_prepared.reset();
+  }
+  before = {};  // stopped and waited for
+  std::jthread next([&machine, language, rows](std::stop_token stop) {
+    Prepared prepared{.drawn = Compose(language, rows, g_page.labels_encoded[static_cast<size_t>(language)].data())};
+    if (stop.stop_requested())
+      return;
+    MakeSharp(prepared.drawn);
+    if (stop.stop_requested())
+      return;
+    prepared.message_reads = dualize::nights::MessageReads();
+    for (size_t i = 0; i < prepared.help.size(); ++i)
+      prepared.help[i] = g_page.help[i].Copies(machine.memory, language, PREPARING_THREADS);
+    {
+      std::lock_guard lock(g_prepared_mutex);
+      if (stop.stop_requested())
+        return;
+      g_prepared = std::move(prepared);
+    }
+    // The texture's copies land as the file's read goes on: the ones two
+    // searches a moment apart agree on, kept up to date until the list opens.
+    std::mutex mutex;
+    std::condition_variable_any later;
+    std::vector<uint8_t*> last, given;
+    for (int tries = 0; tries < 50 && !stop.stop_requested(); ++tries)
+    {
+      std::vector<uint8_t*> found = SearchLabels(machine.memory, language, PREPARING_THREADS);
+      if (!found.empty() && found == last && found != given)
+      {
+        std::lock_guard lock(g_prepared_mutex);
+        if (stop.stop_requested() || !g_prepared)
+          return;
+        g_prepared->labels = given = found;
+      }
+      last = std::move(found);
+      std::unique_lock lock(mutex);
+      later.wait_for(lock, stop, std::chrono::milliseconds(20), [] { return false; });
+    }
+  });
+  std::lock_guard lock(g_prepared_mutex);
+  g_preparing = std::move(next);
+}
+
+void StopPreparing()
+{
+  std::jthread preparing;
+  {
+    std::lock_guard lock(g_prepared_mutex);
+    preparing = std::move(g_preparing);
+    g_prepared.reset();
+  }
+}  // stopped and waited for
+
+// What was prepared for the list opening in `language`, if it still holds:
+// the rows (DrawRows checks them), the texture's copies (FindLabels checks
+// them) and the help messages' copies.
+void TakePrepared(Language language)
+{
+  std::optional<Prepared> prepared;
+  {
+    std::lock_guard lock(g_prepared_mutex);
+    prepared = std::move(g_prepared);
+    g_prepared.reset();
+    g_preparing.request_stop();
+  }
+  g_prepared_rows.reset();
+  if (!prepared || prepared->drawn.language != language)
+    return;
+  if (!prepared->labels.empty())
+  {
+    g_page.labels_found = std::move(prepared->labels);
+    g_page.labels_found_language = language;
+  }
+  for (size_t i = 0; i < prepared->help.size(); ++i)
+  {
+    std::vector<HelpMessage::Copy>& copies = prepared->help[i];
+    if (!copies.empty() && prepared->message_reads == dualize::nights::MessageReads() && std::ranges::all_of(copies, [](const HelpMessage::Copy& copy) {
+          return std::memcmp(copy.at, copy.original.data(), copy.original.size()) == 0;
+        }))
+      g_page.help[i].copies = std::move(copies);
+  }
+  g_prepared_rows = std::move(prepared->drawn);
+}
+
+// The rows over the texture where the game has it: the prepared ones if they
+// are these.
+Drawn ComposeShown(Language language, const std::array<Row, ROWS>& rows, const uint8_t* in_ram)
+{
+  std::optional<Drawn> prepared = std::exchange(g_prepared_rows, std::nullopt);
+  if (prepared && prepared->language == language && prepared->rows == rows &&
+      std::memcmp(prepared->bytes.data() + DRAWN_BYTES, in_ram + DRAWN_BYTES, prepared->bytes.size() - DRAWN_BYTES) == 0)
+    return std::move(*prepared);
+  return Compose(language, rows, in_ram);
+}
+
+// The list's four lines, from option `top` on, in the game's language (see
+// Compose); the renderer draws them from the sharp copy. A row with no value
+// has its box hidden.
+void DrawRows(CPUState* ctx, uint32_t screen)
+{
+  if (g_page.labels_in_ram == nullptr)
+    return;
+  const Machine& machine = GetMachine(CpuOf(ctx));
+  const std::array<Row, ROWS> rows = RowsShown(machine);
   // The texture as it will be, its sharp copy registered before the game's
   // memory has it: the renderer runs alongside, and a draw of the new bytes
   // with no replacement yet would make (and keep, by its contents) the
-  // game's own texture.
-  std::vector<uint8_t> next(g_page.labels_in_ram,
-                            g_page.labels_in_ram + static_cast<size_t>(image.width) * image.height / 2);
-  dualize::EncodeGreyCmpr(image, 0, DRAWN_LINES * LINE, next.data());
-  // The sharp copy (every copy of the texture has the same bytes).
-  const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, next.data());
+  // game's own texture. Every copy of the texture has the same bytes.
+  Drawn drawn = ComposeShown(g_page.language, rows, g_page.labels_in_ram);
+  const auto key = drawn.key;
   std::optional<aurora::texture::TextureSourceKey> replaced;
   std::vector<aurora::texture::TextureSourceKey>& sharp_keys = g_page.sharp_keys;
   if (const auto kept = std::ranges::find(sharp_keys, key); kept != sharp_keys.end())
     std::rotate(kept, kept + 1, sharp_keys.end());
   else
   {
-    Image sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
-    const auto clear = [&](uint32_t line) {
-      const size_t from = static_cast<size_t>(line) * LINE * SHARP_SCALE * sharp.width;
-      for (size_t i = from; i < from + static_cast<size_t>(LINE) * SHARP_SCALE * sharp.width; ++i)
-        sharp.rgba[i * 4] = sharp.rgba[i * 4 + 1] = sharp.rgba[i * 4 + 2] = 0;
-    };
-    for (int row = 0; row < ROWS; ++row)
-    {
-      if (rows[row].label.empty())
-        continue;
-      const uint8_t level = rows[row].locked ? LOCKED_LEVEL : 255;
-      clear(static_cast<uint32_t>(row));
-      draw_label(sharp, SHARP_SCALE, row, level);
-      if (rows[row].value.empty())
-        continue;
-      if (const auto value = value_text(rows[row].value))
-      {
-        clear(VALUE_LINE + static_cast<uint32_t>(row));
-        draw_value(sharp, SHARP_SCALE, row, *value, level);
-      }
-    }
-    uint32_t mips = 0;
-    std::vector<uint8_t> texels = dualize::GreyMipChain(sharp, mips);
-    aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, std::move(texels));
+    if (drawn.sharp.empty())
+      MakeSharp(drawn);
+    aurora::texture::set_memory_replacement(key, drawn.sharp_width, drawn.sharp_height, drawn.sharp_mips,
+                                            std::move(drawn.sharp));
     sharp_keys.push_back(key);
     if (sharp_keys.size() > SHARP_KEPT)
     {
@@ -844,9 +969,9 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     }
   }
   for (uint8_t* copy : g_page.labels_found)
-    std::memcpy(copy, next.data(), DRAWN_BYTES);
+    std::memcpy(copy, drawn.bytes.data(), DRAWN_BYTES);
   if (std::ranges::find(g_page.labels_found, g_page.labels_in_ram) == g_page.labels_found.end())
-    std::memcpy(g_page.labels_in_ram, next.data(), DRAWN_BYTES);
+    std::memcpy(g_page.labels_in_ram, drawn.bytes.data(), DRAWN_BYTES);
   if (replaced)
     aurora::texture::remove_memory_replacement(*replaced);
   aurora_fifo_window_size(&g_page.drawn_window[0], &g_page.drawn_window[1]);
@@ -1182,12 +1307,25 @@ void KeepOptionTitle(Language language, std::span<const uint8_t> original, std::
   g_page.title_graphics[static_cast<size_t>(language)].assign(graphics.begin(), graphics.end());
 }
 
+void PrepareOptionList(const Machine& machine)
+{
+  AlsoOnUiFileRead(PrepareMainRows, const_cast<Machine*>(&machine));
+}
+
+void StopPreparingOptionList()
+{
+  StopPreparing();
+}
+
 void TakeOverOptionList(CPUState* ctx, uint32_t screen)
 {
   if (g_page.graphics || g_page.taken)
     return;
   const Memory& memory = GetMachine(CpuOf(ctx)).memory;
   g_page.language = dualize::nights::GameLanguage(memory);
+  for (HelpMessage& message : g_page.help)
+    message.copies.clear();
+  TakePrepared(g_page.language);
   g_page.labels_in_ram = FindLabels(memory);
   if (g_page.labels_in_ram == nullptr)
   {
@@ -1204,7 +1342,10 @@ void TakeOverOptionList(CPUState* ctx, uint32_t screen)
     return;
   }
   for (HelpMessage& message : g_page.help)
-    message.Find(memory, g_page.language);
+  {
+    if (message.copies.empty())
+      message.copies = message.Copies(memory, g_page.language);
+  }
   g_page.help_shown = -1;
   g_page.help_text.clear();
   g_page.taken = true;
@@ -1297,7 +1438,7 @@ extern "C" bool nights_ModeOptionLeft(CPUState* ctx)
     if (!g_page.taken)
     {
       for (HelpMessage& message : g_page.help)
-        message.Find(machine.memory, g_page.language);
+        message.copies = message.Copies(machine.memory, g_page.language);
     }
     Store(machine.memory, screen + SCREEN_ROW, 0);
     if (!g_page.boxes)

@@ -15,6 +15,9 @@ namespace dualize::nights
 
 // Watches the game's reads of the CSD texture files on `disc`.
 void WatchUiImages(ios::Disc& disc, const std::filesystem::path& game);
+// `listener` also told of each load of one of those files, on the reading
+// thread (set before the game runs).
+void AlsoOnUiFileRead(void (*listener)(const std::filesystem::path& file, void* data), void* data);
 // For the replacement provider: whether it registered the source's copy.
 bool ProvideUiImage(const aurora::texture::TextureSource& source);
 }  // namespace dualize::nights
