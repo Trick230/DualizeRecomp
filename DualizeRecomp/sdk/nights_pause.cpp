@@ -436,8 +436,10 @@ void Rebanded(const Memory& memory, uint32_t subimages, uint32_t index)
   }
 }
 
-// The sub-image's band among the labels' three in its scene (one of them
-// may show Options), or -1 if it isn't one of them.
+// The sub-image's band among the labels' three in its scene, or -1 if it
+// isn't one of them. Any of them may show Options: the scene outlives a
+// window, and the large one's Options (Quit's sub-image) is still there when
+// the small one next takes Retry's.
 int NaturalBand(const Memory& memory, uint32_t subimage)
 {
   for (uint32_t band = 0; band < GAME_LABELS; ++band)
@@ -447,7 +449,8 @@ int NaturalBand(const Memory& memory, uint32_t subimage)
     const uint32_t first = subimage - band * SUBIMAGE;
     bool labels = true;
     for (uint32_t k = 0; k < GAME_LABELS && labels; ++k)
-      labels = k == band || IsBand(memory, first + k * SUBIMAGE, k, BAND);
+      labels = k == band || IsBand(memory, first + k * SUBIMAGE, k, BAND) ||
+               IsBand(memory, first + k * SUBIMAGE, OPTIONS_BAND, BAND);
     if (labels)
       return static_cast<int>(band);
   }
