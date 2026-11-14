@@ -41,6 +41,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #pragma clang diagnostic push
@@ -124,6 +125,9 @@ constexpr uint32_t INPUT_UP = 0x1, INPUT_DOWN = 0x2, INPUT_LEFT = 0x4, INPUT_RIG
 constexpr uint32_t LINE = 24, WIDTH = 256, TILE_ROW_BYTES = WIDTH / 8 * 32;
 constexpr uint32_t VALUE_LINE = ROWS, DRAWN_LINES = 2 * ROWS;
 constexpr uint32_t SHARP_SCALE = 4, CMPR_FORMAT = 0xE;  // GX_TF_CMPR
+// Sharp copies kept registered (~5.6 MB each with mips): a page's rows
+// as shown before, scrolled or set, come back without a rebuild.
+constexpr size_t SHARP_KEPT = 8;
 constexpr uint32_t DRAWN_BYTES = DRAWN_LINES * LINE / 8 * TILE_ROW_BYTES;
 // The value boxes' words (lines 8-10), never redrawn: found in guest RAM.
 constexpr uint32_t WORDS_FIRST_TILE_ROW = 8 * LINE / 8, WORDS_TILE_ROWS = 32 - WORDS_FIRST_TILE_ROW;
@@ -383,8 +387,9 @@ struct Page
   std::array<std::vector<uint8_t>, dualize::nights::LANGUAGE_COUNT> labels_encoded;
   Language language = Language::ENGLISH;
   uint8_t* labels_in_ram = nullptr;
-  // The drawn labels texture's sharp copy in the renderer (see DrawRows).
-  std::optional<aurora::texture::TextureSourceKey> sharp_key;
+  // The drawn labels texture's sharp copies in the renderer, the latest
+  // last (see DrawRows): kept for the next entry and for rows seen before.
+  std::vector<aurora::texture::TextureSourceKey> sharp_keys;
   std::array<uint32_t, 2> drawn_window{};  // the window's size the rows were drawn with
   // The title's first row per language, as the disc has it and as the page
   // shows it; where the page put its own (every copy the screen loaded).
@@ -433,6 +438,63 @@ const LabelFont& ValueLettering()
   return font;
 }
 
+// Every place `needle` is at in [data, data + size), in order. Two of its
+// bytes (non-zero ones: much of memory is zeros) screen 32 places at once,
+// on a few threads: the page searches all of MEM1 and MEM2 while the game
+// waits for it.
+std::vector<uint8_t*> FindAll(uint8_t* data, size_t size, const uint8_t* needle, size_t n)
+{
+  std::vector<uint8_t*> found;
+  if (n == 0 || size < n)
+    return found;
+  size_t a = 0;
+  while (a + 1 < n && needle[a] == 0)
+    ++a;
+  size_t b = n - 1;
+  while (b > a && (needle[b] == 0 || needle[b] == needle[a]))
+    --b;
+  const size_t places = size - n + 1;
+  const uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
+  const size_t step = (places + threads - 1) / threads;
+  std::vector<std::vector<uint8_t*>> parts(threads);
+  const auto scan = [&](uint32_t part) {
+    const size_t to = std::min(places, (part + 1) * step);
+    size_t i = std::min(places, part * step);
+    std::vector<uint8_t*>& out = parts[part];
+#ifdef __AVX2__
+    const __m256i first = _mm256_set1_epi8(static_cast<char>(needle[a]));
+    const __m256i second = _mm256_set1_epi8(static_cast<char>(needle[b]));
+    for (; i + 32 <= to; i += 32)
+    {
+      const __m256i at_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + a));
+      const __m256i at_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + b));
+      for (auto mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+               _mm256_and_si256(_mm256_cmpeq_epi8(at_a, first), _mm256_cmpeq_epi8(at_b, second))));
+           mask != 0; mask &= mask - 1)
+      {
+        uint8_t* at = data + i + static_cast<size_t>(std::countr_zero(mask));
+        if (std::memcmp(at, needle, n) == 0)
+          out.push_back(at);
+      }
+    }
+#endif
+    for (; i < to; ++i)
+    {
+      if (data[i + a] == needle[a] && data[i + b] == needle[b] && std::memcmp(data + i, needle, n) == 0)
+        out.push_back(data + i);
+    }
+  };
+  std::vector<std::thread> pool;
+  for (uint32_t part = 1; part < threads; ++part)
+    pool.emplace_back(scan, part);
+  scan(0);
+  for (std::thread& thread : pool)
+    thread.join();
+  for (const std::vector<uint8_t*>& part : parts)
+    found.insert(found.end(), part.begin(), part.end());
+  return found;
+}
+
 // The labels texture of the page's language where the screen loaded it (its
 // first copy; labels_found has them all).
 uint8_t* FindLabels(const Memory& memory)
@@ -449,12 +511,10 @@ uint8_t* FindLabels(const Memory& memory)
     return g_page.labels_found.front();
   g_page.labels_found.clear();
   g_page.labels_found_language = g_page.language;
-  const std::boyer_moore_horspool_searcher search(words, words + words_bytes);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
-    for (uint8_t* found = std::search(data, data + size, search); found != data + size;
-         found = std::search(found + 1, data + size, search))
+    for (uint8_t* found : FindAll(data, size, words, words_bytes))
     {
       if (static_cast<size_t>(found - data) >= before)
         g_page.labels_found.push_back(found - before);
@@ -484,11 +544,10 @@ const std::vector<uint8_t*>& FindTitle(const Memory& memory)
     return found;
   found.clear();
   g_page.title_found_language = g_page.language;
-  const std::boyer_moore_horspool_searcher search(title.begin() + KEY, title.begin() + KEY + KEY_BYTES);
   for (const auto& [base, size] : {std::pair{0x90000000u, Memory::MEM2_SIZE}, std::pair{0x80000000u, Memory::MEM1_SIZE}})
   {
     uint8_t* data = memory.Effective(base, size);
-    for (uint8_t* at = data; (at = std::search(at, data + size, search)) != data + size; ++at)
+    for (uint8_t* at : FindAll(data, size, title.data() + KEY, KEY_BYTES))
     {
       if (static_cast<size_t>(at - data) >= KEY && static_cast<size_t>(data + size - (at - KEY)) >= title.size() &&
           std::memcmp(at - KEY, title.data(), title.size()) == 0)
@@ -748,9 +807,11 @@ void DrawRows(CPUState* ctx, uint32_t screen)
   // The sharp copy (every copy of the texture has the same bytes).
   const auto key = aurora::texture::source_key(CMPR_FORMAT, image.width, image.height, next.data());
   std::optional<aurora::texture::TextureSourceKey> replaced;
-  if (!g_page.sharp_key || !(*g_page.sharp_key == key))
+  std::vector<aurora::texture::TextureSourceKey>& sharp_keys = g_page.sharp_keys;
+  if (const auto kept = std::ranges::find(sharp_keys, key); kept != sharp_keys.end())
+    std::rotate(kept, kept + 1, sharp_keys.end());
+  else
   {
-    replaced = g_page.sharp_key;
     Image sharp = dualize::SharpenGreyMask(image, SHARP_SCALE, LINE);
     const auto clear = [&](uint32_t line) {
       const size_t from = static_cast<size_t>(line) * LINE * SHARP_SCALE * sharp.width;
@@ -775,7 +836,12 @@ void DrawRows(CPUState* ctx, uint32_t screen)
     uint32_t mips = 0;
     std::vector<uint8_t> texels = dualize::GreyMipChain(sharp, mips);
     aurora::texture::set_memory_replacement(key, sharp.width, sharp.height, mips, std::move(texels));
-    g_page.sharp_key = key;
+    sharp_keys.push_back(key);
+    if (sharp_keys.size() > SHARP_KEPT)
+    {
+      replaced = sharp_keys.front();
+      sharp_keys.erase(sharp_keys.begin());
+    }
   }
   for (uint8_t* copy : g_page.labels_found)
     std::memcpy(copy, next.data(), DRAWN_BYTES);
@@ -800,9 +866,6 @@ void RestoreRows()
     for (uint8_t* copy : g_page.labels_found)
       std::memcpy(copy, g_page.labels_encoded[static_cast<size_t>(g_page.language)].data(), DRAWN_BYTES);
   }
-  if (g_page.sharp_key)
-    aurora::texture::remove_memory_replacement(*g_page.sharp_key);
-  g_page.sharp_key.reset();
   g_page.labels_in_ram = nullptr;
 }
 

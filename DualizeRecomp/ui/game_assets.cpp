@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace dualize
 {
@@ -199,6 +201,24 @@ std::optional<TplImage> DecodeTplImage(std::span<const uint8_t> data, uint32_t i
   return tpl;
 }
 
+namespace
+{
+// fn(y0, y1) over [0, rows) in bands on a few threads (the calling one
+// among them): a menu builds its sharp copies while the game waits.
+template <typename Fn>
+void ForRows(uint32_t rows, Fn&& fn)
+{
+  const uint32_t threads = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
+  const uint32_t step = (rows + threads - 1) / threads;
+  std::vector<std::thread> pool;
+  for (uint32_t y0 = step; y0 < rows; y0 += step)
+    pool.emplace_back([&fn, y0, y1 = std::min(rows, y0 + step)] { fn(y0, y1); });
+  fn(0u, std::min(rows, step));
+  for (std::thread& thread : pool)
+    thread.join();
+}
+}  // namespace
+
 Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
 {
   const uint32_t w = image.width, h = image.height, W = w * scale, H = h * scale;
@@ -233,26 +253,35 @@ Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
       at[k] = std::clamp(base - 1 + k, 0, static_cast<int>(n) - 1);
   };
   std::vector<float> wide(static_cast<size_t>(W) * h), up(static_cast<size_t>(W) * H);
-  std::array<int, 4> at;
-  std::array<float, 4> wt;
+  std::vector<std::array<int, 4>> column_at(W);
+  std::vector<std::array<float, 4>> column_wt(W);
   for (uint32_t x = 0; x < W; ++x)
-  {
-    weights(x, w, at, wt);
-    for (uint32_t y = 0; y < h; ++y)
+    weights(x, w, column_at[x], column_wt[x]);
+  ForRows(h, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; ++y)
     {
       const float* row = &grey[static_cast<size_t>(y) * w];
-      wide[static_cast<size_t>(y) * W + x] = wt[0] * row[at[0]] + wt[1] * row[at[1]] + wt[2] * row[at[2]] + wt[3] * row[at[3]];
+      for (uint32_t x = 0; x < W; ++x)
+      {
+        const std::array<int, 4>& at = column_at[x];
+        const std::array<float, 4>& wt = column_wt[x];
+        wide[static_cast<size_t>(y) * W + x] = wt[0] * row[at[0]] + wt[1] * row[at[1]] + wt[2] * row[at[2]] + wt[3] * row[at[3]];
+      }
     }
-  }
-  for (uint32_t y = 0; y < H; ++y)
-  {
-    weights(y, h, at, wt);
-    for (uint32_t x = 0; x < W; ++x)
-      up[static_cast<size_t>(y) * W + x] = wt[0] * wide[static_cast<size_t>(at[0]) * W + x] +
-                                           wt[1] * wide[static_cast<size_t>(at[1]) * W + x] +
-                                           wt[2] * wide[static_cast<size_t>(at[2]) * W + x] +
-                                           wt[3] * wide[static_cast<size_t>(at[3]) * W + x];
-  }
+  });
+  ForRows(H, [&](uint32_t y0, uint32_t y1) {
+    std::array<int, 4> at;
+    std::array<float, 4> wt;
+    for (uint32_t y = y0; y < y1; ++y)
+    {
+      weights(y, h, at, wt);
+      for (uint32_t x = 0; x < W; ++x)
+        up[static_cast<size_t>(y) * W + x] = wt[0] * wide[static_cast<size_t>(at[0]) * W + x] +
+                                             wt[1] * wide[static_cast<size_t>(at[1]) * W + x] +
+                                             wt[2] * wide[static_cast<size_t>(at[2]) * W + x] +
+                                             wt[3] * wide[static_cast<size_t>(at[3]) * W + x];
+    }
+  });
   const float sigma = static_cast<float>(scale) / 2.0f;
   const int reach = static_cast<int>(std::ceil(sigma * 3.0f));
   std::vector<float> kernel(static_cast<size_t>(2 * reach + 1));
@@ -261,47 +290,66 @@ Image SharpenGreyMask(const Image& image, uint32_t scale, uint32_t band)
     sum += kernel[static_cast<size_t>(k + reach)] = std::exp(-0.5f * static_cast<float>(k * k) / (sigma * sigma));
   for (float& k : kernel)
     k /= sum;
+  // Both passes add their taps in order a whole row at a time (the rows
+  // vectorize; only the edges clamp).
   std::vector<float> blur(up.size());
-  for (uint32_t y = 0; y < H; ++y)
-    for (uint32_t x = 0; x < W; ++x)
+  const int last_x = static_cast<int>(W) - 1, last_y = static_cast<int>(H) - 1;
+  ForRows(H, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; ++y)
     {
-      float v = 0.0f;
+      const float* from = &up[static_cast<size_t>(y) * W];
+      float* to = &blur[static_cast<size_t>(y) * W];
+      std::fill_n(to, W, 0.0f);
       for (int k = -reach; k <= reach; ++k)
-        v += kernel[static_cast<size_t>(k + reach)] *
-             up[static_cast<size_t>(y) * W + static_cast<uint32_t>(std::clamp(static_cast<int>(x) + k, 0, static_cast<int>(W) - 1))];
-      blur[static_cast<size_t>(y) * W + x] = v;
+      {
+        const float weight = kernel[static_cast<size_t>(k + reach)];
+        const int lo = std::clamp(-k, 0, last_x + 1), hi = std::clamp(last_x + 1 - k, lo, last_x + 1);
+        for (int x = 0; x < lo; ++x)
+          to[x] += weight * from[std::clamp(x + k, 0, last_x)];
+        for (int x = lo; x < hi; ++x)
+          to[x] += weight * from[x + k];
+        for (int x = hi; x <= last_x; ++x)
+          to[x] += weight * from[std::clamp(x + k, 0, last_x)];
+      }
     }
-  for (uint32_t y = 0; y < H; ++y)
-    for (uint32_t x = 0; x < W; ++x)
+  });
+  ForRows(H, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; ++y)
     {
-      float v = 0.0f;
+      float* to = &up[static_cast<size_t>(y) * W];
+      std::fill_n(to, W, 0.0f);
       for (int k = -reach; k <= reach; ++k)
-        v += kernel[static_cast<size_t>(k + reach)] *
-             blur[static_cast<size_t>(std::clamp(static_cast<int>(y) + k, 0, static_cast<int>(H) - 1)) * W + x];
-      up[static_cast<size_t>(y) * W + x] = v;
+      {
+        const float weight = kernel[static_cast<size_t>(k + reach)];
+        const float* from = &blur[static_cast<size_t>(std::clamp(static_cast<int>(y) + k, 0, last_y)) * W];
+        for (uint32_t x = 0; x < W; ++x)
+          to[x] += weight * from[x];
+      }
     }
+  });
   // Cut just under half coverage (the blur thins strokes a little), the soft
   // edge EDGE output texels wide everywhere: the field over its own slope.
   constexpr float CUT = 0.44f, EDGE = 1.6f;
-  const auto field = [&](int x, int y) {
-    return up[static_cast<size_t>(std::clamp(y, 0, static_cast<int>(H) - 1)) * W +
-              static_cast<size_t>(std::clamp(x, 0, static_cast<int>(W) - 1))];
-  };
-  for (uint32_t y = 0; y < H; ++y)
-    for (uint32_t x = 0; x < W; ++x)
-    {
-      const int ix = static_cast<int>(x), iy = static_cast<int>(y);
-      const float slope = std::hypot(field(ix + 1, iy) - field(ix - 1, iy), field(ix, iy + 1) - field(ix, iy - 1)) / 2 + 1e-4f;
-      blur[static_cast<size_t>(y) * W + x] =
-          std::clamp((field(ix, iy) - CUT) / (slope * EDGE) + 0.5f, 0.0f, 1.0f) * peak[y / scale];
-    }
   out.rgba.resize(static_cast<size_t>(W) * H * 4);
-  for (size_t i = 0; i < blur.size(); ++i)
-  {
-    const auto g = static_cast<uint8_t>(std::lround(blur[i] * 255.0f));
-    out.rgba[i * 4] = out.rgba[i * 4 + 1] = out.rgba[i * 4 + 2] = g;
-    out.rgba[i * 4 + 3] = 255;
-  }
+  ForRows(H, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; ++y)
+    {
+      const int iy = static_cast<int>(y);
+      const float* row = &up[static_cast<size_t>(y) * W];
+      const float* above = &up[static_cast<size_t>(std::max(iy - 1, 0)) * W];
+      const float* below = &up[static_cast<size_t>(std::min(iy + 1, last_y)) * W];
+      const float level = peak[y / scale];
+      uint8_t* to = &out.rgba[static_cast<size_t>(y) * W * 4];
+      for (int x = 0; x <= last_x; ++x, to += 4)
+      {
+        const float dx = row[std::min(x + 1, last_x)] - row[std::max(x - 1, 0)], dy = below[x] - above[x];
+        const float slope = std::sqrt(dx * dx + dy * dy) / 2 + 1e-4f;
+        const float v = std::clamp((row[x] - CUT) / (slope * EDGE) + 0.5f, 0.0f, 1.0f) * level;
+        to[0] = to[1] = to[2] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+        to[3] = 255;
+      }
+    }
+  });
   return out;
 }
 
@@ -312,6 +360,15 @@ std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips)
   uint32_t lw = image.width, lh = image.height;
   if (lw == 0 || lh == 0)
     return out;
+  size_t total = 0;
+  for (uint32_t w = lw, h = lh;; w = std::max(1u, w / 2), h = std::max(1u, h / 2))
+  {
+    total += static_cast<size_t>(w) * h * 4;
+    if (w == 1 && h == 1)
+      break;
+  }
+  out.resize(total);
+  uint8_t* to = out.data();
   std::vector<float> level(static_cast<size_t>(lw) * lh);
   for (size_t i = 0; i < level.size(); ++i)
     level[i] = image.rgba[i * 4];
@@ -319,8 +376,10 @@ std::vector<uint8_t> GreyMipChain(const Image& image, uint32_t& mips)
   {
     for (float v : level)
     {
-      const auto g = static_cast<uint8_t>(std::lround(v));
-      out.insert(out.end(), {g, g, g, 255});
+      const auto g = static_cast<uint8_t>(v + 0.5f);
+      to[0] = to[1] = to[2] = g;
+      to[3] = 255;
+      to += 4;
     }
     ++mips;
     if (lw == 1 && lh == 1)
