@@ -16,6 +16,25 @@
 
 bool rvl_PSMTXConcat(CPUState* ctx);
 
+typedef void (*GuestFunction)(CPUState* ctx);
+GuestFunction dolrecomp_lookup(CPUState* ctx, u32 target);
+extern unsigned dolrecomp_call_depth;
+
+// Runs the rest of a guest function from `pc` on (a native that did part of
+// it), on this host stack: leaving to the dispatcher instead would bring its
+// callers' returns back through it, whose safepoints the guest's direct
+// returns don't have. A jump native returns after it; without the function
+// (or past the direct-call depth) it leaves to the dispatcher at `pc`.
+static void resume_guest(CPUState* ctx, u32 pc) {
+    ctx->pc = pc;
+    const GuestFunction function = dolrecomp_lookup(ctx, pc);
+    if (!function || dolrecomp_call_depth >= 256u)
+        return;
+    ++dolrecomp_call_depth;
+    function(ctx);
+    --dolrecomp_call_depth;
+}
+
 // From the natives list: CalcSkinning's entry, its 0.0f and skinning work
 // matrices, and its callees, ResMdl::GetResNode(u32) (with ResMdl's dictionary
 // and ResDic's entry lookups) and PSMTXConcat.
@@ -133,25 +152,48 @@ static void run_res_node(CPUState* ctx, u32 ret) {
 
 // CalcSkinning's cycles outside its commands, and each command's (WEIGHT's
 // with n matrices: 19 + 37n + 11; EVPMTX's PSMTXConcat charges its own).
-#define SKIN_CYCLES (5 + 6 + 9 + 1 + 3 + 4 + 3 + 2 + 9 + 5)
-#define SKIN_COMMAND_CYCLES (3 + 2)
+#define SKIN_PROLOGUE_CYCLES (5 + 6 + 9 + 1 + 3 + 4)
+#define SKIN_LOOP_CYCLES 3
+#define SKIN_EPILOGUE_CYCLES (SKIN_LOOP_CYCLES + 2 + 9 + 5)
+#define SKIN_COMMAND_CYCLES (SKIN_LOOP_CYCLES + 2)
 #define SKIN_WEIGHT_CYCLES(n) (19 + 37 * (s64)(n) + 11)
 #define SKIN_EVPMTX_CYCLES (10 + RES_NODE_CYCLES + 7 + 1)
 #define PSMTX_CONCAT_CYCLES 51
 
-// Whether CalcSkinning can run its byte code natively, and the cycles it takes
-// (with PSMTXConcat's) and leaves to charge (without them).
-static bool skinning_ok(CPUState* ctx, u32 model, u32 attrib, u32 mdl, u32 code,
-                        s64* total, s64* own) {
+#define SKIN_MAX_COMMANDS 4096u
+
+// The cycles of the command at `code` with PSMTXConcat's, and in `own`
+// without them (PSMTXConcat charges its own).
+static s64 skin_command_cost(CPUState* ctx, u32 code, s64* own) {
+    if (lbz(ctx, code) == 3) {
+        const s64 cycles = SKIN_COMMAND_CYCLES + SKIN_WEIGHT_CYCLES(lbz(ctx, code + 3u));
+        if (own)
+            *own = cycles;
+        return cycles;
+    }
+    if (own)
+        *own = SKIN_COMMAND_CYCLES + SKIN_EVPMTX_CYCLES;
+    return SKIN_COMMAND_CYCLES + SKIN_EVPMTX_CYCLES + PSMTX_CONCAT_CYCLES;
+}
+
+// The cycles after the command at `code` up to the loop's next safepoint, or
+// to the end when it is the last.
+static s64 skin_after_cycles(CPUState* ctx, u32 code) {
+    const u32 next = code + (lbz(ctx, code) == 3 ? 4u + 6u * lbz(ctx, code + 3u) : 5u);
+    return lbz(ctx, next) == 1 ? SKIN_EPILOGUE_CYCLES : SKIN_LOOP_CYCLES;
+}
+
+// Whether CalcSkinning can run its byte code natively.
+static bool skinning_ok(CPUState* ctx, u32 model, u32 attrib, u32 mdl, u32 code) {
     const u32 skin = (u32)SKIN_TEMPORARY;
-    s64 cycles = SKIN_CYCLES, concats = 0;
-    for (;;) {
+    for (u32 n = 0;; ++n) {
+        if (n > SKIN_MAX_COMMANDS)
+            return false;
         if (!plain(ctx, code, 1))
             return false;
         const u32 op = lbz(ctx, code);
         if (op == 1)
             break;
-        cycles += SKIN_COMMAND_CYCLES;
         if (op == 3) {
             if (!plain(ctx, code, 4))
                 return false;
@@ -159,7 +201,6 @@ static bool skinning_ok(CPUState* ctx, u32 model, u32 attrib, u32 mdl, u32 code,
             const u32 count = lbz(ctx, code + 3u);
             if (!plain(ctx, attrib + target * 4u, 4) || !plain(ctx, model + target * MTX_SIZE, MTX_SIZE))
                 return false;
-            cycles += SKIN_WEIGHT_CYCLES(count);
             code += 4u;
             for (u32 i = 0; i < count; ++i, code += 6u) {
                 if (!plain(ctx, code, 6))
@@ -176,15 +217,9 @@ static bool skinning_ok(CPUState* ctx, u32 model, u32 attrib, u32 mdl, u32 code,
             if (!node || !plain(ctx, model + id * MTX_SIZE, MTX_SIZE) ||
                 !plain(ctx, node + 0xA0u, MTX_SIZE) || !plain(ctx, skin + id * MTX_SIZE, MTX_SIZE))
                 return false;
-            cycles += SKIN_EVPMTX_CYCLES + PSMTX_CONCAT_CYCLES;
-            ++concats;
             code += 5u;
         }
-        if (cycles >= ctx->downcount)
-            return false;
     }
-    *total = cycles;
-    *own = cycles - PSMTX_CONCAT_CYCLES * concats;
     return true;
 }
 
@@ -196,10 +231,14 @@ static bool skinning_ok(CPUState* ctx, u32 model, u32 attrib, u32 mdl, u32 code,
 bool g3d_CalcSkinning(CPUState* ctx) {
     const u32 sp = ctx->gpr[1], frame = sp - 0x30u;
     const u32 model = ctx->gpr[3], attrib = ctx->gpr[4], mdl = ctx->gpr[5], code = ctx->gpr[6];
-    s64 total, own;
     // The frame, GetResNode's below it and PSMTXConcat's below that.
     if (!code || !fpu_ready(ctx) || !plain(ctx, frame - 0x60u, 0x98u) ||
-        !skinning_ok(ctx, model, attrib, mdl, code, &total, &own) || ctx->downcount <= total)
+        !skinning_ok(ctx, model, attrib, mdl, code))
+        return false;
+    // The guest stops at a safepoint once the downcount runs out: run the
+    // commands that fit whole, and leave the rest to it.
+    s64 own = SKIN_PROLOGUE_CYCLES, left = ctx->downcount - SKIN_PROLOGUE_CYCLES;
+    if (lbz(ctx, code) != 1 && left - skin_command_cost(ctx, code, NULL) - skin_after_cycles(ctx, code) <= 0)
         return false;
     const u32 base = (u32)SKIN_BASE;
 
@@ -222,7 +261,19 @@ bool g3d_CalcSkinning(CPUState* ctx) {
     ctx->gpr[30] = 0xF0000000u;
     ctx->gpr[31] = high_half((u32)SKIN_ZERO);
 
-    for (;;) {
+    for (bool first = true;; first = false) {
+        if (lbz(ctx, ctx->gpr[28]) != 1) {
+            s64 cmd_own;
+            const s64 cycles = skin_command_cost(ctx, ctx->gpr[28], &cmd_own);
+            if (!first && left - cycles - skin_after_cycles(ctx, ctx->gpr[28]) <= 0) {
+                // Where the guest's loop goes on, as from its safepoint.
+                ctx->downcount -= own;
+                resume_guest(ctx, base + 0x19Cu);
+                return true;
+            }
+            left -= cycles;
+            own += cmd_own;
+        }
         ctx->gpr[0] = lbz(ctx, ctx->gpr[28]);
         cmplwi(ctx, ctx->gpr[0], 1);
         if (ctx->gpr[0] == 1)
@@ -320,7 +371,8 @@ bool g3d_CalcSkinning(CPUState* ctx) {
     ctx->gpr[0] = lwz(ctx, ctx->gpr[1] + 0x34u);
     ctx->lr = ctx->gpr[0];
     ctx->gpr[1] = sp;
-    ctx->downcount -= own;
+    ctx->downcount -= own + SKIN_EPILOGUE_CYCLES;
+    ctx->pc = ctx->lr & ~3u;
     return true;
 }
 
@@ -827,7 +879,7 @@ bool g3d_CalcViewLC(CPUState* ctx) {
                 if (left - need <= 0) {
                     // Where the guest's loop goes on, as from its safepoint.
                     ctx->downcount -= own;
-                    ctx->pc = AT(0x154);
+                    resume_guest(ctx, AT(0x154));
                     return true;
                 }
                 left -= need;

@@ -27,7 +27,7 @@ define SINCOS_ZERO addr(nw4r_SinCosFIdx+6C,74)
 define ROTXYZ_BASE nw4r_MTX34RotXYZFIdx
 define ROTXYZ_ZERO addr(nw4r_MTX34RotXYZFIdx+5C,60)
 define AABB_SET_BASE nw4r_AABBSet
-g3d_CalcSkinning 1C0 9421FFD0 B2C5956239F94F23
+g3d_CalcSkinning 1C0 9421FFD0 B2C5956239F94F23 jump
 # nw4r_g3d_calc.c: CalcSkinning's entry, 0.0f, skinning work matrices and callees.
 define SKIN_BASE g3d_CalcSkinning
 define SKIN_ZERO addr(g3d_CalcSkinning+54,68)
