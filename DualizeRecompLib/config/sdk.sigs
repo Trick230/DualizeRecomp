@@ -14,6 +14,15 @@
 g3d_CalcViewCamera 4 819F0000 9265ABA010CF4111 at @ScnRoot_CalcView+4C
 g3d_DrawResMdlDirectly 228 9421FFB0 19274D8870AFB690
 g3d_CallPrimitiveDisplayList 5C 9421FFF0 F91B189FE2EAF0B1
+g3d_LoadResShpPrePrimitive DC 9421FFF0 CD0723D2A3AE6B61
+g3d_LoadResShpPrimitive 1D4 9421FFA0 9938290A0309EF4B
+@G3dGenModeLoad 64 9421FFF0 4CAFF3A05907482F at call(g3d_LoadResShpPrimitive+198)
+@GDSetGenMode2 84 3D000000 896E076A275FA7BD at call(@G3dGenModeLoad+40)
+@GDLoadTexMtxImm3x3 84 9421FFC0 27417A8E6F507D0B at call(g3d_LoadResShpPrimitive+10C)
+# nw4r_g3d_draw.c: G3DState's statics, the SDK's cull mode table and 0.0f.
+define G3D_STATE addr(g3d_LoadResShpPrimitive+18,2C)
+define G3D_CULL_TABLE addr(@GDSetGenMode2+0,10)
+define G3D_ZERO addr(@GDLoadTexMtxImm3x3+8,14)
 nw4r_SinCosFIdx E0 9421FFC0 A8259176DF245D2A
 nw4r_MTX34RotXYZFIdx 150 9421FFB0 1A2AFE159559BC66
 nw4r_MTX34ToMTX33 34 E0040000 23386EEB2B39B36B anywhere
