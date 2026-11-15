@@ -39,6 +39,54 @@ define SKIN_CONCAT call(g3d_CalcSkinning+194)
 define SKIN_MWCC_SAVEGPR mwcc_savegpr_24
 define SKIN_MWCC_RESTGPR mwcc_restgpr_24
 define SKIN_PSMTX_CONCAT rvl_PSMTXConcat
+g3d_CalcViewLC 538 9421FF20 541AE2C2982E3668 jump
+nw4r_MTX34InvTranspose33 C8 E0048000 E2EE1AE81E51C0FC anywhere
+@CvBillboardTemp C 3C600000 8268C42B8E7B042E at call(g3d_CalcViewLC+D4)
+@LCQueueWait 14 7C98E2A6 A61697EDF34A3383 at call(g3d_CalcViewLC+E0)
+@LCQueueLength C 7C98E2A6 38AFCE9DF18387BF at call(g3d_CalcViewLC+110)
+@LCLoadBlocks 4 48000000 4BA5D8D7DCEB1CBD at call(g3d_CalcViewLC+FC)
+@LCStoreBlocks 4 48000000 4BA5D8D7DCEB1CBD at call(g3d_CalcViewLC+3A0)
+@LCLoadDma 24 54A6F6FE 3C9C55A27154A4F3 at call(@LCLoadBlocks+0)
+@LCStoreDma 24 54A6F6FE 477474E6E731338A at call(@LCStoreBlocks+0)
+@MtxNodeId 1C 80A30000 921B481E34D7577C at call(g3d_CalcViewLC+314)
+@CvSwap 14 80A30000 267C62CF1169DD9B at call(g3d_CalcViewLC+4C8)
+@CvSwapB 14 80A30000 267C62CF1169DD9B at call(g3d_CalcViewLC+4E0)
+# nw4r_g3d_calc.c: CalcView_LC_DMA_ModelMtx's entry, 0.0f, billboard table and work matrix, and callees.
+define CV_BASE g3d_CalcViewLC
+define CV_ZERO addr(g3d_CalcViewLC+12C,13C)
+define CV_BB_TABLE addr(g3d_CalcViewLC+138,144)
+define CV_BB_TEMP addr(@CvBillboardTemp+0,4)
+define CV_SAVEGPR call(g3d_CalcViewLC+18)
+define CV_RESTGPR call(g3d_CalcViewLC+524)
+define CV_MWCC_SAVEGPR mwcc_savegpr_14
+define CV_MWCC_RESTGPR mwcc_restgpr_14
+define CV_RES_NODE call(g3d_CalcViewLC+328)
+define CV_DC_INVALIDATE call(g3d_CalcViewLC+94)
+define CV_RVL_DC_INVALIDATE rvl_DCInvalidateRange
+define CV_CONCAT_ARRAY call(g3d_CalcViewLC+1F0)
+define CV_RVL_CONCAT_ARRAY rvl_PSMTXConcatArray
+define CV_CONCAT call(g3d_CalcViewLC+204)
+define CV_COPY call(g3d_CalcViewLC+3FC)
+define CV_RVL_COPY rvl_PSMTXCopy
+define CV_INV_XPOSE call(g3d_CalcViewLC+448)
+define CV_RVL_INV_XPOSE rvl_PSMTXInvXpose
+define CV_TO_MTX33 call(g3d_CalcViewLC+42C)
+define CV_NW4R_TO_MTX33 nw4r_MTX34ToMTX33
+define CV_INV_TRANSPOSE33 call(g3d_CalcViewLC+468)
+define CV_NW4R_INV_TRANSPOSE33 nw4r_MTX34InvTranspose33
+define CV_QUEUE_WAIT @LCQueueWait
+define CV_QUEUE_WAIT_2 call(g3d_CalcViewLC+198)
+define CV_QUEUE_LENGTH @LCQueueLength
+define CV_LOAD @LCLoadBlocks
+define CV_LOAD_2 call(g3d_CalcViewLC+1D4)
+define CV_STORE @LCStoreBlocks
+define CV_STORE_2 call(g3d_CalcViewLC+4A4)
+define CV_LOAD_DMA @LCLoadDma
+define CV_STORE_DMA @LCStoreDma
+define CV_NODE_ID @MtxNodeId
+define CV_SWAP @CvSwap
+define CV_SWAP_2 call(g3d_CalcViewLC+4D4)
+define CV_SWAP_B @CvSwapB
 rvl_EXIImm 27C 9421FFD0 7D3F26B792F2FA4D
 rvl_EXIImmEx A4 9421FFE0 525C3EA27459CC97
 rvl_EXIDma F8 9421FFD0 3774480782CFD488

@@ -323,3 +323,534 @@ bool g3d_CalcSkinning(CPUState* ctx) {
     ctx->downcount -= own;
     return true;
 }
+
+bool rvl_DCInvalidateRange(CPUState* ctx);
+bool rvl_PSMTXConcatArray(CPUState* ctx);
+bool rvl_PSMTXCopy(CPUState* ctx);
+bool rvl_PSMTXInvXpose(CPUState* ctx);
+bool nw4r_MTX34ToMTX33(CPUState* ctx);
+bool nw4r_MTX34InvTranspose33(CPUState* ctx);
+
+// From the natives list: CalcView_LC_DMA_ModelMtx's entry, its 0.0f and
+// billboard table, the billboard work matrix, and the callees it runs inline
+// (the locked cache's DMA queue and transfers, the node ID lookup, the buffer
+// swaps) or through their natives.
+_Static_assert(CV_SAVEGPR == CV_MWCC_SAVEGPR && CV_RESTGPR == CV_MWCC_RESTGPR,
+               "CalcView saves r14-r31 through the runtime's helpers");
+_Static_assert(CV_RES_NODE == SKIN_RES_NODE, "CalcView calls ResMdl::GetResNode");
+_Static_assert(CV_DC_INVALIDATE == CV_RVL_DC_INVALIDATE && CV_CONCAT_ARRAY == CV_RVL_CONCAT_ARRAY &&
+                   CV_CONCAT == SKIN_PSMTX_CONCAT && CV_COPY == CV_RVL_COPY &&
+                   CV_INV_XPOSE == CV_RVL_INV_XPOSE && CV_TO_MTX33 == CV_NW4R_TO_MTX33 &&
+                   CV_INV_TRANSPOSE33 == CV_NW4R_INV_TRANSPOSE33,
+               "CalcView's callees with natives");
+_Static_assert(CV_QUEUE_WAIT_2 == CV_QUEUE_WAIT && CV_LOAD_2 == CV_LOAD && CV_STORE_2 == CV_STORE &&
+                   CV_SWAP_2 == CV_SWAP && CV_SWAP_B && CV_QUEUE_LENGTH && CV_NODE_ID,
+               "CalcView's inline callees, each matched by its code");
+
+#define SPR_DMAU 922u
+#define SPR_DMAL 923u
+#define LC_BASE 0xE0000000u
+#define CV_BLOCK 40u  // matrices per locked cache buffer
+#define MTX33_SIZE 36u
+
+static inline void stfs(CPUState* ctx, u8 f, u32 address) {
+    mem_write32_at(ctx, 0, address, convert_to_single(f64_bits(ctx->fpr[f])));
+}
+
+// LCQueueWait(r3) with the DMA queue empty (the host's transfers are done
+// when queued): 5 cycles.
+static void cv_queue_wait(CPUState* ctx, u32 ret) {
+    ctx->lr = ret;
+    ctx->gpr[4] = (ctx->hid2 >> 24) & 0xFu;
+    cmpwi(ctx, ctx->gpr[4], (s32)ctx->gpr[3]);
+}
+
+// LCLoadBlocks(r3 = cache, r4 = memory, r5 = blocks) and LCStoreBlocks(r3 =
+// memory, r4 = cache, r5 = blocks), each a b to the code that writes DMAU and
+// DMAL: 12 cycles, as the two mtspr go to the instruction fallback, which
+// charges the interpreter's cost on top of the block's.
+static void cv_dma(CPUState* ctx, u32 ret, bool load) {
+    ctx->lr = ret;
+    const u32 code = load ? (u32)CV_LOAD_DMA : (u32)CV_STORE_DMA;
+    const u8 memory = load ? 4 : 3, cache = load ? 3 : 4;
+    ctx->gpr[6] = (ctx->gpr[5] >> 2) & 0x1Fu;
+    ctx->gpr[memory] &= 0x1FFFFFFFu;
+    ctx->gpr[6] |= ctx->gpr[memory];
+    ctx->spr_write(ctx, SPR_DMAU, ctx->gpr[6], code + 0x0Cu);
+    ctx->gpr[6] = ((ctx->gpr[5] << 2) & 0xCu) | ctx->gpr[cache] | (load ? 0x12u : 0x02u);
+    ctx->spr_write(ctx, SPR_DMAL, ctx->gpr[6], code + 0x1Cu);
+}
+#define CV_QUEUE_WAIT_CYCLES 5
+#define CV_DMA_CYCLES 12
+
+// The node ID of matrix r4, from the matrix table at *(r3): 7 cycles.
+static void cv_node_id(CPUState* ctx, u32 ret) {
+    ctx->lr = ret;
+    ctx->gpr[5] = lwz(ctx, ctx->gpr[3]);
+    ctx->gpr[0] = ctx->gpr[4] << 2;
+    ctx->gpr[3] = lwz(ctx, ctx->gpr[5] + 0x24u);
+    ctx->gpr[3] = ctx->gpr[5] + ctx->gpr[3];
+    ctx->gpr[3] += ctx->gpr[0];
+    ctx->gpr[3] = lwz(ctx, ctx->gpr[3] + 4u);
+}
+#define CV_NODE_ID_CYCLES 7
+
+// Swaps the words at a and b: 5 cycles.
+static void cv_swap(CPUState* ctx, u32 ret, u32 a, u32 b) {
+    ctx->gpr[3] = a;
+    ctx->gpr[4] = b;
+    ctx->lr = ret;
+    ctx->gpr[5] = lwz(ctx, a);
+    ctx->gpr[0] = lwz(ctx, b);
+    stw(ctx, a, ctx->gpr[0]);
+    stw(ctx, b, ctx->gpr[5]);
+}
+#define CV_SWAP_CYCLES 5
+
+#define MWCC_GPR14_CYCLES 19  // _savegpr_14, _restgpr_14
+
+// DCInvalidateRange's cycles (rvl_cache.c).
+static s64 dc_invalidate_cycles(u32 start, u32 bytes) {
+    if (!bytes)
+        return 2;
+    return 2 + 6 + 7 * (s64)((bytes + (start & 31u) + 31u) >> 5) + 1;
+}
+
+// What CalcView costs: its own cycles (charged at the end) up to the first
+// block and for each block, and the same with its natives' (an upper bound: a
+// singular matrix's inverse takes fewer), to know how much of it runs before
+// the guest would stop at a safepoint.
+#define CV_MAX_BLOCKS 64u
+#define CV_PROLOGUE_CYCLES (17 + MWCC_GPR14_CYCLES)
+#define CV_EPILOGUE_CYCLES (4 + MWCC_GPR14_CYCLES + 5)
+typedef struct {
+    s64 setup_own, setup_total;
+    s64 block_own[CV_MAX_BLOCKS], block_total[CV_MAX_BLOCKS];
+} CvCost;
+
+// Whether CalcView can run natively, and its costs. Billboards and nodes
+// whose world matrix comes from their parent's are declined.
+static bool calc_view_ok(CPUState* ctx, CvCost* cost) {
+    const u32 sp = ctx->gpr[1], num = ctx->gpr[7], pos = ctx->gpr[3], nrm = ctx->gpr[4];
+    const u32 attrib = ctx->gpr[6], view = ctx->gpr[8], mdl = ctx->gpr[9], tex = ctx->gpr[10];
+    // Its frame and the callees' below it, and the caller's LR slot, which
+    // GetResNode writes.
+    if (!fpu_ready(ctx) || !ctx->cache_range || !ctx->spr_write || (ctx->msr & PPC_MSR_PR) ||
+        ((ctx->hid2 >> 24) & 0xFu) != 0 || num > CV_MAX_BLOCKS * CV_BLOCK || !plain(ctx, sp - 0x140u, 0x148u))
+        return false;
+    s64 cycles = CV_PROLOGUE_CYCLES, natives = 0;
+    u32 ids = 0;
+    if (num) {
+        if (!plain(ctx, view, MTX_SIZE) || !plain(ctx, (u32)CV_ZERO, 4) || !plain(ctx, mdl, 4) ||
+            !plain(ctx, ctx->gpr[13] + (u32)MTX_ARRAY_UNIT_SDA, 8) || !plain(ctx, MTX_UNIT_PAIR, 8))
+            return false;
+        const u32 data = lwz(ctx, mdl), table = data + 0x48u;
+        if (!plain(ctx, table + 0x24u, 4))
+            return false;
+        ids = table + lwz(ctx, table + 0x24u) + 4u;
+        const u32 pos_bytes = (num * MTX_SIZE + 31u) & ~31u;
+        cycles += 23 + 3 + 1 + 3 + 3 + CV_QUEUE_WAIT_CYCLES + 5 + (num <= CV_BLOCK) + 1 +
+                  CV_DMA_CYCLES + 2 + (num > 20 ? 1 + 1 + 3 + 3 : 2 + CV_QUEUE_WAIT_CYCLES) + 11 + 2;
+        natives += dc_invalidate_cycles(pos, pos_bytes);
+        if (nrm) {
+            cycles += 8 + 2;
+            natives += dc_invalidate_cycles(nrm, (num * MTX33_SIZE + 31u) & ~31u);
+            if (tex) {
+                cycles += 4;
+                natives += dc_invalidate_cycles(tex, pos_bytes);
+            }
+        }
+    }
+    cost->setup_own = cycles;
+    cost->setup_total = cycles + natives;
+    for (u32 base = 0, block = 0; base < num; base += CV_BLOCK, ++block) {
+        const u32 remain = num - base, count = remain > CV_BLOCK ? CV_BLOCK : remain;
+        cycles = 4 + (remain > CV_BLOCK ? 5 : 11) + 2 + CV_QUEUE_WAIT_CYCLES + 3;
+        natives = 0;
+        if (base + CV_BLOCK < num)
+            cycles += 8 + (remain - CV_BLOCK > CV_BLOCK ? 2 + 1 : 6) + CV_DMA_CYCLES;
+        cycles += 2;
+        if (count > 1) {
+            cycles += 5 + 1;
+            natives += 67 + 36 * (s64)(count - 1);
+        } else {
+            cycles += 4;
+            natives += PSMTX_CONCAT_CYCLES;
+        }
+        cycles += 8;
+        for (u32 i = 0; i < count; ++i) {
+            const u32 g = base + i;
+            if (!plain(ctx, attrib + 4u * g, 4) || !plain(ctx, ids + 4u * g, 4))
+                return false;
+            const u32 flags = lwz(ctx, attrib + 4u * g);
+            if (flags & 0xFFu)
+                return false;
+            cycles += 2 + 4 + 7 + CV_NODE_ID_CYCLES + 3 + 3;
+            const u32 id = lwz(ctx, ids + 4u * g);
+            if ((s32)id >= 0) {
+                const u32 node = res_node(ctx, mdl, id);
+                if (!node || !plain(ctx, node + 0x14u, 4) || (lwz(ctx, node + 0x14u) & 0x400u))
+                    return false;
+                cycles += 2 + RES_NODE_CYCLES + 2 + 3;
+            }
+            if (nrm) {
+                cycles += 2 + 9 + 6;
+                if (flags & 0x20000000u) {
+                    cycles += 2 + (tex ? 4 + 9 : 0) + 3 + 1;
+                    natives += (tex ? 13 : 0) + 13;
+                } else {
+                    cycles += 2 + (tex ? 4 + 4 + 1 : 3);
+                    natives += (tex ? 13 : 0) + 27 + 21;
+                }
+            }
+        }
+        cycles += 2 + 5 + CV_DMA_CYCLES + 2 + (nrm ? 6 + 2 : 0) + 2;
+        if (nrm)
+            cycles += 5 + CV_DMA_CYCLES + 2 + (tex ? 4 + CV_DMA_CYCLES : 0);
+        cycles += 4 * (3 + CV_SWAP_CYCLES) + 8 + 2;
+        cost->block_own[block] = cycles;
+        cost->block_total[block] = cycles + natives;
+    }
+    return true;
+}
+
+#define AT(offset) (base + (offset))
+#define FRAME(offset) (sp + (offset))
+
+// One block of up to 40 matrices: their view matrices, then the normal (and
+// texture) matrices made from those, in locked cache buffers the DMA filled
+// and empties.
+static void calc_view_block(CPUState* ctx, u32 base, u32 sp) {
+    u32* const r = ctx->gpr;
+    r[14] = r[17] - r[26];
+    cmplwi(ctx, r[14], CV_BLOCK);
+    r[25] = r[14];
+    if (r[14] > CV_BLOCK) {
+        r[0] = 0x2D;
+        r[25] = CV_BLOCK;
+        stw(ctx, FRAME(0x70), r[0]);
+        r[24] = 0x3C;
+    } else {
+        r[3] = r[14] * 0x24u;
+        r[4] = r[14] * 0x30u;
+        r[0] = r[3] + 0x1Fu;
+        r[0] >>= 5;
+        r[4] += 0x1Fu;
+        stw(ctx, FRAME(0x70), r[0]);
+        r[24] = r[4] >> 5;
+    }
+    r[3] = r[27];
+    cv_queue_wait(ctx, AT(0x19C));
+    r[0] = r[26] + CV_BLOCK;
+    cmplwi(ctx, r[0], r[17]);
+    if (r[0] < r[17]) {
+        // The next block's model matrices
+        r[5] = r[14] - CV_BLOCK;
+        r[3] = lwz(ctx, FRAME(0x2C));
+        r[0] *= 0x30u;
+        cmplwi(ctx, r[5], CV_BLOCK);
+        r[4] = r[16] + r[0];
+        if (r[5] > CV_BLOCK) {
+            r[5] = 0x3C;
+        } else {
+            r[5] *= 0x30u;
+            r[0] = r[5] + 0x1Fu;
+            r[5] = r[0] >> 5;
+        }
+        cv_dma(ctx, AT(0x1D8), true);
+    }
+    cmplwi(ctx, r[25], 1);
+    r[4] = lwz(ctx, FRAME(0x3C));
+    r[3] = r[18];
+    r[5] = lwz(ctx, FRAME(0x38));
+    // Each native call below is checked by calc_view_ok: it runs.
+    if (r[25] > 1) {
+        r[6] = r[25];
+        ctx->lr = AT(0x1F4);
+        rvl_PSMTXConcatArray(ctx);
+    } else {
+        ctx->lr = AT(0x208);
+        rvl_PSMTXConcat(ctx);
+    }
+    r[3] = lwz(ctx, FRAME(0xC));
+    r[23] = 0;
+    r[0] = lwz(ctx, FRAME(0x7C));
+    r[14] = 0;
+    r[21] = 0;
+    r[0] = r[3] + r[0];
+    stw(ctx, FRAME(0x74), r[0]);
+    for (;;) {
+        cmplwi(ctx, r[23], r[25]);
+        if (r[23] >= r[25])
+            break;
+        r[3] = lwz(ctx, FRAME(0x74));
+        r[8] = lwz(ctx, r[3] + r[21]);
+        r[0] = r[8] & 0xFFu;  // 0: no billboard
+        cmpwi(ctx, r[0], 0);
+        r[5] = lwz(ctx, r[19]);
+        r[22] = r[26] + r[23];
+        r[4] = r[22];
+        r[3] = FRAME(0x10);
+        r[0] = r[5] + 0x48u;
+        stw(ctx, FRAME(0x10), r[0]);
+        cv_node_id(ctx, AT(0x318));
+        cmpwi(ctx, r[3], 0);
+        r[4] = r[3];
+        if ((s32)r[3] >= 0) {
+            r[3] = r[19];
+            run_res_node(ctx, AT(0x32C));
+            cmpwi(ctx, r[3], 0);
+            r[0] = lwz(ctx, r[3] + 0x14u) & 0x400u;  // 0: the node's own matrix
+            cmpwi(ctx, r[0], 0);
+        }
+        r[23] += 1;
+        r[14] += 0x30u;
+        r[21] += 4u;
+    }
+    r[0] = lwz(ctx, FRAME(8));
+    r[5] = r[24];
+    r[4] = lwz(ctx, FRAME(0x38));
+    r[3] = r[0] + r[31];
+    cv_dma(ctx, AT(0x3A4), false);
+    cmpwi(ctx, r[15], 0);
+    if (r[15]) {
+        r[0] = 0;
+        r[23] = 0;
+        stw(ctx, FRAME(0x78), r[0]);
+        r[30] = 0;
+        r[14] = 0;
+        for (;;) {
+            cmplwi(ctx, r[23], r[25]);
+            if (r[23] >= r[25])
+                break;
+            r[3] = lwz(ctx, FRAME(0x74));
+            r[4] = lwz(ctx, FRAME(0x38));
+            r[0] = lwz(ctx, r[3] + r[14]);
+            r[3] = lwz(ctx, FRAME(0x34));
+            r[22] = r[4] + r[30];
+            r[0] &= 0x20000000u;  // uniform scale
+            cmpwi(ctx, r[0], 0);
+            const bool uniform = r[0] != 0;
+            r[0] = lwz(ctx, FRAME(0x78));
+            r[21] = r[3] + r[0];
+            cmpwi(ctx, r[20], 0);
+            if (uniform) {
+                if (r[20]) {
+                    r[0] = lwz(ctx, FRAME(0x30));
+                    r[3] = r[22];
+                    r[4] = r[0] + r[30];
+                    ctx->lr = AT(0x400);
+                    rvl_PSMTXCopy(ctx);
+                    // The texture matrix's translation: 0
+                    for (u32 row = 3; row-- > 0;) {
+                        r[0] = lwz(ctx, FRAME(0x30));
+                        r[3] = r[0] + r[30];
+                        stfs(ctx, 31, r[3] + 0x0Cu + 0x10u * row);
+                    }
+                }
+                r[3] = r[21];
+                r[4] = r[22];
+                ctx->lr = AT(0x430);
+                nw4r_MTX34ToMTX33(ctx);
+            } else if (r[20]) {
+                r[0] = lwz(ctx, FRAME(0x30));
+                r[3] = r[22];
+                r[4] = r[0] + r[30];
+                ctx->lr = AT(0x44C);
+                rvl_PSMTXInvXpose(ctx);
+                r[0] = lwz(ctx, FRAME(0x30));
+                r[3] = r[21];
+                r[4] = r[0] + r[30];
+                ctx->lr = AT(0x45C);
+                nw4r_MTX34ToMTX33(ctx);
+            } else {
+                r[3] = r[21];
+                r[4] = r[22];
+                ctx->lr = AT(0x46C);
+                nw4r_MTX34InvTranspose33(ctx);
+            }
+            r[3] = lwz(ctx, FRAME(0x78));
+            r[23] += 1;
+            r[30] += 0x30u;
+            r[14] += 4u;
+            r[3] += 0x24u;
+            stw(ctx, FRAME(0x78), r[3]);
+        }
+    }
+    cmpwi(ctx, r[15], 0);
+    if (r[15]) {
+        r[0] = lwz(ctx, FRAME(0x80));
+        r[4] = lwz(ctx, FRAME(0x34));
+        r[5] = lwz(ctx, FRAME(0x70));
+        r[3] = r[15] + r[0];
+        cv_dma(ctx, AT(0x4A8), false);
+        cmpwi(ctx, r[20], 0);
+        if (r[20]) {
+            r[4] = lwz(ctx, FRAME(0x30));
+            r[5] = r[24];
+            r[3] = r[20] + r[31];
+            cv_dma(ctx, AT(0x4C0), false);
+        }
+    }
+    cv_swap(ctx, AT(0x4CC), FRAME(0x3C), FRAME(0x2C));
+    cv_swap(ctx, AT(0x4D8), FRAME(0x38), FRAME(0x28));
+    cv_swap(ctx, AT(0x4E4), FRAME(0x34), FRAME(0x24));
+    cv_swap(ctx, AT(0x4F0), FRAME(0x30), FRAME(0x20));
+    r[3] = lwz(ctx, FRAME(0x80));
+    r[26] += CV_BLOCK;
+    r[31] += 0x780u;
+    r[3] += 0x5A0u;
+    stw(ctx, FRAME(0x80), r[3]);
+    r[3] = lwz(ctx, FRAME(0x7C));
+    r[3] += 0xA0u;
+    stw(ctx, FRAME(0x7C), r[3]);
+}
+
+// void CalcView_LC_DMA_ModelMtx(MTX34* viewPos, MTX33* viewNrm, const MTX34*
+// model, const u32* attrib, u32 num, const MTX34* view, const ResMdl* mdl,
+// MTX34* viewTex): the view matrices of a model's nodes (and their normal and
+// texture matrices when asked for), 40 at a time through the locked cache.
+bool g3d_CalcViewLC(CPUState* ctx) {
+    CvCost cost;
+    if (!calc_view_ok(ctx, &cost))
+        return false;
+    // The guest stops at a safepoint once the downcount runs out: run the
+    // setup and the blocks that fit whole, and leave the rest to it.
+    const u32 blocks = (ctx->gpr[7] + CV_BLOCK - 1u) / CV_BLOCK;
+    s64 own = cost.setup_own;
+    s64 left = ctx->downcount - cost.setup_total - (blocks ? cost.block_total[0] : 0) -
+               (blocks <= 1 ? CV_EPILOGUE_CYCLES : 0);
+    if (left <= 0)
+        return false;
+    u32* const r = ctx->gpr;
+    const u32 base = (u32)CV_BASE, caller = r[1], sp = caller - 0xE0u;
+
+    stw(ctx, sp, caller);
+    r[1] = sp;
+    r[0] = ctx->lr;
+    stw(ctx, FRAME(0xE4), r[0]);
+    mem_write64(ctx, FRAME(0xD0), f64_bits(ctx->fpr[31]));
+    STORE(31, sp, 0xD8u);
+    r[11] = FRAME(0xD0);
+    ctx->lr = AT(0x1C);  // _savegpr_14
+    for (u32 i = 0; i < 18; ++i)
+        stw(ctx, r[11] - 0x48u + 4u * i, r[14 + i]);
+    cmpwi(ctx, r[7], 0);
+    stw(ctx, FRAME(8), r[3]);
+    r[15] = r[4];
+    r[16] = r[5];
+    stw(ctx, FRAME(0xC), r[6]);
+    r[17] = r[7];
+    r[18] = r[8];
+    r[19] = r[9];
+    r[20] = r[10];
+
+    if (r[17]) {
+        r[4] = r[7] * 0x30u;
+        r[5] = LC_BASE;
+        stw(ctx, FRAME(0x3C), r[5]);
+        r[11] = r[5] + 0x800u;
+        r[10] = r[5] + 0x1000u;
+        r[9] = r[5] + 0x1800u;
+        r[8] = r[5] + 0x2000u;
+        r[7] = r[5] + 0x2800u;
+        r[6] = r[5] + 0x3000u;
+        r[5] = r[5] + 0x3800u;
+        r[0] = r[4] + 0x1Fu;
+        stw(ctx, FRAME(0x38), r[11]);
+        r[14] = r[0] & ~0x1Fu;
+        stw(ctx, FRAME(0x34), r[10]);
+        r[4] = r[14];
+        stw(ctx, FRAME(0x30), r[9]);
+        stw(ctx, FRAME(0x2C), r[8]);
+        stw(ctx, FRAME(0x28), r[7]);
+        stw(ctx, FRAME(0x24), r[6]);
+        stw(ctx, FRAME(0x20), r[5]);
+        ctx->lr = AT(0x98);
+        rvl_DCInvalidateRange(ctx);
+        cmpwi(ctx, r[15], 0);
+        r[27] = 1;
+        if (r[15]) {
+            r[4] = r[17] * 0x24u;
+            r[3] = r[15];
+            r[27] = 2;
+            r[0] = r[4] + 0x1Fu;
+            r[4] = r[0] & ~0x1Fu;
+            ctx->lr = AT(0xBC);
+            rvl_DCInvalidateRange(ctx);
+            cmpwi(ctx, r[20], 0);
+            if (r[20]) {
+                r[3] = r[20];
+                r[4] = r[14];
+                r[27] = 3;
+                ctx->lr = AT(0xD4);
+                rvl_DCInvalidateRange(ctx);
+            }
+        }
+        ctx->lr = AT(0xD8);  // the billboard work matrix
+        r[3] = (u32)CV_BB_TEMP;
+        r[28] = r[3];
+        r[3] = 0;
+        cv_queue_wait(ctx, AT(0xE4));
+        cmplwi(ctx, r[17], CV_BLOCK);
+        r[3] = lwz(ctx, FRAME(0x3C));
+        r[4] = r[16];
+        r[5] = 0x3C;
+        if (r[17] <= CV_BLOCK)
+            r[5] = r[14] >> 5;
+        cv_dma(ctx, AT(0x100), true);
+        cmplwi(ctx, r[17], 20);
+        if (r[17] > 20) {
+            ctx->lr = AT(0x114);  // the queue's length
+            r[4] = ctx->hid2;
+            r[3] = (r[4] >> 24) & 0xFu;
+            cmpwi(ctx, r[3], 0);
+        } else {
+            r[3] = 0;
+            cv_queue_wait(ctx, AT(0x128));
+        }
+        r[0] = 0;
+        r[3] = high_half((u32)CV_ZERO);
+        stw(ctx, FRAME(0x80), r[0]);
+        r[29] = high_half((u32)CV_BB_TABLE);
+        lfs(ctx, 31, (u32)CV_ZERO);
+        stw(ctx, FRAME(0x7C), r[0]);
+        r[29] = (u32)CV_BB_TABLE;
+        r[26] = 0;
+        r[31] = 0;
+        for (u32 block = 0;; ++block) {
+            cmplwi(ctx, r[26], r[17]);
+            if (r[26] >= r[17])
+                break;
+            if (block) {
+                const s64 need = cost.block_total[block] + (block + 1u == blocks ? CV_EPILOGUE_CYCLES : 0);
+                if (left - need <= 0) {
+                    // Where the guest's loop goes on, as from its safepoint.
+                    ctx->downcount -= own;
+                    ctx->pc = AT(0x154);
+                    return true;
+                }
+                left -= need;
+            }
+            own += cost.block_own[block];
+            calc_view_block(ctx, base, sp);
+        }
+    }
+
+    LOAD(31, sp, 0xD8u);
+    r[11] = FRAME(0xD0);
+    ctx->fpr[31] = f64_value(mem_read64(ctx, FRAME(0xD0)));
+    ctx->lr = AT(0x528);  // _restgpr_14
+    for (u32 i = 0; i < 18; ++i)
+        r[14 + i] = lwz(ctx, r[11] - 0x48u + 4u * i);
+    r[0] = lwz(ctx, FRAME(0xE4));
+    ctx->lr = r[0];
+    r[1] = caller;
+    ctx->downcount -= own + CV_EPILOGUE_CYCLES;
+    ctx->pc = ctx->lr & ~3u;
+    return true;
+}
+
+#undef AT
+#undef FRAME
+

@@ -16,6 +16,7 @@
 
 #define MTX_SIZE 48u  // Mtx: 3 rows of 4 f32
 #define VEC_SIZE 12u  // Vec: 3 f32
+#define MTX33_SIZE 36u  // MTX33: 3 rows of 3 f32
 
 // From the natives list: MTXConcat's constant row (0, 0, 0, 1) as a {0, 1}
 // pair in .sdata2 (MTX_UNIT_PAIR; MTXConcatArray reaches it as r13 +
@@ -740,6 +741,40 @@ bool rvl_PSMTXInvXpose(CPUState* ctx) {
     ctx->gpr[3] = 1;
     STORE1(9, inv, 0x18);
     STORE1(8, inv, 0x28);
+    ctx->downcount -= 27 + 21;
+    return true;
+}
+
+// u32 MTX34InvTranspose(MTX33* dst, const MTX34* src) (nw4r math, g3d's normal
+// matrices): the inverse transpose of src's 3x3 part, 0 when it is singular.
+// MTXInvXpose's cofactors, then 1/det with two Newton steps.
+bool nw4r_MTX34InvTranspose33(CPUState* ctx) {
+    const u32 dst = ctx->gpr[3], src = ctx->gpr[4];
+    if (!float_pairs_ready(ctx) || !fast_matrix(ctx, src, false) ||
+        !fast_bytes(ctx, dst, MTX33_SIZE, true))
+        return false;
+    if (!inverse_cofactors(ctx, src, 1, true)) {
+        ctx->gpr[3] = 0;
+        ctx->downcount -= 27 + 2;
+        return true;
+    }
+    INVERSE_RECIPROCAL();
+    ppc_ps_add_op(ctx, 6, 0, 0);
+    ppc_ps_mul_inline(ctx, 5, 0, 0);
+    ppc_ps_madd_inline(ctx, 0, 7, 5, 6, true, true);
+    ppc_ps_muls_inline(ctx, 13, 13, 0, false);
+    ppc_ps_muls_inline(ctx, 12, 12, 0, false);
+    STORE(13, dst, 0x00);
+    ppc_ps_muls_inline(ctx, 11, 11, 0, false);
+    STORE(12, dst, 0x0C);
+    ppc_ps_muls_inline(ctx, 10, 10, 0, false);
+    STORE(11, dst, 0x18);
+    ppc_ps_muls_inline(ctx, 9, 9, 0, false);
+    STORE1(10, dst, 0x08);
+    ppc_ps_muls_inline(ctx, 8, 8, 0, false);
+    STORE1(9, dst, 0x14);
+    STORE1(8, dst, 0x20);
+    ctx->gpr[3] = 1;
     ctx->downcount -= 27 + 21;
     return true;
 }
