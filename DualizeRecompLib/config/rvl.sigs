@@ -10,8 +10,9 @@ define OS_DISABLE_INTERRUPTS_END rvl_OSDisableInterrupts+C
 # rvl_cache.c: the sc in DCFlushRange and DCStoreRange.
 define DC_FLUSH_RANGE_SC rvl_DCFlushRange+28
 define DC_STORE_RANGE_SC rvl_DCStoreRange+28
-# rvl_mtx.c: MTXConcat's {0, 1} pair, and .sdata2's 0.0f, 1.0f, 0.5f, 3.0f off r2.
+# rvl_mtx.c: MTXConcat's {0, 1} pair (absolute, and off r13 in MTXConcatArray), and .sdata2's 0.0f, 1.0f, 0.5f, 3.0f off r2.
 define MTX_UNIT_PAIR addr(rvl_PSMTXConcat+10,1C)
+define MTX_ARRAY_UNIT_SDA imm(rvl_PSMTXConcatArray+38)
 define SDA2_ZERO imm(rvl_PSMTXIdentity)
 define SDA2_ONE imm(rvl_PSMTXIdentity+4)
 define SDA2_HALF imm(rvl_PSVECNormalize+C)
@@ -38,6 +39,7 @@ rvl_OSWakeupThread F4 9421FFF0 C4F2C58EDE43846B
 rvl_PSMTXIdentity 2C C0020000 83A4971E8D64FFA4 anywhere
 rvl_PSMTXCopy 34 E0030000 077D9E23E845819B anywhere
 rvl_PSMTXConcat CC 9421FFC0 BEFB285C37F6638A anywhere
+rvl_PSMTXConcatArray 198 9421FFA0 DB70B87ACEF1E7BA anywhere
 rvl_PSMTXTrans 34 C0020000 6D56794D5C525A4F anywhere
 rvl_PSMTXTransApply 4C E0830000 D83FC18D9D9B47EE anywhere
 rvl_PSMTXScale 28 C0020000 13105F183A255831 anywhere

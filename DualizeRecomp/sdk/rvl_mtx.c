@@ -18,7 +18,8 @@
 #define VEC_SIZE 12u  // Vec: 3 f32
 
 // From the natives list: MTXConcat's constant row (0, 0, 0, 1) as a {0, 1}
-// pair in .sdata2 (MTX_UNIT_PAIR), and the .sdata2 constants 0.0f, 1.0f, 0.5f
+// pair in .sdata2 (MTX_UNIT_PAIR; MTXConcatArray reaches it as r13 +
+// MTX_ARRAY_UNIT_SDA), and the .sdata2 constants 0.0f, 1.0f, 0.5f
 // and 3.0f as offsets off r2 (SDA2_ZERO, SDA2_ONE, SDA2_HALF, SDA2_THREE).
 
 // The FPU is on with its exceptions masked, so no instruction can trap.
@@ -155,6 +156,121 @@ bool rvl_PSMTXConcat(CPUState* ctx) {
     ctx->fpr[15] = f15;
     ctx->fpr[31] = f31;
     ctx->downcount -= 51;
+    return true;
+}
+
+// void PSMTXConcatArray(const Mtx a, const Mtx* src, Mtx* dst, u32 count)
+// dst[i] = a * src[i]. The guest's loop counts CTR down from count - 1 with
+// bdnz, so a count below 2 would run it ~4G times: declined. The guest's
+// loop is a safepoint, so a call that would run out of cycles inside it is
+// declined too and events keep their timing.
+bool rvl_PSMTXConcatArray(CPUState* ctx) {
+    const u32 a = ctx->gpr[3], count = ctx->gpr[6];
+    const u32 unit = ctx->gpr[13] + (u32)MTX_ARRAY_UNIT_SDA;
+    const u32 frame = ctx->gpr[1] - 96u;
+    u32 src = ctx->gpr[4], dst = ctx->gpr[5];
+    const s64 cycles = 67 + 36 * (s64)(count - 1);
+    if (count < 2 || count > 0x10000u || ctx->downcount <= cycles ||
+        !float_pairs_ready(ctx) || !fast_matrix(ctx, a, false) ||
+        !fast_bytes(ctx, src, MTX_SIZE * count, false) ||
+        !fast_bytes(ctx, dst, MTX_SIZE * count, true) || !fast_bytes(ctx, unit, 8, false) ||
+        !fast_bytes(ctx, frame, 96, true))
+        return false;
+
+    // f31-f27 are spilled as the guest does, stfd then psq_st, and reloaded
+    // with psq_l then lfd: ps0 comes back exact, ps1 rounded to single.
+    mem_write32_at(ctx, 0, frame, ctx->gpr[1]);
+    for (u8 i = 0; i < 5; ++i) {
+        mem_write64(ctx, frame + 80u - 16u * i, f64_bits(ctx->fpr[31 - i]));
+        STORE(31 - i, frame, 88u - 16u * i);
+    }
+    LOAD(0, a, 0);
+    LOAD(1, a, 8);
+    LOAD(2, a, 16);
+    LOAD(3, a, 24);
+    LOAD(4, a, 32);
+    LOAD(5, a, 40);
+    LOAD(6, src, 0);
+    LOAD(7, src, 8);
+    ppc_ps_muls_inline(ctx, 12, 6, 0, false);
+    LOAD(8, src, 16);
+    ppc_ps_muls_inline(ctx, 31, 6, 2, false);
+    LOAD(10, src, 32);
+    ppc_ps_muls_inline(ctx, 29, 6, 4, false);
+    LOAD(9, src, 24);
+    ppc_ps_madds_inline(ctx, 12, 8, 0, 12, true);
+    LOAD(27, unit, 0);
+    ppc_ps_madds_inline(ctx, 31, 8, 2, 31, true);
+    LOAD(11, src, 40);
+    ppc_ps_madds_inline(ctx, 29, 8, 4, 29, true);
+    ppc_ps_muls_inline(ctx, 13, 7, 0, false);
+    ppc_ps_muls_inline(ctx, 30, 7, 2, false);
+    ppc_ps_muls_inline(ctx, 28, 7, 4, false);
+    ppc_ps_madds_inline(ctx, 12, 10, 1, 12, false);
+    ppc_ps_madds_inline(ctx, 31, 10, 3, 31, false);
+    ppc_ps_madds_inline(ctx, 29, 10, 5, 29, false);
+    ppc_ps_madds_inline(ctx, 13, 9, 0, 13, true);
+    STORE(12, dst, 0);
+    ppc_ps_madds_inline(ctx, 30, 9, 2, 30, true);
+    ppc_ps_madds_inline(ctx, 28, 9, 4, 28, true);
+    STORE(31, dst, 16);
+    for (u32 left = count - 1; left != 0; --left) {
+        ppc_ps_madds_inline(ctx, 13, 11, 1, 13, false);
+        LOAD(6, src, 48);
+        ppc_ps_madds_inline(ctx, 30, 11, 3, 30, false);
+        STORE(29, dst, 32);
+        ppc_ps_madds_inline(ctx, 28, 11, 5, 28, false);
+        LOAD(8, src, 64);
+        ppc_ps_madd_inline(ctx, 13, 27, 1, 13, false, false);
+        LOAD(10, src, 80);
+        ppc_ps_muls_inline(ctx, 12, 6, 0, false);
+        LOAD(7, src, 56);
+        ppc_ps_muls_inline(ctx, 31, 6, 2, false);
+        LOAD(9, src, 72);
+        STORE(13, dst, 8);
+        ppc_ps_madd_inline(ctx, 30, 27, 3, 30, false, false);
+        ppc_ps_madds_inline(ctx, 12, 8, 0, 12, true);
+        LOAD(11, src, 88);
+        ppc_ps_muls_inline(ctx, 29, 6, 4, false);
+        src += MTX_SIZE;
+        STORE(30, dst, 24);
+        ppc_ps_madd_inline(ctx, 28, 27, 5, 28, false, false);
+        ppc_ps_madds_inline(ctx, 31, 8, 2, 31, true);
+        ppc_ps_madds_inline(ctx, 29, 8, 4, 29, true);
+        STORE(28, dst, 40);
+        ppc_ps_madds_inline(ctx, 12, 10, 1, 12, false);
+        ppc_ps_muls_inline(ctx, 13, 7, 0, false);
+        ppc_ps_muls_inline(ctx, 30, 7, 2, false);
+        ppc_ps_muls_inline(ctx, 28, 7, 4, false);
+        STORE(12, dst, 48);
+        ppc_ps_madds_inline(ctx, 31, 10, 3, 31, false);
+        ppc_ps_madds_inline(ctx, 29, 10, 5, 29, false);
+        ppc_ps_madds_inline(ctx, 13, 9, 0, 13, true);
+        STORE(31, dst, 64);
+        ppc_ps_madds_inline(ctx, 30, 9, 2, 30, true);
+        ppc_ps_madds_inline(ctx, 28, 9, 4, 28, true);
+        dst += MTX_SIZE;
+    }
+    ppc_ps_madds_inline(ctx, 13, 11, 1, 13, false);
+    STORE(29, dst, 32);
+    ppc_ps_madds_inline(ctx, 30, 11, 3, 30, false);
+    ppc_ps_madds_inline(ctx, 28, 11, 5, 28, false);
+    ppc_ps_madd_inline(ctx, 13, 27, 1, 13, false, false);
+    ppc_ps_madd_inline(ctx, 30, 27, 3, 30, false, false);
+    ppc_ps_madd_inline(ctx, 28, 27, 5, 28, false, false);
+    STORE(13, dst, 8);
+    STORE(30, dst, 24);
+    STORE(28, dst, 40);
+    for (u8 i = 0; i < 5; ++i) {
+        LOAD(31 - i, frame, 88u - 16u * i);
+        ctx->fpr[31 - i] = f64_value(mem_read64(ctx, frame + 80u - 16u * i));
+    }
+    ctx->gpr[0] = count - 1;
+    ctx->gpr[4] = src;
+    ctx->gpr[5] = dst;
+    ctx->gpr[6] = unit;
+    ctx->ctr = 0;
+    ctx->downcount -= cycles;
     return true;
 }
 
