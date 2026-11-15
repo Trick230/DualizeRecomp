@@ -6,12 +6,13 @@
 // registers left behind are identical; what it saves is the per-instruction
 // FPU-available and exception checks and the callee-saved spills. It declines
 // unless the FPU is enabled with its exceptions masked, GQR0 is the unquantized
-// float format and every operand lies in fast guest memory, so no helper can
-// fault part way through.
+// float format and every operand lies in plain guest memory (guest_memory.h),
+// so no helper can fault part way through.
 
 #include "core/cpu.h"
 
 #include "ppc_natives.h"
+#include "sdk/guest_memory.h"
 
 #define MTX_SIZE 48u  // Mtx: 3 rows of 4 f32
 #define VEC_SIZE 12u  // Vec: 3 f32
@@ -27,8 +28,8 @@ static inline bool float_pairs_ready(CPUState* ctx) {
 }
 
 static inline bool fast_bytes(CPUState* ctx, u32 address, u32 size, bool written) {
-    return written ? ppc_fast_write_ptr(ctx, address, size) != NULL
-                   : ppc_fast_ptr(ctx->fast_read, address, size) != NULL;
+    (void)written;
+    return guest_span(ctx, address, size) != NULL;
 }
 
 static inline bool fast_matrix(CPUState* ctx, u32 address, bool written) {
@@ -103,7 +104,7 @@ bool rvl_PSMTXCopy(CPUState* ctx) {
 bool rvl_PSMTXConcat(CPUState* ctx) {
     const u32 a = ctx->gpr[3], b = ctx->gpr[4], ab = ctx->gpr[5];
     if (!float_pairs_ready(ctx) || !fast_matrix(ctx, a, false) || !fast_matrix(ctx, b, false) ||
-        !fast_matrix(ctx, ab, true) || !ppc_fast_ptr(ctx->fast_read, MTX_UNIT_PAIR, 8))
+        !fast_matrix(ctx, ab, true) || !fast_bytes(ctx, MTX_UNIT_PAIR, 8, false))
         return false;
 
     // f14, f15 and f31 are spilled and reloaded with lfd, which restores ps0

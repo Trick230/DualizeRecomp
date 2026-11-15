@@ -1,21 +1,22 @@
 // Host implementations of the Metrowerks runtime's memory routines (see
 // rvl_os.c for the contract every native follows).
 //
-// Ranges that leave fast guest memory, or straddle two of its slices, decline
-// to the guest code, which goes through the out-of-line memory path.
+// Ranges that reach the hardware window decline to the guest code, which goes
+// through the out-of-line memory path.
 
 #include "core/cpu.h"
 
+#include "sdk/guest_memory.h"
+
 #include <string.h>
 
-// Host view of `size` guest bytes, or NULL; ppc_fast_ptr's bound assumes
-// accesses no larger than a slice.
+// Host view of `size` guest bytes, or NULL (guest_memory.h).
 static inline const u8* source(CPUState* ctx, u32 address, u32 size) {
-    return size <= PPC_FAST_SLICE_SIZE ? ppc_fast_ptr(ctx->fast_read, address, size) : NULL;
+    return guest_span(ctx, address, size);
 }
 
 static inline u8* destination(CPUState* ctx, u32 address, u32 size) {
-    return size <= PPC_FAST_SLICE_SIZE ? ppc_fast_write_ptr(ctx, address, size) : NULL;
+    return guest_span(ctx, address, size);
 }
 
 // void* memcpy(void* dst, const void* src, size_t n)
