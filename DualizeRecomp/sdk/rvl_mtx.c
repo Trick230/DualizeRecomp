@@ -597,3 +597,149 @@ bool rvl_PSVECCrossProduct(CPUState* ctx) {
     ctx->downcount -= 15;
     return true;
 }
+
+// The cofactors and determinant MTXInverse and MTXInvXpose share (their first
+// 27 instructions, up to the determinant's ps_cmpo0 against a 0.0 they make
+// in f6 or f1): rows of the transposed adjugate in f13, f12, f11 (x, y) and
+// f10, f9, f8 (z), the determinant in f7. Whether it isn't zero.
+static bool inverse_cofactors(CPUState* ctx, u32 src, u8 zero, bool xpose) {
+    LOAD1(0, src, 0x00);
+    LOAD(1, src, 0x04);
+    LOAD1(2, src, 0x10);
+    merge(ctx, 6, ctx->ps1[1], ctx->fpr[0]);
+    LOAD(3, src, 0x14);
+    LOAD1(4, src, 0x20);
+    merge(ctx, 7, ctx->ps1[3], ctx->fpr[2]);
+    LOAD(5, src, 0x24);
+    ppc_ps_mul_inline(ctx, 11, 3, 6);
+    if (xpose) {
+        merge(ctx, 8, ctx->ps1[5], ctx->fpr[4]);
+        ppc_ps_mul_inline(ctx, 13, 5, 7);
+        ppc_ps_madd_inline(ctx, 11, 1, 7, 11, true, false);
+        ppc_ps_mul_inline(ctx, 12, 1, 8);
+        ppc_ps_madd_inline(ctx, 13, 3, 8, 13, true, false);
+        ppc_ps_madd_inline(ctx, 12, 5, 6, 12, true, false);
+        ppc_ps_mul_inline(ctx, 10, 3, 4);
+        ppc_ps_mul_inline(ctx, 9, 0, 5);
+        ppc_ps_mul_inline(ctx, 8, 1, 2);
+        ppc_ps_madd_inline(ctx, 10, 2, 5, 10, true, false);
+        ppc_ps_madd_inline(ctx, 9, 1, 4, 9, true, false);
+        ppc_ps_madd_inline(ctx, 8, 0, 3, 8, true, false);
+        ppc_ps_mul_inline(ctx, 7, 0, 13);
+        ppc_ps_sub_inline(ctx, 1, 1, 1);
+        ppc_ps_madd_inline(ctx, 7, 2, 12, 7, false, false);
+        ppc_ps_madd_inline(ctx, 7, 4, 11, 7, false, false);
+    } else {
+        ppc_ps_mul_inline(ctx, 13, 5, 7);
+        merge(ctx, 8, ctx->ps1[5], ctx->fpr[4]);
+        ppc_ps_madd_inline(ctx, 11, 1, 7, 11, true, false);
+        ppc_ps_mul_inline(ctx, 12, 1, 8);
+        ppc_ps_madd_inline(ctx, 13, 3, 8, 13, true, false);
+        ppc_ps_mul_inline(ctx, 10, 3, 4);
+        ppc_ps_madd_inline(ctx, 12, 5, 6, 12, true, false);
+        ppc_ps_mul_inline(ctx, 9, 0, 5);
+        ppc_ps_mul_inline(ctx, 8, 1, 2);
+        ppc_ps_sub_inline(ctx, 6, 6, 6);
+        ppc_ps_madd_inline(ctx, 10, 2, 5, 10, true, false);
+        ppc_ps_mul_inline(ctx, 7, 0, 13);
+        ppc_ps_madd_inline(ctx, 9, 1, 4, 9, true, false);
+        ppc_ps_madd_inline(ctx, 7, 2, 12, 7, false, false);
+        ppc_ps_madd_inline(ctx, 8, 0, 3, 8, true, false);
+        ppc_ps_madd_inline(ctx, 7, 4, 11, 7, false, false);
+    }
+    ctx->cr = ppc_fcmp_cr(ctx, ctx->cr, 0, ctx->fpr[7], ctx->fpr[zero], true);
+    return !(ctx->cr & 0x20000000u);
+}
+
+// fres d, b
+static inline void fres(CPUState* ctx, u8 d, u8 b) {
+    f64 result;
+    if (ppc_fres(ctx, ctx->fpr[b], &result))
+        ctx->fpr[d] = ctx->ps1[d] = result;
+}
+
+// 1/det refined by one Newton step into f0 (fres, ps_add, ps_mul, ps_nmsub).
+#define INVERSE_RECIPROCAL()                                \
+    do {                                                    \
+        fres(ctx, 0, 7);                                    \
+        ppc_ps_add_op(ctx, 6, 0, 0);                        \
+        ppc_ps_mul_inline(ctx, 5, 0, 0);                    \
+        ppc_ps_madd_inline(ctx, 0, 7, 5, 6, true, true);    \
+    } while (0)
+
+// u32 PSMTXInverse(const Mtx src, Mtx inv): 0 when src is singular.
+bool rvl_PSMTXInverse(CPUState* ctx) {
+    const u32 src = ctx->gpr[3], inv = ctx->gpr[4];
+    if (!float_pairs_ready(ctx) || !fast_matrix(ctx, src, false) || !fast_matrix(ctx, inv, true))
+        return false;
+    if (!inverse_cofactors(ctx, src, 6, false)) {
+        ctx->gpr[3] = 0;
+        ctx->downcount -= 27 + 2;
+        return true;
+    }
+    INVERSE_RECIPROCAL();
+    load_single(ctx, 1, src + 0x0C);
+    ppc_ps_muls_inline(ctx, 13, 13, 0, false);
+    load_single(ctx, 2, src + 0x1C);
+    ppc_ps_muls_inline(ctx, 12, 12, 0, false);
+    load_single(ctx, 3, src + 0x2C);
+    ppc_ps_muls_inline(ctx, 11, 11, 0, false);
+    merge(ctx, 5, ctx->fpr[13], ctx->fpr[12]);
+    ppc_ps_muls_inline(ctx, 10, 10, 0, false);
+    merge(ctx, 4, ctx->ps1[13], ctx->ps1[12]);
+    ppc_ps_muls_inline(ctx, 9, 9, 0, false);
+    STORE(5, inv, 0x00);
+    ppc_ps_mul_inline(ctx, 6, 13, 1);
+    STORE(4, inv, 0x10);
+    ppc_ps_muls_inline(ctx, 8, 8, 0, false);
+    ppc_ps_madd_inline(ctx, 6, 12, 2, 6, false, false);
+    STORE1(10, inv, 0x20);
+    ppc_ps_madd_inline(ctx, 6, 11, 3, 6, false, true);
+    STORE1(9, inv, 0x24);
+    ppc_ps_mul_inline(ctx, 7, 10, 1);
+    merge(ctx, 5, ctx->fpr[11], ctx->fpr[6]);
+    STORE1(8, inv, 0x28);
+    merge(ctx, 4, ctx->ps1[11], ctx->ps1[6]);
+    STORE(5, inv, 0x08);
+    ppc_ps_madd_inline(ctx, 7, 9, 2, 7, false, false);
+    STORE(4, inv, 0x18);
+    ppc_ps_madd_inline(ctx, 7, 8, 3, 7, false, true);
+    ctx->gpr[3] = 1;
+    STORE1(7, inv, 0x2C);
+    ctx->downcount -= 27 + 33;
+    return true;
+}
+
+// u32 PSMTXInvXpose(const Mtx src, Mtx invX): 0 when src is singular.
+bool rvl_PSMTXInvXpose(CPUState* ctx) {
+    const u32 src = ctx->gpr[3], inv = ctx->gpr[4];
+    if (!float_pairs_ready(ctx) || !fast_matrix(ctx, src, false) || !fast_matrix(ctx, inv, true))
+        return false;
+    if (!inverse_cofactors(ctx, src, 1, true)) {
+        ctx->gpr[3] = 0;
+        ctx->downcount -= 27 + 2;
+        return true;
+    }
+    fres(ctx, 0, 7);
+    STORE1(1, inv, 0x0C);
+    ppc_ps_add_op(ctx, 6, 0, 0);
+    ppc_ps_mul_inline(ctx, 5, 0, 0);
+    STORE1(1, inv, 0x1C);
+    ppc_ps_madd_inline(ctx, 0, 7, 5, 6, true, true);
+    STORE1(1, inv, 0x2C);
+    ppc_ps_muls_inline(ctx, 13, 13, 0, false);
+    ppc_ps_muls_inline(ctx, 12, 12, 0, false);
+    ppc_ps_muls_inline(ctx, 11, 11, 0, false);
+    STORE(13, inv, 0x00);
+    STORE(12, inv, 0x10);
+    ppc_ps_muls_inline(ctx, 10, 10, 0, false);
+    ppc_ps_muls_inline(ctx, 9, 9, 0, false);
+    STORE(11, inv, 0x20);
+    STORE1(10, inv, 0x08);
+    ppc_ps_muls_inline(ctx, 8, 8, 0, false);
+    ctx->gpr[3] = 1;
+    STORE1(9, inv, 0x18);
+    STORE1(8, inv, 0x28);
+    ctx->downcount -= 27 + 21;
+    return true;
+}
