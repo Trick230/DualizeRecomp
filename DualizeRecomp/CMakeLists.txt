@@ -42,6 +42,7 @@ add_executable(DualizeRecomp
     sdk/nights_pause.cpp
     sdk/nights_text.cpp
     sdk/nights_weather.cpp
+    render/g3d_model.cpp
     ui/game_assets.cpp
     ui/graphics_settings.cpp)
 
