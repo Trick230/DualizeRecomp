@@ -6,6 +6,10 @@
 # Anchors: code that locates the hooks too generic to occur once.
 @ScnRoot_CalcView 80 81830000 FC0FE39A179E9D0E
 @__wpadInitSub 210 9421FFD0 83981BD46204614D
+@SkinMtxTemporary C 3C600000 8268C42B8E7B042E at call(g3d_CalcSkinning+48)
+@ResMdl_GetResNode 44 9421FFE0 9B1B9A717FDC00B1 at call(g3d_CalcSkinning+180)
+@ResMdl_NodeDic 1C 2C040000 5D68C17874640601 at call(@ResMdl_GetResNode+1C)
+@ResDic_Entry 3C 80A30000 9F24B0F84EF09D2D at call(@ResMdl_GetResNode+2C)
 
 g3d_CalcViewCamera 4 819F0000 9265ABA010CF4111 at @ScnRoot_CalcView+4C
 g3d_DrawResMdlDirectly 228 9421FFB0 19274D8870AFB690
@@ -23,6 +27,18 @@ define SINCOS_ZERO addr(nw4r_SinCosFIdx+6C,74)
 define ROTXYZ_BASE nw4r_MTX34RotXYZFIdx
 define ROTXYZ_ZERO addr(nw4r_MTX34RotXYZFIdx+5C,60)
 define AABB_SET_BASE nw4r_AABBSet
+g3d_CalcSkinning 1C0 9421FFD0 B2C5956239F94F23
+# nw4r_g3d_calc.c: CalcSkinning's entry, 0.0f, skinning work matrices and callees.
+define SKIN_BASE g3d_CalcSkinning
+define SKIN_ZERO addr(g3d_CalcSkinning+54,68)
+define SKIN_TEMPORARY addr(@SkinMtxTemporary+0,4)
+define SKIN_RES_NODE @ResMdl_GetResNode
+define SKIN_SAVEGPR call(g3d_CalcSkinning+10)
+define SKIN_RESTGPR call(g3d_CalcSkinning+1AC)
+define SKIN_CONCAT call(g3d_CalcSkinning+194)
+define SKIN_MWCC_SAVEGPR mwcc_savegpr_24
+define SKIN_MWCC_RESTGPR mwcc_restgpr_24
+define SKIN_PSMTX_CONCAT rvl_PSMTXConcat
 rvl_EXIImm 27C 9421FFD0 7D3F26B792F2FA4D
 rvl_EXIImmEx A4 9421FFE0 525C3EA27459CC97
 rvl_EXIDma F8 9421FFD0 3774480782CFD488
