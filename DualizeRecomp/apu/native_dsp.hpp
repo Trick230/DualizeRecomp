@@ -67,6 +67,8 @@ public:
   void RaiseInterrupt(uint32_t type);
   // The AX command list being mixed is due: its mails reach the CPU.
   void CompleteMix();
+  // Waits for the mixer thread, so it no longer writes guest memory.
+  void JoinMix();
   void CompleteAramDma();
   // The DSP's time slice (once per millisecond of guest time).
   void Update();

@@ -794,7 +794,10 @@ void Machine::OnFieldEnd(uint64_t ticks)
   if (config.hash_every && vi.Fields() % config.hash_every == 0)
   {
     // Two runs of the same input agree here field for field when the guest
-    // runs on its own clock alone.
+    // runs on its own clock alone. The mixer thread may still be writing an
+    // AX frame the guest only reads once the mix is due.
+    if (dsp)
+      dsp->JoinMix();
     uint64_t hash = 0x9E3779B97F4A7C15ull;
     const auto mix = [&](const uint8_t* bytes, size_t size) {
       for (size_t i = 0; i + 8 <= size; i += 8)

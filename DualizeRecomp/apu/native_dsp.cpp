@@ -2352,6 +2352,11 @@ void DspCore::CompleteMix()
   m_impl->ReleaseMix();
 }
 
+void DspCore::JoinMix()
+{
+  m_impl->JoinMix();
+}
+
 bool DspCore::StartAxTask(uint32_t iram, uint32_t size)
 {
   Impl& d = *m_impl;
