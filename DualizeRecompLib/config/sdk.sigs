@@ -42,6 +42,9 @@ define PPC_SYNC call(@ResTevCallDisplayList+1C)
 g3d_LoadResMatTlut 148 9421FFD0 83B1F6DBDEC718CB at call(@G3dLoadMaterial+A0)
 g3d_LoadResMatTexObj 248 9421FFC0 451D5B49C9602CC1 at call(@G3dLoadMaterial+DC)
 g3d_LoadResMatGenMode 1CC 80630000 FD410455120D3540 at call(@G3dLoadMaterial+118)
+g3d_LoadResMatChan 4F8 9421FF70 3833994E56710170 at call(@G3dLoadMaterial+30C)
+define G3D_CHAN_COLOR_SCALE addr(g3d_LoadResMatChan+FC,14C)
+define G3D_CHAN_COLOR_ROUND addr(g3d_LoadResMatChan+100,154)
 # GXInit's region callbacks, which the texture natives assume.
 @GXDefaultTexRegionCallback F4 9421FFE0 C0087D43F6132D6F
 @GXDefaultTlutRegionCallback 24 28030014 76849DBDEADF15D1

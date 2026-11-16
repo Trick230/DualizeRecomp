@@ -7,8 +7,9 @@
 // the guest's instructions: only memory and the stream come out identical,
 // the cycles charged are the guest's typical path and the volatile registers
 // are left as they were. Each checks everything it will touch before it
-// touches anything, and declines what it doesn't cover (a synced load, which
-// flushes GX state through GXCallDisplayList).
+// touches anything, and declines what it doesn't cover.
+
+#include <string.h>
 
 #include "core/cpu.h"
 
@@ -165,7 +166,7 @@ static void load_gen_mode(CPUState* ctx) {
 #define NO_TEX_COORD_SCALE_CYCLES 6
 #define TEX_COORD_SCALE_CYCLES 12
 #define TEX_COORD_SCALE_COORD_CYCLES 52
-#define GEN_MODE_CYCLES 45  // not seen in the scenes measured: a guess
+#define GEN_MODE_CYCLES 42
 
 // The cycles of load_tex_coord_scale, before it runs.
 static s64 tex_scale_cycles(CPUState* ctx) {
@@ -708,6 +709,109 @@ bool g3d_LoadResMatGenMode(CPUState* ctx) {
     }
     if (!(lwz(flags) & 4u))
         stw(flags, (lwz(flags) & ~3u) | 4u);
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// The guest's cycles: per color or channel control written, per second
+// channel (fitted on the scenes measured; CHAN_NONE_CYCLES is a guess).
+#define CHAN_CYCLES 180
+#define CHAN_NONE_CYCLES 30
+#define CHAN_XF_CYCLES 12
+#define CHAN_SECOND_CYCLES 52
+#define CHAN_ONE_CYCLES 40  // the second channel's controls cleared
+
+static float f32_bits(u32 bits) {
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static void xf_reg(CPUState* ctx, u32 reg, u32 value) {
+    xf_header(ctx, reg, 1u);
+    fifo32(value);
+}
+
+// A channel control (`chan` 0-1 color, 2-3 alpha) with its light mask; the
+// lit form keeps the material source bit.
+static void xf_chan_ctrl(CPUState* ctx, u32 chan, u32 ctrl, u32 lights, bool lit) {
+    const u32 value = (ctrl & (lit ? 0xFFFF87C1u : 0xFFFF87C3u)) | (lights & 0xFu) << 2 | (lights & 0xF0u) << 7;
+    xf_reg(ctx, 0x100Eu + (chan & 3u), value);
+}
+
+// The material color scaled by `scale`, a component at a time as the guest's
+// floats round it.
+static u32 chan_mat_color(CPUState* ctx, u32 color, u32 scale) {
+    const float k = f32_bits(lwz((u32)G3D_CHAN_COLOR_SCALE)), round = f32_bits(lwz((u32)G3D_CHAN_COLOR_ROUND));
+    u32 out = 0;
+    for (u32 i = 0; i < 4u; ++i) {
+        const float x = (float)(s32)(lbz(scale + i) * lbz(color + i));
+        const float scaled = k * x;
+        const float c = round + scaled;
+        out = out << 8 | ((u32)(s32)c & 0xFFu);
+    }
+    return out;
+}
+
+// void LoadResMatChan(ResMatChan chan, u32 color0_lights, u32 alpha0_lights,
+// u32 color1_lights, u32 alpha1_lights, const GXColor* scale, bool lit): the
+// channels' colors and controls (the second only with two channels), then
+// the gen mode's XF if it changed.
+bool g3d_LoadResMatChan(CPUState* ctx) {
+    const u32 data = lwz(ctx->gpr[3]);
+    if (data == 0) {
+        ctx->downcount -= CHAN_NONE_CYCLES;
+        return true;
+    }
+    const u32 scale = ctx->gpr[8];
+    if (!plain(ctx, data, 0x28u) || !plain(ctx, scale, 4u))
+        return false;
+    const bool lit = ctx->gpr[9] != 0;
+    s64 cycles = CHAN_CYCLES;
+    u32 flags = lwz(data);
+    if (flags & 3u) {
+        xf_reg(ctx, 0x100Cu, lwz(data + 4u));
+        cycles += CHAN_XF_CYCLES;
+    }
+    const u32 mat = chan_mat_color(ctx, data + 8u, scale);
+    if (flags & 0xCu) {
+        xf_reg(ctx, 0x100Au, mat);
+        cycles += CHAN_XF_CYCLES;
+    }
+    if (flags & 0x10u) {
+        xf_chan_ctrl(ctx, 0u, lwz(data + 0xCu), ctx->gpr[4], lit);
+        cycles += CHAN_XF_CYCLES;
+    }
+    if (flags & 0x20u) {
+        xf_chan_ctrl(ctx, 2u, lwz(data + 0x10u), ctx->gpr[5], lit);
+        cycles += CHAN_XF_CYCLES;
+    }
+    if (lbz(STATE + STATE_GEN_MODE + 1u) == 2u) {
+        flags = lwz(data + 0x14u);
+        cycles += CHAN_SECOND_CYCLES;
+        if (flags & 3u) {
+            xf_reg(ctx, 0x100Du, lwz(data + 0x18u));
+            cycles += CHAN_XF_CYCLES;
+        }
+        if (flags & 0xCu) {
+            xf_reg(ctx, 0x100Bu, lwz(data + 0x1Cu));
+            cycles += CHAN_XF_CYCLES;
+        }
+        if (flags & 0x10u) {
+            xf_chan_ctrl(ctx, 1u, lwz(data + 0x20u), ctx->gpr[6], lit);
+            cycles += CHAN_XF_CYCLES;
+        }
+        if (flags & 0x20u) {
+            xf_chan_ctrl(ctx, 3u, lwz(data + 0x24u), ctx->gpr[7], lit);
+            cycles += CHAN_XF_CYCLES;
+        }
+    } else {
+        xf_chan_ctrl(ctx, 1u, 0u, 0u, false);
+        xf_chan_ctrl(ctx, 3u, 0u, 0u, false);
+        cycles += 2 * CHAN_XF_CYCLES + CHAN_ONE_CYCLES;
+    }
+    cycles += gen_mode_cycles(ctx);
+    load_gen_mode(ctx);
     ctx->downcount -= cycles;
     return true;
 }
