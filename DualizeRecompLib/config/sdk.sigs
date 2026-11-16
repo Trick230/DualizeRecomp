@@ -45,6 +45,11 @@ g3d_LoadResMatGenMode 1CC 80630000 FD410455120D3540 at call(@G3dLoadMaterial+118
 g3d_LoadResMatChan 4F8 9421FF70 3833994E56710170 at call(@G3dLoadMaterial+30C)
 define G3D_CHAN_COLOR_SCALE addr(g3d_LoadResMatChan+FC,14C)
 define G3D_CHAN_COLOR_ROUND addr(g3d_LoadResMatChan+100,154)
+g3d_LoadResTexSrt 2A8 9421FF20 39ED0BADA029C4AE at call(@G3dLoadMaterial+3B0)
+@G3dCalcTexMtx 64 9421FFF0 BD36770622F257ED at call(g3d_LoadResTexSrt+1B0)
+@G3dCalcTexMtxMaya A4 9421FFF0 FEC1BDBA74FC5D33 at call(@G3dCalcTexMtx+28)
+define G3D_CALC_TEX_MTX_MAYA @G3dCalcTexMtxMaya
+define G3D_MAYA_CONST addr(@G3dCalcTexMtxMaya+18,1C)
 # GXInit's region callbacks, which the texture natives assume.
 @GXDefaultTexRegionCallback F4 9421FFE0 C0087D43F6132D6F
 @GXDefaultTlutRegionCallback 24 28030014 76849DBDEADF15D1

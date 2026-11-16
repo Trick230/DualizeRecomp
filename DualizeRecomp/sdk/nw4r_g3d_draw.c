@@ -816,6 +816,271 @@ bool g3d_LoadResMatChan(CPUState* ctx) {
     return true;
 }
 
+// LoadResTexSrt's static: which post-transform texture matrices hold the
+// identity.
+#define STATE_POST_TEX_IDENTITY 0x214u
+#define TEX_SRT_SIZE 0x248u  // ResTexSrtData: flags, mode, 8 TexSrt, 8 TexMtxEffect
+#define TEX_SRT_EFFECT 0xA8u
+
+// The guest's cycles: per call, per texture by path, per Maya matrix made
+// (counted for the ones not seen yet), GXLoadTexMtxImm's own apart.
+#define TEX_SRT_CYCLES 57
+#define TEX_SRT_NONE_CYCLES 19
+#define TEX_SRT_IDENT_CYCLES 58
+#define TEX_SRT_IDENT_LOAD_CYCLES 79
+#define TEX_SRT_CALC_CYCLES 135
+#define TEX_SRT_IDENTITY_MODE_CYCLES 40
+static const s16 tex_srt_maya_cycles[7] = {140, 129, 22, 16, 132, 117, 16};
+
+static u32 bits_f32(float f) {
+    u32 bits;
+    memcpy(&bits, &f, 4);
+    return bits;
+}
+
+static float f32_at(CPUState* ctx, u32 address) { return f32_bits(lwz(address)); }
+
+// The FPU state host float math matches the guest's in: on, round to
+// nearest (the host's flush to zero follows NI), and SinCosFIdx's u16
+// conversions through GQR3 unscaled.
+static bool tex_srt_fpu_ok(CPUState* ctx) {
+    return (ctx->msr & PPC_MSR_FP) && (ctx->fpscr & 3u) == 0 && (ctx->hid2 & PPC_HID2_LSQE) &&
+           (ctx->gqr[3] & 0x3F073F07u) == 0x00050005u;
+}
+
+// SinCosFIdx(s, c, fidx) as the guest's floats compute it; false when its
+// range loop would run.
+static bool sin_cos_fidx(CPUState* ctx, float fidx, float* s, float* c) {
+    const float index = f32_bits(bits_f32(fidx) & 0x7FFFFFFFu);
+    if (!(index < f32_at(ctx, (u32)SINCOS_RANGE)))
+        return false;
+    const s32 whole = (s32)index;
+    const float rest = index - (float)whole;
+    const u32 entry = (u32)SINCOS_TABLE + (((u32)whole << 4) & 0xFF0u);
+    const float ds = rest * f32_at(ctx, entry + 8u);
+    float sv = f32_at(ctx, entry) + ds;
+    const float dc = rest * f32_at(ctx, entry + 12u);
+    const float cv = f32_at(ctx, entry + 4u) + dc;
+    if (fidx < f32_at(ctx, (u32)SINCOS_ZERO))
+        sv = -sv;
+    *s = sv;
+    *c = cv;
+    return true;
+}
+
+// The Maya texture matrix functions' constants (0, 1, degrees to FIdx, 0.5,
+// -0.5), then the Make functions MakeTexSrtMtx_SRT .. _S by index = the
+// TexSrt flag's scale-one, rotate-zero and translate-zero bits.
+enum { MAYA_ZERO = 0x0, MAYA_ONE = 0x4, MAYA_TO_FIDX = 0x8, MAYA_HALF = 0xC, MAYA_MINUS_HALF = 0x10, MAYA_MAKE = 0x14 };
+// Each Make function's distance below CalcTexMtx_Maya, as the game has them.
+static const u16 maya_make_offset[7] = {0x800, 0x910, 0x858, 0xA14, 0x9D4, 0xAB8, 0xAF8};
+
+static bool maya_uses_angle(u32 index) { return !(index & 2u); }
+
+// The first two rows MakeTexSrtMtx_<index> writes for `srt` (Su, Sv, R, Tu,
+// Tv), one guest float operation per statement.
+static void maya_make(CPUState* ctx, u32 index, u32 srt, float s, float c, float m[8]) {
+    const u32 k = (u32)G3D_MAYA_CONST;
+    const float zero = f32_at(ctx, k + MAYA_ZERO), one = f32_at(ctx, k + MAYA_ONE);
+    const float half = f32_at(ctx, k + MAYA_HALF), minus_half = f32_at(ctx, k + MAYA_MINUS_HALF);
+    const float su = f32_at(ctx, srt), sv = f32_at(ctx, srt + 4u);
+    const float tu = f32_at(ctx, srt + 12u), tv = f32_at(ctx, srt + 16u);
+    switch (index) {
+    case 0: {  // SRT
+        const float hs = half * s;
+        const float hc = minus_half * c;
+        const float a = hs - half;
+        const float b = hc - a;
+        const float d = hc + a;
+        const float u = b - tu;
+        const float v = tv + d;
+        const float sv_v = sv * v;
+        m[0] = su * c;
+        m[1] = su * s;
+        m[2] = zero;
+        m[3] = su * u;
+        m[4] = -sv * s;
+        m[5] = sv * c;
+        m[6] = zero;
+        m[7] = one + sv_v;
+        break;
+    }
+    case 1: {  // RT
+        const float hc = half * c;
+        const float hs = half * s;
+        const float a = half - hc;
+        const float b = a - hs;
+        const float d = a + hs;
+        m[0] = c;
+        m[1] = s;
+        m[2] = zero;
+        m[3] = b - tu;
+        m[4] = -s;
+        m[5] = c;
+        m[6] = zero;
+        m[7] = tv + d;
+        break;
+    }
+    case 2: {  // ST
+        const float t = tv - one;
+        const float a = sv * t;
+        m[0] = su;
+        m[1] = zero;
+        m[2] = zero;
+        m[3] = -su * tu;
+        m[4] = zero;
+        m[5] = sv;
+        m[6] = zero;
+        m[7] = one + a;
+        break;
+    }
+    case 3:  // T
+        m[0] = one;
+        m[1] = zero;
+        m[2] = zero;
+        m[3] = -tu;
+        m[4] = zero;
+        m[5] = one;
+        m[6] = zero;
+        m[7] = tv;
+        break;
+    case 4: {  // SR
+        const float svc = sv * c;
+        const float svs = sv * s;
+        const float suc = su * c;
+        const float sus = su * s;
+        const float a = svs - svc;
+        const float b = sus + suc;
+        const float a2 = a - sv;
+        const float b2 = b - su;
+        const float ha = half * a2;
+        m[0] = suc;
+        m[1] = sus;
+        m[2] = zero;
+        m[3] = minus_half * b2;
+        m[4] = -svs;
+        m[5] = svc;
+        m[6] = zero;
+        m[7] = one + ha;
+        break;
+    }
+    case 5: {  // R
+        const float hc = half * c;
+        const float hs = half * s;
+        const float a = half - hc;
+        m[0] = c;
+        m[1] = s;
+        m[2] = zero;
+        m[3] = a - hs;
+        m[4] = -s;
+        m[5] = c;
+        m[6] = zero;
+        m[7] = a + hs;
+        break;
+    }
+    default:  // S
+        m[0] = su;
+        m[1] = zero;
+        m[2] = zero;
+        m[3] = zero;
+        m[4] = zero;
+        m[5] = sv;
+        m[6] = zero;
+        m[7] = one - sv;
+        break;
+    }
+}
+
+// GXLoadTexMtxImm(m, GX_PTTEXMTX0 + 3 * i, GX_MTX3x4) from the guest's copy
+// at `address`.
+static void load_post_tex_mtx(CPUState* ctx, u32 address, const float m[12], u32 i) {
+    for (u32 j = 0; j < 12u; ++j)
+        stw(address + j * 4u, bits_f32(m[j]));
+    ctx->gpr[3] = address;
+    ctx->gpr[4] = 0x40u + i * 3u;
+    ctx->gpr[5] = 0;
+    rvl_GXLoadTexMtxImm(ctx);
+}
+
+// void LoadResTexSrt(ResTexSrt srt): each texture's post-transform matrix,
+// from its TexSrt through the Maya functions (any other mode makes the
+// identity), the identity loaded once while it stays. Declines the camera
+// and light mappings and effect matrices that aren't the identity.
+bool g3d_LoadResTexSrt(CPUState* ctx) {
+    const u32 srt = lwz(ctx->gpr[3]);
+    const u32 frame = ctx->gpr[1] - 0xE0u, work = frame + 0x68u, ident = frame + 0x8u;
+    if (!plain(ctx, frame, 0xE0u) || (srt && !plain(ctx, srt, TEX_SRT_SIZE)) || !tex_srt_fpu_ok(ctx))
+        return false;
+    const u32 maya = (u32)G3D_MAYA_CONST, maya_entry = (u32)G3D_CALC_TEX_MTX_MAYA;
+    for (u32 i = 0; i < 7u; ++i)
+        if (lwz(maya + MAYA_MAKE + i * 4u) != maya_entry - maya_make_offset[i])
+            return false;
+    const u32 flags = srt ? lwz(srt) : 0u, mode = srt ? lwz(srt + 4u) : 0u;
+    // Everything it can't do, before touching anything.
+    for (u32 i = 0; i < 8u; ++i) {
+        if (!(flags >> (i * 4u) & 1u))
+            continue;
+        const u32 effect = srt + TEX_SRT_EFFECT + i * 0x34u, nibble = flags >> (i * 4u) & 0xFu;
+        if (lbz(effect + 2u) != 0 || !(lbz(effect + 3u) & 1u))
+            return false;
+        if (nibble == 0xFu || mode != 0)
+            continue;
+        const u32 index = nibble >> 1 & 7u;
+        float s, c;
+        if (maya_uses_angle(index) &&
+            !sin_cos_fidx(ctx, f32_at(ctx, maya + MAYA_TO_FIDX) * f32_at(ctx, srt + 8u + i * 0x14u + 8u), &s, &c))
+            return false;
+    }
+    s64 cycles = TEX_SRT_CYCLES;
+    u32 post_identity = lwz(STATE + STATE_POST_TEX_IDENTITY);
+    for (u32 i = 0; i < 8u; ++i) {
+        stw(STATE + STATE_TEX_MTX_TYPE + i * 4u, 0);
+        if (!(flags >> (i * 4u) & 1u)) {
+            cycles += TEX_SRT_NONE_CYCLES;
+            continue;
+        }
+        const u32 nibble = flags >> (i * 4u) & 0xFu;
+        float m[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        if (nibble == 0xFu) {
+            // The identity: loaded only if the last matrix there wasn't.
+            if (post_identity & (1u << i)) {
+                cycles += TEX_SRT_IDENT_CYCLES;
+                continue;
+            }
+            post_identity |= 1u << i;
+            stw(STATE + STATE_POST_TEX_IDENTITY, post_identity);
+            cycles += TEX_SRT_IDENT_LOAD_CYCLES;
+            load_post_tex_mtx(ctx, ident, m, i);
+            continue;
+        }
+        cycles += TEX_SRT_CALC_CYCLES;
+        const u32 index = nibble >> 1 & 7u;
+        if (mode != 0) {
+            cycles += TEX_SRT_IDENTITY_MODE_CYCLES;
+        } else if (index != 7u) {
+            const u32 data = srt + 8u + i * 0x14u;
+            float s = 0, c = 0;
+            if (maya_uses_angle(index)) {
+                const float fidx = f32_at(ctx, maya + MAYA_TO_FIDX) * f32_at(ctx, data + 8u);
+                sin_cos_fidx(ctx, fidx, &s, &c);
+                if (fidx < 0.0f)
+                    ++cycles;
+            }
+            maya_make(ctx, index, data, s, c, m);
+            m[8] = f32_at(ctx, maya + MAYA_ZERO);
+            m[9] = m[8];
+            m[10] = f32_at(ctx, maya + MAYA_ONE);
+            m[11] = m[8];
+            cycles += tex_srt_maya_cycles[index];
+        }
+        post_identity &= ~(1u << i);
+        stw(STATE + STATE_POST_TEX_IDENTITY, post_identity);
+        load_post_tex_mtx(ctx, work, m, i);
+    }
+    ctx->downcount -= cycles;
+    return true;
+}
+
 #define ZCOMPLOC_CYCLES 26
 #define ZCOMPLOC_SET_CYCLES 23
 #define TEV_SAME_CYCLES 25
