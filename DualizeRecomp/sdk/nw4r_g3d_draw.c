@@ -2168,3 +2168,246 @@ exit:
     ctx->pc = ctx->lr & ~3u;
     return true;
 }
+
+// --- Draw1Mat1ShpDirectly ----------------------------------------------------
+
+// From the natives list: Draw1Mat1ShpDirectly's entry, its kcolor id table,
+// the cull mode table of its cull mode reset, and its callees.
+_Static_assert(D1_MATERIAL == MAT_BASE && D1_PRE == D1_SHP_PRE && D1_PRIMITIVE == D1_SHP_PRIMITIVE,
+               "Draw1Mat1ShpDirectly calls LoadMaterial and the shape loads");
+_Static_assert(D1_SAVEGPR == D1_MWCC_SAVEGPR && D1_RESTGPR == D1_MWCC_RESTGPR && D1_SYNC == PPC_SYNC &&
+                   D1_QUEUE_WAIT == D1_LC_QUEUE_WAIT,
+               "Draw1Mat1ShpDirectly saves r14-r31 through the runtime's helpers, waits and syncs");
+
+#define D1_FRAME 0x270u
+
+// The guest's cycles: the entry with _savegpr_14, the exit with _restgpr_14
+// and f23-f31; LCQueueWait with the queue empty; the material part with or
+// without a material (the multi-layer data getter included), the shape tests;
+// the vertex array setters (none, or GXSetArray with data; one less without)
+// with the code that calls them; the cull mode reset with sShp's invalidation.
+#define D1_ENTRY_CYCLES 57
+#define D1_EXIT_CYCLES 43
+#define D1_SYNC_CALLS_CYCLES 3
+#define D1_QUEUE_WAIT_CYCLES 5
+#define D1_HEAD_CYCLES 6
+#define D1_NO_MAT_CYCLES 1
+#define D1_MAT_CYCLES 13
+#define D1_MAT_CALL_CYCLES 8
+#define D1_SHP_NONE_CYCLES 3
+#define D1_SHP_CYCLES 10
+#define D1_PRE_CALL_CYCLES 4
+#define D1_SWAP_TEST_CYCLES 2
+#define D1_ARRAY_TEST_CYCLES 3
+#define D1_INDEX_TEST_CYCLES 4
+#define D1_POS_CALL_CYCLES 7
+#define D1_NRM_CALL_CYCLES 5
+#define D1_CLR0_CALL_CYCLES 6
+#define D1_CLR1_CALL_CYCLES 7
+#define D1_ARRAY_NONE_CYCLES 3
+#define D1_POS_ARRAY_CYCLES 26
+#define D1_CLR_ARRAY_CYCLES 29
+#define D1_RESET_TEST_CYCLES 2
+#define D1_RESET_CYCLES 62
+#define D1_PRIMITIVE_CALL_CYCLES 6
+
+typedef struct {
+    u32 base;
+    s64 cycles;
+} D1Run;
+
+// The call at `at` to a native: false when it declined and the guest took
+// over from the call.
+static bool d1_call(CPUState* ctx, D1Run* run, u32 at, bool (*load)(CPUState*)) {
+    ctx->lr = run->base + at + 4u;
+    ctx->downcount -= run->cycles;
+    run->cycles = 0;
+    if (load(ctx))
+        return true;
+    g3d_resume_guest(ctx, run->base + at);
+    return false;
+}
+
+// ResVtxPosData/NrmData/ClrData's array as GXSetArray(attr) loads it, with
+// the stride's byte at `stride`.
+static void d1_set_array(CPUState* ctx, D1Run* run, u32 vtx, u32 attr, u32 stride, s64 cycles) {
+    if (vtx == 0) {
+        run->cycles += D1_ARRAY_NONE_CYCLES;
+        return;
+    }
+    const u32 offset = lwz(vtx + 8u);
+    run->cycles += offset ? cycles : cycles - 1;
+    fifo8(0x08);
+    fifo8(0xA0u | (attr - 9u));
+    fifo32((offset ? vtx + offset : 0u) & 0x3FFFFFFFu);
+    fifo8(0x08);
+    fifo8(0xB0u | (attr - 9u));
+    fifo32(lbz(vtx + stride));
+}
+
+// void Draw1Mat1ShpDirectly(ResMat mat, ResShp shp, const MTX34* view_pos,
+// const MTX34* view_nrm, u32 ctrl, Draw1Mat1ShpSwap* swap, DrawResMdlReplacement*
+// ind): the material (none when ctrl has 0x10) then the shape, with its
+// vertex arrays from the swap's tables. The game's multi-layer path (the
+// material's data at +34) goes to the guest at the entry, and anything a
+// callee declines from its call.
+bool g3d_Draw1Mat1Shp(CPUState* ctx) {
+    const u32 sp = ctx->gpr[1], frame = sp - D1_FRAME;
+    const u32 mat = ctx->gpr[3], shp = ctx->gpr[4], ctrl = ctx->gpr[7], swap = ctx->gpr[8];
+    if (!(ctx->msr & PPC_MSR_FP) || !(ctx->hid2 & PPC_HID2_LSQE) || (ctx->gqr[0] & 0x00070007u) != 0 ||
+        !plain(ctx, frame, D1_FRAME + 8u) || !plain(ctx, mat, 4) || !plain(ctx, shp, 4) ||
+        (swap && !plain(ctx, swap, 0x38u)))
+        return false;
+    const u32 data = lwz(mat), shp_data = lwz(shp);
+    if ((data && (!plain(ctx, data, 0x38u) || lwz(data + 0x34u) != 0)) ||
+        (shp_data && !plain(ctx, shp_data, 0x50u)))
+        return false;
+    // LCQueueWait(0) and PPCSync unless ctrl has 1.
+    const bool sync = (ctrl & 1u) == 0;
+    if (sync && (((ctx->hid2 >> 24) & 0xFu) != 0 || !dualize_os_sync(ctx, (u32)PPC_SYNC + 4u)))
+        return false;
+
+    // The entry: the frame, LR, f23-f31 and r14-r31 saved, the arguments kept.
+    const u32 ret = ctx->lr, base = (u32)D1_BASE;
+    stw(frame, sp);
+    stw(sp + 4u, ret);
+    for (u32 i = 0; i < 9u; ++i) {
+        const u8 f = (u8)(31u - i);
+        stw(frame + 0x260u - 0x10u * i, (u32)(f64_bits(ctx->fpr[f]) >> 32));
+        stw(frame + 0x264u - 0x10u * i, (u32)f64_bits(ctx->fpr[f]));
+        ppc_psq_store_inline(ctx, f, frame + 0x268u - 0x10u * i, false, 0, false, 0);
+    }
+    const u32 save = frame + 0x1E0u;
+    for (u32 i = 0; i < 18u; ++i)
+        stw(save - 0x48u + 4u * i, ctx->gpr[14 + i]);
+    ctx->gpr[1] = frame;
+    ctx->gpr[11] = save;
+    ctx->gpr[20] = mat;
+    ctx->gpr[15] = shp;
+    ctx->gpr[16] = ctx->gpr[5];
+    ctx->gpr[17] = ctx->gpr[6];
+    ctx->gpr[19] = ctrl;
+    ctx->gpr[18] = swap;
+    ctx->gpr[23] = ctx->gpr[9];
+    ctx->gpr[22] = (u32)D1_KCOLOR_IDS;
+    stw(frame + 0x160u, 0x43300000u);
+    stw(frame + 0x168u, 0x43300000u);
+    D1Run run = {base, D1_ENTRY_CYCLES};
+    if (sync)
+        run.cycles += D1_SYNC_CALLS_CYCLES + D1_QUEUE_WAIT_CYCLES + PPC_SYNC_CYCLES;
+
+    // The material, loading nothing when ctrl has 0x10 or there is none.
+    ctx->gpr[14] = !data || (ctrl & 0x10u) ? 1u : 0u;
+    ctx->gpr[21] = 0;
+    stw(frame + 0x78u, 0);
+    run.cycles += D1_HEAD_CYCLES + D1_MAT_CALL_CYCLES +
+                  (data ? D1_MAT_CYCLES + ((ctrl & 0x10u) ? 1 : 0) : D1_NO_MAT_CYCLES);
+    stw(frame + 0x44u, data);
+    ctx->gpr[3] = frame + 0x44u;
+    ctx->gpr[4] = ctrl;
+    ctx->gpr[5] = swap;
+    ctx->gpr[6] = ctx->gpr[23];
+    ctx->gpr[7] = ctx->gpr[14];
+    ctx->lr = base + 0x104u;
+    ctx->downcount -= run.cycles;
+    run.cycles = 0;
+    if (!g3d_LoadMaterial(ctx)) {
+        g3d_resume_guest(ctx, base + 0x100u);
+        return true;
+    }
+    if (ctx->pc != base + 0x104u)
+        return true;
+
+    // The shape, unless there is none or it is hidden.
+    if (!shp_data || (lwz(shp_data + 0x34u) & 2u)) {
+        run.cycles += shp_data ? D1_SHP_NONE_CYCLES * 2 : D1_SHP_NONE_CYCLES;
+        goto exit;
+    }
+    run.cycles += D1_SHP_CYCLES;
+    if (!(ctrl & 2u)) {
+        run.cycles += D1_PRE_CALL_CYCLES;
+        stw(frame + 0x20u, shp_data);
+        ctx->gpr[0] = shp_data;
+        ctx->gpr[3] = frame + 0x20u;
+        if (!d1_call(ctx, &run, 0x76Cu, g3d_LoadResShpPrePrimitive))
+            return true;
+        run.cycles += D1_SWAP_TEST_CYCLES;
+        if (swap) {
+            const u32 pos = lwz(swap + 0x2Cu), nrm = lwz(swap + 0x30u), clr = lwz(swap + 0x34u);
+            run.cycles += D1_ARRAY_TEST_CYCLES;
+            if (pos) {
+                const u32 vtx = lwz(pos + (u32)(s32)(s16)lhz(shp_data + 0x48u) * 4u);
+                run.cycles += D1_POS_CALL_CYCLES;
+                stw(frame + 0x1Cu, vtx);
+                d1_set_array(ctx, &run, vtx, 9u, 0x1Du, D1_POS_ARRAY_CYCLES);
+            }
+            run.cycles += D1_ARRAY_TEST_CYCLES;
+            if (nrm) {
+                const s32 i = (s16)lhz(shp_data + 0x4Au);
+                run.cycles += D1_INDEX_TEST_CYCLES;
+                if (i >= 0) {
+                    const u32 vtx = lwz(nrm + (u32)i * 4u);
+                    run.cycles += D1_NRM_CALL_CYCLES;
+                    stw(frame + 0x18u, vtx);
+                    d1_set_array(ctx, &run, vtx, 10u, 0x1Du, D1_POS_ARRAY_CYCLES);
+                }
+            }
+            run.cycles += D1_ARRAY_TEST_CYCLES;
+            if (clr) {
+                for (u32 k = 0; k < 2u; ++k) {
+                    const s32 i = (s16)lhz(shp_data + 0x4Cu + 2u * k);
+                    run.cycles += D1_INDEX_TEST_CYCLES;
+                    if (i < 0)
+                        continue;
+                    const u32 vtx = lwz(clr + (u32)i * 4u);
+                    run.cycles += k ? D1_CLR1_CALL_CYCLES : D1_CLR0_CALL_CYCLES;
+                    stw(frame + 0x14u - 4u * k, vtx);
+                    d1_set_array(ctx, &run, vtx, 11u + k, 0x1Cu, D1_CLR_ARRAY_CYCLES);
+                }
+            }
+        }
+    }
+
+    // ctrl 4: the cull mode back to the table's entry 1, sShp invalidated
+    // (G3DState::Invalidate(0x10), with its frame).
+    run.cycles += D1_RESET_TEST_CYCLES;
+    if (ctrl & 4u) {
+        run.cycles += D1_RESET_CYCLES;
+        bp(ctx, 0xFE00C000u);
+        bp(ctx, (u32)lbz((u32)D1_CULL_TABLE + 1u) << 14);
+        const u32 inv = frame - 0x10u;
+        stw(inv, frame);
+        stw(inv + 0x14u, base + 0x848u);
+        stw(inv + 0x0Cu, ctx->gpr[31]);
+        stw(inv + 0x08u, ctx->gpr[30]);
+        for (u32 i = 0; i < 3u; ++i)
+            stw(STATE + STATE_SHP_CACHE + 4u * i, 0);
+        stb(STATE + STATE_SYNC, 1);
+    }
+    run.cycles += D1_PRIMITIVE_CALL_CYCLES;
+    stw(frame + 0x0Cu, shp_data);
+    ctx->gpr[0] = shp_data;
+    ctx->gpr[3] = frame + 0x0Cu;
+    ctx->gpr[4] = ctx->gpr[16];
+    ctx->gpr[5] = ctx->gpr[17];
+    if (!d1_call(ctx, &run, 0x85Cu, g3d_LoadResShpPrimitive))
+        return true;
+
+exit:
+    // The exit: f23-f31 and r14-r31 back, LR from the frame.
+    for (u32 i = 0; i < 9u; ++i) {
+        const u8 f = (u8)(31u - i);
+        ppc_psq_load_inline(ctx, f, frame + 0x268u - 0x10u * i, false, 0, false, 0);
+        const u64 bits = ((u64)lwz(frame + 0x260u - 0x10u * i) << 32) | lwz(frame + 0x264u - 0x10u * i);
+        ctx->fpr[f] = f64_value(bits);
+    }
+    for (u32 i = 0; i < 18u; ++i)
+        ctx->gpr[14 + i] = lwz(save - 0x48u + 4u * i);
+    ctx->gpr[11] = save;
+    ctx->gpr[0] = lwz(sp + 4u);
+    ctx->lr = ctx->gpr[0];
+    ctx->gpr[1] = sp;
+    ctx->downcount -= run.cycles + D1_EXIT_CYCLES;
+    ctx->pc = ctx->lr & ~3u;
+    return true;
+}

@@ -105,6 +105,24 @@ g3d_LoadFog E0 9421FFE0 24CA6B29E8F8BF09 at call(g3d_LoadMaterial+68)
 @G3dFogInit 8 90830000 86701FC58E010A0A at call(g3d_LoadFog+AC)
 @G3dFogSetGP 88 9421FFE0 3703AE9C0D909776 at call(g3d_LoadFog+B0)
 define MAT_BASE g3d_LoadMaterial
+g3d_Draw1Mat1Shp 8C0 9421FD90 ED6196AFDD274C82 jump
+@G3dCullModeReset 34 3CA00000 6DF8D3DB9EAAF218 at call(g3d_Draw1Mat1Shp+83C)
+# nw4r_g3d_draw.c: Draw1Mat1ShpDirectly's entry, kcolor id table, the cull mode reset's table and callees.
+define D1_BASE g3d_Draw1Mat1Shp
+define D1_KCOLOR_IDS addr(g3d_Draw1Mat1Shp+60,8C)
+define D1_CULL_TABLE addr(@G3dCullModeReset+14,1C)
+define D1_SAVEGPR call(g3d_Draw1Mat1Shp+58)
+define D1_RESTGPR call(g3d_Draw1Mat1Shp+8AC)
+define D1_MWCC_SAVEGPR mwcc_savegpr_14
+define D1_MWCC_RESTGPR mwcc_restgpr_14
+define D1_QUEUE_WAIT call(g3d_Draw1Mat1Shp+98)
+define D1_LC_QUEUE_WAIT @LCQueueWait
+define D1_SYNC call(g3d_Draw1Mat1Shp+9C)
+define D1_MATERIAL call(g3d_Draw1Mat1Shp+100)
+define D1_PRE call(g3d_Draw1Mat1Shp+76C)
+define D1_SHP_PRE g3d_LoadResShpPrePrimitive
+define D1_PRIMITIVE call(g3d_Draw1Mat1Shp+85C)
+define D1_SHP_PRIMITIVE g3d_LoadResShpPrimitive
 define G3D_FOG_STATE addr(g3d_LoadFog+8,18)
 define G3D_FOG_NONE addr(g3d_LoadFog+4C,54)
 define FOG_SET_FOG call(g3d_LoadFog+8C)
