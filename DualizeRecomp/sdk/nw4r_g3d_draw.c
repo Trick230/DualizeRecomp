@@ -16,6 +16,7 @@
 
 #include "ppc_natives.h"
 #include "sdk/guest_memory.h"
+#include "sdk/rvl_gx_fog.h"
 
 bool dualize_os_sync(CPUState* ctx, u32 next);
 
@@ -1665,6 +1666,94 @@ bool g3d_LoadLightSet(CPUState* ctx) {
     }
     light_store_masks(ctx, out, light, &cycles, false);
     ctx->downcount -= cycles + 6;
+    return true;
+}
+
+// G3DState's fog: the flags (1 loaded, 2 valid) and the fog id loaded, then
+// the 32 fogs (FogData, 0x30 bytes each).
+#define FOG_STATE_FLAGS 0x00u
+#define FOG_STATE_ID 0x04u
+#define FOG_STATE_FOGS 0x08u
+#define FOG_COUNT 32
+#define FOG_SIZE 0x30u
+// FogData.
+enum {
+    FOG_TYPE = 0x00,
+    FOG_START = 0x04,  // then end, near, far (f32)
+    FOG_COLOR = 0x14,
+    FOG_ADJ_ENABLE = 0x18,
+    FOG_ADJ_CENTER = 0x1A,
+    FOG_ADJ_TABLE = 0x1C,
+};
+
+// The guest's cycles: the cached id; the cache tests by the one that fails;
+// the id range tests (negative, past 32); the none fog's call; a fog's
+// call through Fog::SetGP, its type test and range call, its exit; the
+// cache's store.
+#define FOG_SAME_CYCLES 21
+#define FOG_NOT_LOADED_CYCLES 9
+#define FOG_NOT_VALID_CYCLES 11
+#define FOG_OTHER_CYCLES 15
+#define FOG_NEGATIVE_CYCLES 2
+#define FOG_PAST_CYCLES 4
+#define FOG_NONE_CYCLES 19
+#define FOG_SET_GP_CYCLES (4 + 7 + 2 + 1 + 7 + 3)
+#define FOG_ADJ_CYCLES 4
+#define FOG_SET_GP_EXIT_CYCLES (15 + 5 + 4)
+#define FOG_STORE_CYCLES 11
+
+_Static_assert(FOG_SET_FOG == RVL_SET_FOG && FOG_GP_SET_FOG == RVL_SET_FOG && FOG_GP_RANGE_ADJ == RVL_SET_FOG_RANGE_ADJ,
+               "the fog's GX calls with natives");
+
+// void LoadFog(int id) (LoadResMatMisc's fog): GXSetFog, with
+// GXSetFogRangeAdj first for a fog that has a type, from fog `id` of
+// G3DState's, or no fog for an id out of range; nothing when it's the one
+// loaded.
+bool g3d_LoadFog(CPUState* ctx) {
+    const u32 state = (u32)G3D_FOG_STATE;
+    const s32 id = (s32)ctx->gpr[3];
+    if (!plain(ctx, state, FOG_STATE_FOGS + FOG_COUNT * FOG_SIZE) || !plain(ctx, ctx->gpr[1] + 4u, 4))
+        return false;
+    const u32 flags = lwz(state + FOG_STATE_FLAGS);
+    s64 cycles;
+    if (!(flags & 1u))
+        cycles = FOG_NOT_LOADED_CYCLES;
+    else if (!(flags & 2u))
+        cycles = FOG_NOT_VALID_CYCLES;
+    else if ((s32)lwz(state + FOG_STATE_ID) != id)
+        cycles = FOG_OTHER_CYCLES;
+    else {
+        stw(ctx->gpr[1] + 4u, ctx->lr);
+        ctx->downcount -= FOG_SAME_CYCLES;
+        return true;
+    }
+    GxFogRegs regs;
+    u32 fog = 0, type = 0;
+    if (id < 0 || id >= FOG_COUNT) {
+        if (!plain(ctx, (u32)G3D_FOG_NONE, 4))
+            return false;
+        const f64 none = (f64)f32_at(ctx, (u32)G3D_FOG_NONE);
+        if (!rvl_gx_fog_regs(ctx, 0, none, none, none, none, 0, &regs))
+            return false;
+        cycles += (id < 0 ? FOG_NEGATIVE_CYCLES : FOG_PAST_CYCLES) + FOG_NONE_CYCLES;
+    } else {
+        fog = state + FOG_STATE_FOGS + (u32)id * FOG_SIZE;
+        type = lwz(fog + FOG_TYPE);
+        if (!rvl_gx_fog_regs(ctx, type, (f64)f32_at(ctx, fog + FOG_START), (f64)f32_at(ctx, fog + FOG_START + 4u),
+                             (f64)f32_at(ctx, fog + FOG_START + 8u), (f64)f32_at(ctx, fog + FOG_START + 12u),
+                             lwz(fog + FOG_COLOR), &regs))
+            return false;
+        cycles += FOG_SET_GP_CYCLES + FOG_SET_GP_EXIT_CYCLES;
+    }
+    // The wrapper's LR save into the caller's frame.
+    stw(ctx->gpr[1] + 4u, ctx->lr);
+    if (type != 0)
+        cycles += FOG_ADJ_CYCLES + rvl_gx_fog_range_adj(ctx, lbz(fog + FOG_ADJ_ENABLE), lhz(fog + FOG_ADJ_CENTER),
+                                                        fog + FOG_ADJ_TABLE);
+    rvl_gx_fog_emit(ctx, &regs);
+    stw(state + FOG_STATE_ID, (u32)id);
+    stw(state + FOG_STATE_FLAGS, flags | 3u);
+    ctx->downcount -= cycles + regs.cycles + FOG_STORE_CYCLES;
     return true;
 }
 

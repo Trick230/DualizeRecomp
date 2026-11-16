@@ -67,6 +67,7 @@ add_library(DualizeRecompLib STATIC
     "${RUNTIME_DIR}/sdk/nw4r_g3d_calc.c"
     "${RUNTIME_DIR}/sdk/nw4r_g3d_draw.c"
     "${RUNTIME_DIR}/sdk/rvl_cache.c"
+    "${RUNTIME_DIR}/sdk/rvl_gx_fog.c"
     "${RUNTIME_DIR}/sdk/rvl_mtx.c"
     "${RUNTIME_DIR}/sdk/rvl_os.c")
 target_include_directories(DualizeRecompLib PRIVATE "${PPC_DIR}" "${RUNTIME_DIR}")
