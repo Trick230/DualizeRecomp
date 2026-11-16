@@ -30,6 +30,10 @@ enum {
     STATE_SYNC = 0x000,            // sSyncGX: the next display list flushes GX state
     STATE_GEN_MODE = 0x004,        // sGenMode2: 4 counts, cull mode, dirty flags
     STATE_TEX_SCALE = 0x010,       // sTexCoordScale
+    STATE_TEX_OBJ = 0x080,         // the last 8 tex objects loaded (32 bytes each)
+    STATE_TEX_OBJ_VALID = 0x180,   // byte: which of them are
+    STATE_TLUT = 0x1A0,            // the last 8 TLUT objects loaded (12 bytes each)
+    STATE_TLUT_VALID = 0x200,      // half: which of them are
     STATE_SHP_CACHE = 0x204,       // sShp: the vertex format of the last shape
     STATE_IDENTITY = 0x210,        // the current matrices are PNMTX0 and identities
     STATE_TEX_MTX_TYPE = 0x218,    // sPreTexMtxState: 8 function types
@@ -336,7 +340,10 @@ enum {
     GX_DATA_SU_TS0 = 0x108,       // per tex coord: s scale and bias
     GX_DATA_SU_TS1 = 0x128,       // t
     GX_DATA_TREF = 0x150,         // per two tev stages: their tex coords and maps
+    GX_DATA_TEX_FLUSH = 0x174,    // the BP that flushes the texture state
     GX_DATA_PE_CTRL = 0x22C,
+    GX_DATA_TEX_REGIONS = 0x258,  // 3 x 8 regions (16 bytes each): even, odd LODs, RGBA8 mipmaps
+    GX_DATA_TLUT_REGIONS = 0x3D8, // 20 x 16 bytes
     GX_DATA_GEN_MODE = 0x254,
     GX_DATA_IREF = 0x170,         // the indirect stages' tex coords and maps
     GX_DATA_TEX_MAP_SIZE = 0x564, // per tex map
@@ -344,6 +351,8 @@ enum {
     GX_DATA_TEV_TEX_MAP = 0x5A4,  // per tev stage
     GX_DATA_MANUAL_COORDS = 0x5E4,
     GX_DATA_TEV_TC_ENABLED = 0x5E8,
+    GX_DATA_TEX_REGION_CALLBACK = 0x518,
+    GX_DATA_TLUT_REGION_CALLBACK = 0x51C,
     GX_DATA_DIRTY_STATE = 0x5FC,
 };
 enum { GX_DIRTY_SU_TEX = 1u };
@@ -425,6 +434,84 @@ static s64 gx_call_display_list(CPUState* ctx, u32 list, u32 size) {
     return cycles;
 }
 
+// The texture loads, with the SDK's region callbacks (the natives decline
+// a game's own).
+static bool gx_default_regions(CPUState* ctx, u32 gx) {
+    return lwz(gx + GX_DATA_TEX_REGION_CALLBACK) == (u32)GX_TEX_REGION_CALLBACK &&
+           lwz(gx + GX_DATA_TLUT_REGION_CALLBACK) == (u32)GX_TLUT_REGION_CALLBACK;
+}
+
+// A tex map's BP register: `reg` is map 0's (maps 4-7 at +0x20).
+static u32 gx_tex_reg(u32 reg, u32 map) { return map < 4u ? reg + map : reg + 0x1Cu + map; }
+
+// __GXDefaultTexRegionCallback: the region by format and mipmapping.
+static u32 gx_tex_region(CPUState* ctx, u32 gx, u32 obj, u32 map) {
+    const s32 fmt = (s32)lwz(obj + 0x14u);
+    const bool mip = (lbz(obj + 0x1Fu) & 1u) != 0;
+    u32 table;
+    if (fmt == 6)
+        table = mip ? 2u : 1u;  // RGBA8
+    else if (fmt >= 8 && fmt <= 10)
+        table = 0u;  // color indexed
+    else
+        table = mip ? 1u : 0u;
+    return gx + GX_DATA_TEX_REGIONS + table * 0x80u + (map & 7u) * 16u;
+}
+
+// Whether gx_load_tex_obj can load `obj`: a TLUT it names is in the table.
+static bool gx_tex_obj_ok(CPUState* ctx, u32 obj) {
+    return (lbz(obj + 0x1Fu) & 2u) || lwz(obj + 0x18u) < 20u;
+}
+
+// GXLoadTexObj(obj, map): its 6 BPs (and its TLUT's when it has one), the
+// size and wrap for the tex coord scales, which it dirties.
+static void gx_load_tex_obj(CPUState* ctx, u32 gx, u32 obj, u32 map) {
+    const u32 region = gx_tex_region(ctx, gx, obj, map);
+    const u32 mode0 = (lwz(obj) & 0xFFFFFFu) | gx_tex_reg(0x80u, map) << 24;
+    const u32 mode1 = (lwz(obj + 4u) & 0xFFFFFFu) | gx_tex_reg(0x84u, map) << 24;
+    const u32 image0 = (lwz(obj + 8u) & 0xFFFFFFu) | gx_tex_reg(0x88u, map) << 24;
+    const u32 image1 = (lwz(region) & 0xFFFFFFu) | gx_tex_reg(0x8Cu, map) << 24;
+    const u32 image2 = (lwz(region + 4u) & 0xFFFFFFu) | gx_tex_reg(0x90u, map) << 24;
+    const u32 image3 = (lwz(obj + 0xCu) & 0xFFFFFFu) | gx_tex_reg(0x94u, map) << 24;
+    bp(ctx, mode0);
+    bp(ctx, mode1);
+    bp(ctx, image0);
+    bp(ctx, image1);
+    bp(ctx, image2);
+    bp(ctx, image3);
+    stw(obj, mode0);
+    stw(obj + 4u, mode1);
+    stw(obj + 8u, image0);
+    stw(region, image1);
+    stw(region + 4u, image2);
+    stw(obj + 0xCu, image3);
+    if (!(lbz(obj + 0x1Fu) & 2u)) {
+        const u32 tlut = gx + GX_DATA_TLUT_REGIONS + lwz(obj + 0x18u) * 16u;
+        stw(tlut + 4u, (lwz(tlut + 4u) & 0xFFFFFFu) | gx_tex_reg(0x98u, map) << 24);
+        bp(ctx, lwz(tlut + 4u));
+    }
+    stw(gx + GX_DATA_TEX_MAP_SIZE + map * 4u, image0);
+    stw(gx + GX_DATA_TEX_MAP_WRAP + map * 4u, mode0);
+    stw(gx + GX_DATA_DIRTY_STATE, lwz(gx + GX_DATA_DIRTY_STATE) | GX_DIRTY_SU_TEX);
+    sth(gx + 2u, 0);
+}
+
+// GXLoadTlut(obj, name), between two texture flushes.
+static void gx_load_tlut(CPUState* ctx, u32 gx, u32 obj, u32 name) {
+    const u32 region = gx + GX_DATA_TLUT_REGIONS + name * 16u;
+    bp(ctx, lwz(gx + GX_DATA_TEX_FLUSH));
+    sth(gx + 2u, 0);
+    bp(ctx, lwz(obj + 4u));
+    bp(ctx, lwz(region));
+    bp(ctx, lwz(gx + GX_DATA_TEX_FLUSH));
+    sth(gx + 2u, 0);
+    const u32 tlut = (lwz(obj) & ~0x3FFu) | (lwz(region) & 0x3FFu);
+    stw(region + 4u, tlut);
+    stw(region + 8u, lwz(obj + 4u));
+    stw(region + 12u, lwz(obj + 8u));
+    stw(obj, tlut);
+}
+
 // --- Material loads -------------------------------------------------------------
 
 // The guest's cycles per path, measured with their callees.
@@ -489,6 +576,141 @@ bool g3d_LoadResMatIndMtx(CPUState* ctx) {
     return load_mat_dl(ctx, 0x40u, count, MAT_IND_MTX_CYCLES + (count ? MAT_IND_MTX_DL_CYCLES : 0));
 }
 
+
+// The guest's cycles: per map unused, the cached object's, a load.
+#define TEX_OBJ_CYCLES 149
+#define TEX_OBJ_MAP_CYCLES 10
+#define TEX_OBJ_SAME_CYCLES 102
+#define TEX_OBJ_LOAD_CYCLES 241
+#define TEX_OBJ_TLUT_CYCLES 20  // with a TLUT: not seen in the scenes measured, a guess
+#define TLUT_CYCLES 144
+#define TLUT_MAP_CYCLES 10
+#define TLUT_SAME_CYCLES 20  // these two not seen either: guesses
+#define TLUT_LOAD_CYCLES 80
+#define NO_TEX_CYCLES 8
+
+// Whether the `words` words at `obj` equal those at `cache`.
+static bool same_words(CPUState* ctx, u32 obj, u32 cache, u32 words) {
+    for (u32 i = 0; i < words; ++i)
+        if (lwz(obj + i * 4u) != lwz(cache + i * 4u))
+            return false;
+    return true;
+}
+
+// void LoadResMatTlut(ResMatTlutObj tlut): the TLUTs of the material's maps
+// that differ from the last loaded, which invalidates those maps' objects.
+bool g3d_LoadResMatTlut(CPUState* ctx) {
+    const u32 data = lwz(ctx->gpr[3]);
+    if (data == 0) {
+        ctx->downcount -= NO_TEX_CYCLES;
+        return true;
+    }
+    const u32 gx = GX_DATA;
+    if (!plain(ctx, data, 4u + 8u * 12u) || !gx_default_regions(ctx, gx))
+        return false;
+    const u32 used = lwz(data);
+    s64 cycles = TLUT_CYCLES;
+    for (u32 i = 0; i < 8u; ++i) {
+        cycles += TLUT_MAP_CYCLES;
+        if (!(used & (1u << i)))
+            continue;
+        const u32 obj = data + 4u + i * 12u, cache = STATE + STATE_TLUT + i * 12u;
+        if ((lhz(STATE + STATE_TLUT_VALID) & (1u << i)) && same_words(ctx, obj, cache, 3u)) {
+            cycles += TLUT_SAME_CYCLES;
+            continue;
+        }
+        sth(STATE + STATE_TLUT_VALID, lhz(STATE + STATE_TLUT_VALID) | (1u << i));
+        for (u32 w = 0; w < 3u; ++w)
+            stw(cache + w * 4u, lwz(obj + w * 4u));
+        gx_load_tlut(ctx, gx, obj, i);
+        stb(STATE + STATE_TEX_OBJ_VALID, lbz(STATE + STATE_TEX_OBJ_VALID) & ~(1u << i));
+        cycles += TLUT_LOAD_CYCLES;
+    }
+    stb(STATE + STATE_SYNC, 1);
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// void LoadResMatTexObj(ResMatTexObj tex): the tex objects of the material's
+// maps that differ from the last loaded, and their sizes for the tex coord
+// scales.
+bool g3d_LoadResMatTexObj(CPUState* ctx) {
+    const u32 data = lwz(ctx->gpr[3]);
+    if (data == 0) {
+        ctx->downcount -= NO_TEX_CYCLES;
+        return true;
+    }
+    const u32 gx = GX_DATA;
+    if (!plain(ctx, data, 4u + 8u * 32u) || !gx_default_regions(ctx, gx))
+        return false;
+    const u32 used = lwz(data);
+    for (u32 i = 0; i < 8u; ++i)
+        if ((used & (1u << i)) && !gx_tex_obj_ok(ctx, data + 4u + i * 32u))
+            return false;
+    s64 cycles = TEX_OBJ_CYCLES;
+    for (u32 i = 0; i < 8u; ++i) {
+        cycles += TEX_OBJ_MAP_CYCLES;
+        if (!(used & (1u << i)))
+            continue;
+        const u32 obj = data + 4u + i * 32u, cache = STATE + STATE_TEX_OBJ + i * 32u;
+        if ((lbz(STATE + STATE_TEX_OBJ_VALID) & (1u << i)) && same_words(ctx, obj, cache, 8u)) {
+            cycles += TEX_OBJ_SAME_CYCLES;
+            continue;
+        }
+        stb(STATE + STATE_TEX_OBJ_VALID, lbz(STATE + STATE_TEX_OBJ_VALID) | (1u << i));
+        for (u32 w = 0; w < 8u; ++w)
+            stw(cache + w * 4u, lwz(obj + w * 4u));
+        cycles += TEX_OBJ_LOAD_CYCLES + (lbz(obj + 0x1Fu) & 2u ? 0 : TEX_OBJ_TLUT_CYCLES);
+        gx_load_tex_obj(ctx, gx, obj, i);
+        const u32 image0 = lwz(obj + 8u), scale = STATE + STATE_TEX_SCALE;
+        sth(scale + TEX_SCALE_MAP + i * 4u, (image0 & 0x3FFu) + 1u);
+        sth(scale + TEX_SCALE_MAP + i * 4u + 2u, ((image0 >> 10) & 0x3FFu) + 1u);
+        stw(scale + TEX_SCALE_FLAGS, (lwz(scale + TEX_SCALE_FLAGS) & ~1u) | 2u);
+    }
+    stb(STATE + STATE_SYNC, 1);
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// The guest's cycles: per count or the cull mode, unchanged or not.
+#define MAT_GEN_MODE_CYCLES 16
+#define MAT_GEN_MODE_SAME_CYCLES 7
+#define MAT_GEN_MODE_SET_CYCLES 17
+
+// void LoadResMatGenMode(ResGenMode gen): the material's counts and cull
+// mode into sGenMode2, which a change dirties (the counts its BP, the tex
+// coords their scales too), with the flag that it has one.
+bool g3d_LoadResMatGenMode(CPUState* ctx) {
+    const u32 data = lwz(ctx->gpr[3]);
+    if (data == 0) {
+        ctx->downcount -= 3;
+        return true;
+    }
+    const u32 state = STATE + STATE_GEN_MODE, flags = state + 8u;
+    s64 cycles = MAT_GEN_MODE_CYCLES;
+    for (u32 i = 0; i < 4u; ++i) {
+        const u32 count = lbz(data + i);
+        if (lbz(state + i) == count) {
+            cycles += MAT_GEN_MODE_SAME_CYCLES;
+            continue;
+        }
+        stb(state + i, count);
+        stw(flags, lwz(flags) & (i < 2u ? ~3u : ~1u));
+        cycles += MAT_GEN_MODE_SET_CYCLES;
+    }
+    const u32 cull = lwz(data + 4u);
+    if (lwz(state + 4u) == cull) {
+        cycles += MAT_GEN_MODE_SAME_CYCLES;
+    } else {
+        stw(state + 4u, cull);
+        stw(flags, lwz(flags) & ~1u);
+        cycles += MAT_GEN_MODE_SET_CYCLES;
+    }
+    if (!(lwz(flags) & 4u))
+        stw(flags, (lwz(flags) & ~3u) | 4u);
+    ctx->downcount -= cycles;
+    return true;
+}
 
 #define ZCOMPLOC_CYCLES 26
 #define ZCOMPLOC_SET_CYCLES 23
