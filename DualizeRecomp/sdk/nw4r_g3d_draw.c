@@ -21,6 +21,7 @@ bool dualize_os_sync(CPUState* ctx, u32 next);
 bool rvl_GXLoadPosMtxImm(CPUState* ctx);
 bool rvl_GXLoadNrmMtxImm(CPUState* ctx);
 bool rvl_GXLoadTexMtxImm(CPUState* ctx);
+bool rvl_GXLoadLightObjImm(CPUState* ctx);
 bool g3d_CallPrimitiveDisplayList(CPUState* ctx);
 
 #define GATHER_PIPE 0xCC008000u
@@ -1078,6 +1079,206 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
         load_post_tex_mtx(ctx, work, m, i);
     }
     ctx->downcount -= cycles;
+    return true;
+}
+
+// G3DState's LightState: the set loaded and its four masks, the light in
+// each of GX's 8 slots, 128 LightObj (flags, then the GXLightObj), 128
+// ambient colors, 128 sets (8 light ids, the ambient id).
+enum {
+    LIGHT_SET_LOADED = 0x10,
+    LIGHT_MASK_DIFF_COLOR = 0x14,
+    LIGHT_MASK_DIFF_ALPHA = 0x18,
+    LIGHT_MASK_SPEC_COLOR = 0x1C,
+    LIGHT_MASK_SPEC_ALPHA = 0x20,
+    LIGHT_SLOT = 0x24,
+    LIGHT_OBJ = 0x2C,
+    LIGHT_AMB = 0x222C,
+    LIGHT_SET = 0x242C,
+    LIGHT_STATE_SIZE = 0x2E2C,
+};
+enum { LIGHT_ENABLE = 4, LIGHT_SPECULAR = 2, LIGHT_NO_COLOR = 0x10, LIGHT_NO_ALPHA = 0x20 };
+#define LIGHT_OBJ_SIZE 0x44u
+#define LIGHT_SET_SIZE 0xCu
+
+// Cycles beyond the instructions counted below: both functions' frames and
+// GPR saves.
+#define LIGHT_SET_CYCLES 28
+
+// std::find over s8 [first, first + 8) as the guest's loop runs it: the
+// index, 8 when absent, and its cycles.
+static u32 light_find(CPUState* ctx, u32 first, s32 value, s64* cycles) {
+    for (u32 i = 0; i < 8u; ++i)
+        if ((s8)lbz(first + i) == value) {
+            *cycles += 9 + 9 * i;
+            return i;
+        }
+    *cycles += 74;
+    return 8;
+}
+
+// The mask pointers' stores: 2 per test, 2 per store (the last one's branch
+// 3 on the same-set path).
+static void light_store_masks(CPUState* ctx, const u32 out[4], u32 light, s64* cycles, bool same) {
+    for (u32 i = 0; i < 4u; ++i) {
+        *cycles += 2;
+        if (out[i]) {
+            stw(out[i], lwz(light + LIGHT_MASK_DIFF_COLOR + i * 4u));
+            *cycles += 2 + (same && i == 3u);
+        }
+    }
+}
+
+// void LoadLightSet(int id, u32* diffColor, u32* diffAlpha, u32* specColor,
+// u32* specAlpha, AmbLightObj* amb): the set's ambient color and the masks of
+// its enabled lights, loading into GX's slots those not there yet (into a
+// free one, else over one the set doesn't use); ids out of range clear the
+// masks and give a white ambient. Declines sets with no slot left.
+bool g3d_LoadLightSet(CPUState* ctx) {
+    const u32 light = (u32)G3D_LIGHT_STATE;
+    const s32 id = (s32)ctx->gpr[3];
+    const u32 out[4] = {ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7]}, amb = ctx->gpr[8];
+    if (!plain(ctx, light, LIGHT_STATE_SIZE) || (amb && !plain(ctx, amb, 4)) || !plain(ctx, ctx->gpr[1] + 4u, 4))
+        return false;
+    for (u32 i = 0; i < 4u; ++i)
+        if (out[i] && !plain(ctx, out[i], 4))
+            return false;
+    // The wrapper's LR save into the caller's frame.
+    stw(ctx->gpr[1] + 4u, ctx->lr);
+    if (id < 0 || id >= 0x80) {
+        // The wrapper, the entry through the id tests, the mask and ambient
+        // tests and stores, the exit.
+        s64 cycles = LIGHT_SET_CYCLES + 23 + (id < 0 ? 13 : 15) + 4 * 2 + 2 + 6;
+        for (u32 i = 0; i < 4u; ++i)
+            if (out[i]) {
+                stw(out[i], 0);
+                cycles += 2;
+            }
+        if (amb) {
+            for (u32 i = 0; i < 4u; ++i)
+                stb(amb + 3u - i, 0xFF);
+            cycles += 6;
+        }
+        ctx->downcount -= cycles;
+        return true;
+    }
+    const u32 set = light + LIGHT_SET + (u32)id * LIGHT_SET_SIZE;
+    const bool same = (s32)lwz(light + LIGHT_SET_LOADED) == id;
+    if (!same) {
+        // Replay the slot choices to find a set that runs out of slots.
+        u8 slot[8];
+        for (u32 j = 0; j < 8u; ++j)
+            slot[j] = lbz(light + LIGHT_SLOT + j);
+        for (u32 i = 0; i < 8u; ++i) {
+            const s8 index = (s8)lbz(set + i);
+            if (index < 0 || !(lwz(light + LIGHT_OBJ + (u32)index * LIGHT_OBJ_SIZE) & LIGHT_ENABLE))
+                continue;
+            u32 j = 0;
+            while (j < 8u && (s8)slot[j] != index)
+                ++j;
+            if (j < 8u)
+                continue;
+            j = 0;
+            while (j < 8u && (s8)slot[j] != -1)
+                ++j;
+            if (j == 8u) {
+                j = 0;
+                for (; j < 8u; ++j) {
+                    u32 k = 0;
+                    while (k < 8u && (s8)lbz(set + k) != (s8)slot[j])
+                        ++k;
+                    if (k == 8u)
+                        break;
+                }
+                if (j == 8u)
+                    return false;
+            }
+            slot[j] = (u8)index;
+        }
+    }
+    // The wrapper, then the entry, the id tests and the ambient test.
+    s64 cycles = LIGHT_SET_CYCLES + 23 + 15 + 2;
+    if (amb) {
+        const s8 index = (s8)lbz(set + 8u);
+        cycles += 7;
+        if (index < 0) {
+            for (u32 i = 0; i < 4u; ++i)
+                stb(amb + 3u - i, 0xFF);
+            cycles += 6;
+        } else {
+            const u32 from = light + LIGHT_AMB + (u32)index * 4u;
+            for (u32 i = 0; i < 4u; ++i)
+                stb(amb + i, lbz(from + i));
+            cycles += 5 + 9;
+        }
+    }
+    cycles += 3;
+    if (same) {
+        light_store_masks(ctx, out, light, &cycles, true);
+        ctx->downcount -= cycles + 6;
+        return true;
+    }
+    u32 mask[4] = {0, 0, 0, 0};
+    for (u32 i = 0; i < 4u; ++i)
+        stw(light + LIGHT_MASK_DIFF_COLOR + i * 4u, 0);
+    stw(light + LIGHT_SET_LOADED, (u32)id);
+    cycles += 15;
+    for (u32 i = 0; i < 8u; ++i) {
+        const s8 index = (s8)lbz(set + i);
+        cycles += 4 + 4;
+        if (index < 0)
+            continue;
+        const u32 obj = light + LIGHT_OBJ + (u32)index * LIGHT_OBJ_SIZE;
+        cycles += 7;
+        if (!(lwz(obj) & LIGHT_ENABLE))
+            continue;
+        cycles += 4 + 1 + 3;
+        u32 j = light_find(ctx, light + LIGHT_SLOT, index, &cycles);
+        if (j < 8u) {
+            cycles += 3;
+        } else {
+            cycles += 3;
+            j = 0;
+            while (j < 8u && (s8)lbz(light + LIGHT_SLOT + j) != -1) {
+                cycles += 7;
+                ++j;
+            }
+            cycles += j < 8u ? 6 : 2;
+            cycles += 3;
+            if (j == 8u) {
+                cycles += 2;
+                for (j = 0;; ++j) {
+                    cycles += 5 + 1 + 2;
+                    if (light_find(ctx, set, (s8)lbz(light + LIGHT_SLOT + j), &cycles) == 8u)
+                        break;
+                    cycles += 3;
+                }
+                cycles += 14;
+            } else {
+                cycles += 15;
+            }
+            ctx->gpr[3] = obj + 4u;
+            ctx->gpr[4] = 1u << j;
+            rvl_GXLoadLightObjImm(ctx);
+            stb(light + LIGHT_SLOT + j, (u8)index);
+        }
+        const u32 bit = 1u << j, flags = lwz(obj);
+        const u32 kind = flags & LIGHT_SPECULAR ? 2u : 0u;
+        cycles += 9 + 2;
+        if (!(flags & LIGHT_NO_COLOR)) {
+            mask[kind] |= bit;
+            stw(light + LIGHT_MASK_DIFF_COLOR + kind * 4u, mask[kind]);
+            cycles += 3;
+        }
+        cycles += 3;
+        if (!(flags & LIGHT_NO_ALPHA)) {
+            mask[kind + 1u] |= bit;
+            stw(light + LIGHT_MASK_DIFF_COLOR + (kind + 1u) * 4u, mask[kind + 1u]);
+            cycles += kind ? 4 : 3;
+        }
+    }
+    light_store_masks(ctx, out, light, &cycles, false);
+    ctx->downcount -= cycles + 6;
     return true;
 }
 
