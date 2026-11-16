@@ -9,6 +9,7 @@
 // are left as they were. Each checks everything it will touch before it
 // touches anything, and declines what it doesn't cover.
 
+#include <math.h>
 #include <string.h>
 
 #include "core/cpu.h"
@@ -1053,13 +1054,57 @@ enum {
 #define MAP_PROJ_CAMERA_CYCLES 68
 #define MAP_PROJ_NONE_CYCLES 35
 #define MAP_DEFAULT_CYCLES 14
+#define MAP_ENV_LIGHT_CYCLES 182
+#define MAP_LIGHT_DIR_CYCLES 30
+#define MAP_LIGHT_POS_CYCLES 50
+#define MAP_LIGHT_POS_ZERO_DIR_CYCLES 58
+#define MAP_LIGHT_AT_EYE_CYCLES 3
+#define MAP_VEC_IS_NEXT_CYCLES 3
+#define MAP_UP_X_CYCLES 10
+#define MAP_UP_Z_CYCLES 14
+#define MAP_UP_POLE_CYCLES 18
+#define MAP_HALF_NORMALIZE_CYCLES 45
+#define MAP_HALF_COPY_CYCLES 50
+#define MAP_SPEC_HALF_CYCLES 5
+#define MAP_SPEC_NEG_CYCLES 15
+#define MAP_SPEC_LIGHT_CYCLES 203
+#define MAP_SPEC_CAMERA_CYCLES 140
+#define MAP_SPEC_NONE_CYCLES 30
+
+// The light paths' vectors, in scratch below the native's frame where the
+// guest's mapping functions keep theirs; a LightObj's GXLightObj position and
+// direction (after its flags word).
+enum {
+    V_DIR = 0x00,
+    V_UP = 0x0C,
+    V_A = 0x18,
+    V_B = 0x24,
+    V_EYE = 0x30,
+    V_T = 0x3C,
+    V_NA = 0x48,
+    V_NB = 0x54,
+    V_H = 0x60,
+    V_HALF = 0x6C,
+    MAP_SCRATCH = 0x78,
+};
+enum { GX_LIGHT_POS = 0x2C, GX_LIGHT_DIR = 0x38 };
 
 bool rvl_PSMTXConcat(CPUState* ctx);
 bool rvl_PSMTXCopy(CPUState* ctx);
 bool rvl_PSMTXInverse(CPUState* ctx);
+bool rvl_PSVECNormalize(CPUState* ctx);
+bool rvl_PSVECCrossProduct(CPUState* ctx);
+bool rvl_PSVECAdd(CPUState* ctx);
+bool rvl_PSVECDotProduct(CPUState* ctx);
 _Static_assert(TS_ENV_CONCAT == TS_CONCAT && TS_ENV_COPY == TS_COPY && TS_CONCAT == SKIN_PSMTX_CONCAT &&
                    TS_COPY == CV_RVL_COPY && TS_INVERSE == TS_RVL_INVERSE,
                "the mapping functions' callees with natives");
+_Static_assert(TS_SPEC_CONCAT == TS_CONCAT && TS_SPEC_COPY == TS_COPY && TS_ENV_INVERSE == G3D_GET_INV_CAMERA &&
+                   TS_SPEC_INVERSE == G3D_GET_INV_CAMERA && TS_NORMALIZE == RVL_VEC_NORMALIZE &&
+                   TS_SPEC_NORMALIZE == RVL_VEC_NORMALIZE && TS_HALF_NORMALIZE == RVL_VEC_NORMALIZE &&
+                   TS_CROSS == RVL_VEC_CROSS && TS_SPEC_CROSS == RVL_VEC_CROSS && TS_HALF_ADD == RVL_VEC_ADD &&
+                   TS_HALF_DOT == RVL_VEC_DOT,
+               "the light mapping functions' callees with natives");
 
 static void map_concat(CPUState* ctx, u32 a, u32 b, u32 ab) {
     ctx->gpr[3] = a;
@@ -1079,20 +1124,31 @@ static u32 map_light(s8 index) {
     return index >= 0 ? (u32)G3D_LIGHT_STATE + LIGHT_OBJ + (u32)index * LIGHT_OBJ_SIZE : 0u;
 }
 
-// What the natives below need: the float state PSMTXConcat's replay runs in,
-// the camera state as plain memory, and a function this file knows, short of
-// EnvironmentMapping's light paths.
-static bool tex_map_ok(CPUState* ctx, u32 mode, s8 camera, s8 light) {
-    if ((ctx->msr & (PPC_MSR_FE0 | PPC_MSR_FE1)) || (ctx->gqr[0] & 0x00070007u) ||
-        !plain(ctx, (u32)G3D_CAMERA_STATE, CAMERA_STATE_SIZE) ||
+// What the natives below need: the float state PSMTXConcat's and the PSVEC
+// natives' replays run in, the camera state as plain memory, and a function
+// this file knows; the light paths also the light, their constants and
+// scratch below the native's frame for the vectors.
+static bool tex_map_ok(CPUState* ctx, u32 mode, s8 camera, s8 light, u32 scratch) {
+    if (!(ctx->msr & PPC_MSR_FP) || (ctx->msr & (PPC_MSR_FE0 | PPC_MSR_FE1)) || !(ctx->hid2 & PPC_HID2_LSQE) ||
+        (ctx->fpscr & 3u) || (ctx->gqr[0] & 0x00070007u) || !plain(ctx, (u32)G3D_CAMERA_STATE, CAMERA_STATE_SIZE) ||
         lhz((u32)G3D_CAMERA_STATE + CAMERA_VIEW) >= CAMERA_COUNT)
         return false;
-    const u32 func = lwz(STATE + STATE_TEX_MAP_FUNC + mode * 8u);
-    if (func == (u32)G3D_ENV_MAPPING) {
-        const u32 obj = map_light(light);
-        return camera >= 0 || !obj || (plain(ctx, obj, 4) && !(lwz(obj) & LIGHT_ENABLE));
-    }
-    return func == (u32)G3D_PROJ_MAPPING || func == (u32)G3D_DEFAULT_MAPPING;
+    const u32 func = lwz(STATE + STATE_TEX_MAP_FUNC + mode * 8u), obj = map_light(light);
+    const bool env = func == (u32)G3D_ENV_MAPPING, spec = func == (u32)G3D_ENV_SPEC_MAPPING;
+    if (!env && !spec)
+        return func == (u32)G3D_PROJ_MAPPING || func == (u32)G3D_DEFAULT_MAPPING;
+    if (env && camera >= 0)
+        return true;
+    if (obj && !plain(ctx, obj, LIGHT_OBJ_SIZE))
+        return false;
+    const bool lit = obj && (lwz(obj) & LIGHT_ENABLE);
+    if (!lit && (env || camera < 0))
+        return true;  // the view's environment matrix
+    const u32 r2 = ctx->gpr[2];
+    return plain(ctx, scratch, MAP_SCRATCH) && plain(ctx, (u32)G3D_ENV_LIGHT_MTX, MTX34_SIZE) &&
+           plain(ctx, (u32)G3D_ENV_ZERO, 4) && plain(ctx, (u32)G3D_ENV_ONE, 4) && plain(ctx, (u32)G3D_ENV_EPS, 4) &&
+           plain(ctx, (u32)G3D_ENV_UP, 4) && plain(ctx, r2 + (u32)SDA2_HALF, 4) &&
+           plain(ctx, r2 + (u32)SDA2_THREE, 4) && plain(ctx, r2 + (u32)HALF_ANGLE_EPS, 4);
 }
 
 // GetInvCameraMtxPtr: the inverse of the view's camera matrix, made once.
@@ -1110,11 +1166,143 @@ static u32 map_inverse(CPUState* ctx, s64* cycles) {
     return state + CAMERA_INVERSE;
 }
 
-// The mode's function into m (ScnDependentMtxFunc: EnvironmentMapping without
-// a light, ProjectionMapping, DefaultMapping), as tex_map_ok allows it.
-static void tex_map(CPUState* ctx, u32 mode, u32 m, s8 camera, s8 light, s64* cycles) {
+static void vec_set(CPUState* ctx, u32 v, u32 x, u32 y, u32 z) {
+    stw(v, x);
+    stw(v + 4u, y);
+    stw(v + 8u, z);
+}
+
+// fneg: the sign bit flipped.
+static void vec_neg(CPUState* ctx, u32 dst, u32 src) {
+    vec_set(ctx, dst, lwz(src) ^ 0x80000000u, lwz(src + 4u) ^ 0x80000000u, lwz(src + 8u) ^ 0x80000000u);
+}
+
+// Whether v is (c, c, c), the guest's fcmpu per component until one differs.
+static bool vec_is(CPUState* ctx, u32 v, float c, s64* cycles) {
+    for (u32 i = 0; i < 3u; ++i) {
+        if (i)
+            *cycles += MAP_VEC_IS_NEXT_CYCLES;
+        if (!(f32_at(ctx, v + i * 4u) == c))
+            return false;
+    }
+    return true;
+}
+
+static void vec_normalize(CPUState* ctx, u32 src, u32 unit) {
+    ctx->gpr[3] = src;
+    ctx->gpr[4] = unit;
+    rvl_PSVECNormalize(ctx);
+}
+
+static void vec_cross(CPUState* ctx, u32 a, u32 b, u32 axb) {
+    ctx->gpr[3] = a;
+    ctx->gpr[4] = b;
+    ctx->gpr[5] = axb;
+    rvl_PSVECCrossProduct(ctx);
+}
+
+// VEC3TransformNormal: fmuls and fadds as the guest pairs them, unfused.
+static void vec_transform_normal(CPUState* ctx, u32 out, u32 mtx, u32 v) {
+#pragma clang fp contract(off)
+    const float x = f32_at(ctx, v), y = f32_at(ctx, v + 4u), z = f32_at(ctx, v + 8u);
+    float r[3];
+    for (u32 i = 0; i < 3u; ++i) {
+        const u32 row = mtx + i * 16u;
+        const float xy = f32_at(ctx, row) * x + f32_at(ctx, row + 4u) * y;
+        r[i] = f32_at(ctx, row + 8u) * z + xy;
+    }
+    vec_set(ctx, out, bits_f32(r[0]), bits_f32(r[1]), bits_f32(r[2]));
+}
+
+// The light's vector in view space, toward the light: its direction when it
+// has one (flags 1 or 2) that isn't zero, else from its position.
+static void map_light_vec(CPUState* ctx, u32 obj, u32 inverse, u32 v, s64* cycles) {
+    const float zero = f32_at(ctx, (u32)G3D_ENV_ZERO);
+    const u32 flags = lwz(obj);
+    *cycles += (flags & 1u) ? 4 : (flags & 2u) ? 6 : 8;  // LightObj::IsDirectional's test
+    vec_neg(ctx, v, obj + GX_LIGHT_DIR);                 // GXGetLightDir
+    if ((flags & 3u) && !vec_is(ctx, v, zero, cycles)) {
+        vec_transform_normal(ctx, v, inverse, v);
+        *cycles += MAP_LIGHT_DIR_CYCLES;
+        return;
+    }
+    vec_set(ctx, v, lwz(obj + GX_LIGHT_POS), lwz(obj + GX_LIGHT_POS + 4u), lwz(obj + GX_LIGHT_POS + 8u));
+    vec_transform_normal(ctx, v, inverse, v);
+    vec_neg(ctx, v, v);
+    *cycles += (flags & 3u) ? MAP_LIGHT_POS_ZERO_DIR_CYCLES : MAP_LIGHT_POS_CYCLES;
+    if (vec_is(ctx, v, zero, cycles)) {
+        stw(v + 4u, lwz((u32)G3D_ENV_ONE));
+        *cycles += MAP_LIGHT_AT_EYE_CYCLES;
+    }
+}
+
+// The up vector for the unit v: y, or z by y's sign when v is along y.
+static void map_up(CPUState* ctx, u32 up, u32 v, s64* cycles) {
+    const u32 zero = lwz((u32)G3D_ENV_ZERO);
+    const float eps = f32_at(ctx, (u32)G3D_ENV_EPS);
+    if (!(fabsf(f32_at(ctx, v)) < eps)) {
+        vec_set(ctx, up, zero, lwz((u32)G3D_ENV_UP), zero);
+        *cycles += MAP_UP_X_CYCLES;
+    } else if (!(fabsf(f32_at(ctx, v + 8u)) < eps)) {
+        vec_set(ctx, up, zero, lwz((u32)G3D_ENV_UP), zero);
+        *cycles += MAP_UP_Z_CYCLES;
+    } else {
+        const bool down = f32_at(ctx, v + 4u) <= f32_bits(zero);
+        vec_set(ctx, up, zero, zero, lwz(down ? (u32)G3D_ENV_ONE : (u32)G3D_ENV_UP));
+        *cycles += MAP_UP_POLE_CYCLES;
+    }
+}
+
+// C_VECHalfAngle(a, b, half): the unit half vector of -a and -b, or their sum
+// when it's (nearly) zero.
+static void vec_half_angle(CPUState* ctx, u32 a, u32 b, u32 half, u32 scratch, s64* cycles) {
+    const u32 na = scratch + V_NA, nb = scratch + V_NB, h = scratch + V_H;
+    vec_neg(ctx, na, a);
+    vec_neg(ctx, nb, b);
+    vec_normalize(ctx, na, na);
+    vec_normalize(ctx, nb, nb);
+    ctx->gpr[3] = na;
+    ctx->gpr[4] = nb;
+    ctx->gpr[5] = h;
+    rvl_PSVECAdd(ctx);
+    ctx->gpr[3] = h;
+    ctx->gpr[4] = h;
+    rvl_PSVECDotProduct(ctx);
+    if (ctx->fpr[1] > (f64)f32_at(ctx, ctx->gpr[2] + (u32)HALF_ANGLE_EPS)) {
+        vec_normalize(ctx, h, half);
+        *cycles += MAP_HALF_NORMALIZE_CYCLES;
+    } else {
+        vec_set(ctx, half, lwz(h), lwz(h + 4u), lwz(h + 8u));
+        *cycles += MAP_HALF_COPY_CYCLES;
+    }
+}
+
+static void mtx_rows(CPUState* ctx, u32 m, u32 a, u32 b, u32 c) {
+    for (u32 i = 0; i < 3u; ++i) {
+        stw(m + i * 4u, lwz(a + i * 4u));
+        stw(m + 0x10u + i * 4u, lwz(b + i * 4u));
+        stw(m + 0x20u + i * 4u, lwz(c + i * 4u));
+    }
+}
+
+// m = outer * (m * inverse) with m's translation zeroed in between.
+static void map_finish(CPUState* ctx, u32 m, u32 inverse, u32 outer) {
+    map_concat(ctx, m, inverse, m);
+    const u32 zero = lwz((u32)G3D_ENV_ZERO);
+    stw(m + 0x2Cu, zero);
+    stw(m + 0x1Cu, zero);
+    stw(m + 0x0Cu, zero);
+    map_concat(ctx, outer, m, m);
+}
+
+// The mode's function into m (ScnDependentMtxFunc: EnvironmentMapping,
+// EnvironmentSpecularMapping, ProjectionMapping, DefaultMapping), as
+// tex_map_ok allows it.
+static void tex_map(CPUState* ctx, u32 mode, u32 m, s8 camera, s8 light, u32 scratch, s64* cycles) {
     const u32 state = (u32)G3D_CAMERA_STATE, func = lwz(STATE + STATE_TEX_MAP_FUNC + mode * 8u);
-    const u32 view = lhz(state + CAMERA_VIEW) * MTX34_SIZE;
+    const u32 view = lhz(state + CAMERA_VIEW) * MTX34_SIZE, env = state + CAMERA_ENV + view;
+    const u32 obj = map_light(light);
+    const bool lit = obj && (lwz(obj) & LIGHT_ENABLE);
     if (func == (u32)G3D_ENV_MAPPING) {
         if (camera >= 0) {
             const u32 inverse = map_inverse(ctx, cycles);
@@ -1123,12 +1311,63 @@ static void tex_map(CPUState* ctx, u32 mode, u32 m, s8 camera, s8 light, s64* cy
             stw(m + 0x2Cu, zero);
             stw(m + 0x1Cu, zero);
             stw(m + 0x0Cu, zero);
-            map_concat(ctx, state + CAMERA_ENV + view, m, m);
+            map_concat(ctx, env, m, m);
             *cycles += MAP_ENV_CAMERA_CYCLES;
+        } else if (lit) {
+            // The light's vector as -z, x and y from the up vector.
+            const u32 v = scratch + V_DIR, up = scratch + V_UP, a = scratch + V_A, b = scratch + V_B;
+            const u32 inverse = map_inverse(ctx, cycles);
+            map_light_vec(ctx, obj, inverse, v, cycles);
+            vec_normalize(ctx, v, v);
+            map_up(ctx, up, v, cycles);
+            vec_cross(ctx, v, up, a);
+            vec_normalize(ctx, a, a);
+            vec_cross(ctx, a, v, b);
+            vec_neg(ctx, up, v);
+            mtx_rows(ctx, m, a, b, up);
+            map_finish(ctx, m, inverse, (u32)G3D_ENV_LIGHT_MTX);
+            *cycles += MAP_ENV_LIGHT_CYCLES;
         } else {
-            *cycles += map_light(light) ? MAP_ENV_LIGHT_OFF_CYCLES : MAP_ENV_NONE_CYCLES;
-            map_copy(ctx, state + CAMERA_ENV + view, m);
+            *cycles += obj ? MAP_ENV_LIGHT_OFF_CYCLES : MAP_ENV_NONE_CYCLES;
+            map_copy(ctx, env, m);
         }
+    } else if (func == (u32)G3D_ENV_SPEC_MAPPING) {
+        // The half vector between the eye (the view's -z) and the light, or
+        // the camera's -z, as z.
+        const u32 inverse = map_inverse(ctx, cycles);
+        const u32 eye = scratch + V_EYE, h = scratch + V_HALF, up = scratch + V_UP, a = scratch + V_A,
+                  b = scratch + V_B;
+        if (lit) {
+            const u32 v = scratch + V_DIR;
+            vec_neg(ctx, eye, state + CAMERA_MTX + view + 0x20u);
+            map_light_vec(ctx, obj, inverse, v, cycles);
+            if (!(lwz(obj) & LIGHT_SPECULAR)) {
+                vec_half_angle(ctx, eye, v, h, scratch, cycles);
+                *cycles += MAP_SPEC_HALF_CYCLES;
+            } else {
+                vec_neg(ctx, h, v);
+                *cycles += MAP_SPEC_NEG_CYCLES;
+            }
+            map_up(ctx, up, h, cycles);
+            *cycles += MAP_SPEC_LIGHT_CYCLES;
+        } else if (camera >= 0) {
+            const u32 cam = state + CAMERA_MTX + (u32)camera * MTX34_SIZE, t = scratch + V_T;
+            vec_neg(ctx, eye, state + CAMERA_MTX + view + 0x20u);
+            vec_set(ctx, up, lwz(cam + 0x10u), lwz(cam + 0x14u), lwz(cam + 0x18u));
+            vec_neg(ctx, t, cam + 0x20u);
+            vec_half_angle(ctx, eye, t, h, scratch, cycles);
+            *cycles += MAP_SPEC_CAMERA_CYCLES;
+        } else {
+            map_copy(ctx, env, m);
+            *cycles += MAP_SPEC_NONE_CYCLES;
+            return;
+        }
+        vec_normalize(ctx, h, h);
+        vec_cross(ctx, up, h, a);
+        vec_normalize(ctx, a, a);
+        vec_cross(ctx, h, a, b);
+        mtx_rows(ctx, m, a, b, h);
+        map_finish(ctx, m, inverse, env);
     } else if (func == (u32)G3D_PROJ_MAPPING) {
         if (camera >= 0) {
             const u32 inverse = map_inverse(ctx, cycles);
@@ -1159,7 +1398,7 @@ static s8 tex_map_camera(CPUState* ctx, u32 effect) {
 bool g3d_LoadResTexSrt(CPUState* ctx) {
     const u32 srt = lwz(ctx->gpr[3]);
     const u32 frame = ctx->gpr[1] - 0xE0u, work = frame + 0x68u, ident = frame + 0x8u;
-    if (!plain(ctx, frame, 0xE0u) || (srt && !plain(ctx, srt, TEX_SRT_SIZE)) || !tex_srt_fpu_ok(ctx))
+    if (!plain(ctx, frame, 0xE8u) || (srt && !plain(ctx, srt, TEX_SRT_SIZE)) || !tex_srt_fpu_ok(ctx))
         return false;
     const u32 maya = (u32)G3D_MAYA_CONST, maya_entry = (u32)G3D_CALC_TEX_MTX_MAYA;
     for (u32 i = 0; i < 7u; ++i)
@@ -1173,7 +1412,8 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
         const u32 effect = srt + TEX_SRT_EFFECT + i * 0x34u, nibble = flags >> (i * 4u) & 0xFu;
         const u32 map = lbz(effect + 2u);
         if (!(lbz(effect + 3u) & 1u) ||
-            (map != 0 && (nibble != 0xFu || !tex_map_ok(ctx, map, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u)))))
+            (map != 0 && (nibble != 0xFu || !tex_map_ok(ctx, map, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u),
+                                                       frame - MAP_SCRATCH))))
             return false;
         if (nibble == 0xFu || mode != 0)
             continue;
@@ -1183,6 +1423,7 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
             !sin_cos_fidx(ctx, f32_at(ctx, maya + MAYA_TO_FIDX) * f32_at(ctx, srt + 8u + i * 0x14u + 8u), &s, &c))
             return false;
     }
+    stw(ctx->gpr[1] + 4u, ctx->lr);  // its LR save into the caller's frame
     s64 cycles = TEX_SRT_CYCLES;
     u32 post_identity = lwz(STATE + STATE_POST_TEX_IDENTITY);
     for (u32 i = 0; i < 8u; ++i) {
@@ -1199,7 +1440,7 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
             for (u32 j = 0; j < 12u; ++j)
                 stw(work + j * 4u, bits_f32(m[j]));
             cycles += TEX_SRT_MAP_CYCLES;
-            tex_map(ctx, map, work, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u), &cycles);
+            tex_map(ctx, map, work, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u), frame - MAP_SCRATCH, &cycles);
             stw(STATE + STATE_TEX_MTX_TYPE + i * 4u, lwz(STATE + STATE_TEX_MAP_FUNC + map * 8u + 4u));
             post_identity &= ~(1u << i);
             stw(STATE + STATE_POST_TEX_IDENTITY, post_identity);

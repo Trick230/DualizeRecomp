@@ -66,6 +66,38 @@ define TS_ENV_CONCAT call(@G3dEnvMapping+50)
 define TS_ENV_COPY call(@G3dEnvMapping+2F4)
 define TS_INVERSE call(@G3dGetInvCameraMtx+38)
 define TS_RVL_INVERSE rvl_PSMTXInverse
+@G3dEnvSpecMapping 388 9421FF70 E27089AD93B6C104
+@G3dVec3TransformNormal 90 C0640000 CF7980D1659FE69E at call(@G3dEnvMapping+120)
+@G3dGetLightDir 1C 2C040000 036E06121611EBC5 at call(@G3dEnvMapping+C0)
+@G3dGetLightPos 1C 2C040000 036E06121611EBC5 at call(@G3dEnvMapping+110)
+@G3dLightHasDir 20 80830000 03AD8504475CAF7B at call(@G3dEnvMapping+D0)
+@G3dVecNeg 1C C0240000 CD5355E580A418A1 at call(@G3dEnvMapping+12C)
+@G3dVecCopy 1C C0440000 A0EC086A4A2ACA46 at call(@G3dEnvMapping+138)
+@G3dFabs 8 FC200A10 2F9B46D959046E2D at call(@G3dEnvMapping+198)
+@G3dVecSet 10 D0230000 CF9F33FCD7442D9E at call(@G3dEnvSpecMapping+26C)
+@C_VECHalfAngle D8 9421FFC0 65681A02306F15E1 at call(@G3dEnvSpecMapping+174)
+define G3D_ENV_SPEC_MAPPING @G3dEnvSpecMapping
+define G3D_GET_INV_CAMERA @G3dGetInvCameraMtx
+define G3D_ENV_LIGHT_MTX addr(@G3dEnvMapping+2B0,2C0)
+define G3D_ENV_ONE addr(@G3dEnvMapping+168,16C)
+define G3D_ENV_EPS addr(@G3dEnvMapping+19C,1A0)
+define G3D_ENV_UP addr(@G3dEnvMapping+1F0,1F4)
+define HALF_ANGLE_EPS imm(@C_VECHalfAngle+90)
+define TS_ENV_INVERSE call(@G3dEnvMapping+38)
+define TS_SPEC_INVERSE call(@G3dEnvSpecMapping+60)
+define TS_SPEC_CONCAT call(@G3dEnvSpecMapping+334)
+define TS_SPEC_COPY call(@G3dEnvSpecMapping+2A0)
+define TS_NORMALIZE call(@G3dEnvMapping+190)
+define TS_CROSS call(@G3dEnvMapping+228)
+define TS_SPEC_NORMALIZE call(@G3dEnvSpecMapping+2B0)
+define TS_SPEC_CROSS call(@G3dEnvSpecMapping+2C0)
+define TS_HALF_NORMALIZE call(@C_VECHalfAngle+64)
+define TS_HALF_ADD call(@C_VECHalfAngle+80)
+define TS_HALF_DOT call(@C_VECHalfAngle+8C)
+define RVL_VEC_NORMALIZE rvl_PSVECNormalize
+define RVL_VEC_CROSS rvl_PSVECCrossProduct
+define RVL_VEC_ADD rvl_PSVECAdd
+define RVL_VEC_DOT rvl_PSVECDotProduct
 g3d_LoadLightSet 5C 9421FFF0 2D675CFCD27DDBDA at call(@G3dLoadMaterial+28C)
 @G3dApplyLightSet 35C 9421FFC0 02F9A70F4CA2A5C8 at call(g3d_LoadLightSet+44)
 define G3D_LIGHT_STATE addr(g3d_LoadLightSet+28,40)
