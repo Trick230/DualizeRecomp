@@ -50,6 +50,22 @@ g3d_LoadResTexSrt 2A8 9421FF20 39ED0BADA029C4AE at call(@G3dLoadMaterial+3B0)
 @G3dCalcTexMtxMaya A4 9421FFF0 FEC1BDBA74FC5D33 at call(@G3dCalcTexMtx+28)
 define G3D_CALC_TEX_MTX_MAYA @G3dCalcTexMtxMaya
 define G3D_MAYA_CONST addr(@G3dCalcTexMtxMaya+18,1C)
+# The texture map modes' functions and their callees.
+@G3dEnvMapping 310 9421FFA0 DD2F37E24B0EA5DC
+@G3dProjMapping A0 9421FFE0 B5700FB07FB996E3
+@G3dTexMapTableInit 78 3D400000 7098B5DB6E359340
+@G3dGetInvCameraMtx 68 9421FFF0 FD06FCFFDD9E37C6 at call(@G3dProjMapping+34)
+define G3D_ENV_MAPPING @G3dEnvMapping
+define G3D_PROJ_MAPPING @G3dProjMapping
+define G3D_DEFAULT_MAPPING addr(@G3dTexMapTableInit+0,18)
+define G3D_CAMERA_STATE addr(@G3dGetInvCameraMtx+10,20)
+define G3D_ENV_ZERO addr(@G3dEnvMapping+54,5C)
+define TS_CONCAT call(@G3dProjMapping+4C)
+define TS_COPY call(@G3dProjMapping+84)
+define TS_ENV_CONCAT call(@G3dEnvMapping+50)
+define TS_ENV_COPY call(@G3dEnvMapping+2F4)
+define TS_INVERSE call(@G3dGetInvCameraMtx+38)
+define TS_RVL_INVERSE rvl_PSMTXInverse
 g3d_LoadLightSet 5C 9421FFF0 2D675CFCD27DDBDA at call(@G3dLoadMaterial+28C)
 @G3dApplyLightSet 35C 9421FFC0 02F9A70F4CA2A5C8 at call(g3d_LoadLightSet+44)
 define G3D_LIGHT_STATE addr(g3d_LoadLightSet+28,40)

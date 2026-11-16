@@ -994,19 +994,168 @@ static void maya_make(CPUState* ctx, u32 index, u32 srt, float s, float c, float
 
 // GXLoadTexMtxImm(m, GX_PTTEXMTX0 + 3 * i, GX_MTX3x4) from the guest's copy
 // at `address`.
-static void load_post_tex_mtx(CPUState* ctx, u32 address, const float m[12], u32 i) {
-    for (u32 j = 0; j < 12u; ++j)
-        stw(address + j * 4u, bits_f32(m[j]));
+static void load_post_tex_mtx_at(CPUState* ctx, u32 address, u32 i) {
     ctx->gpr[3] = address;
     ctx->gpr[4] = 0x40u + i * 3u;
     ctx->gpr[5] = 0;
     rvl_GXLoadTexMtxImm(ctx);
 }
 
+static void load_post_tex_mtx(CPUState* ctx, u32 address, const float m[12], u32 i) {
+    for (u32 j = 0; j < 12u; ++j)
+        stw(address + j * 4u, bits_f32(m[j]));
+    load_post_tex_mtx_at(ctx, address, i);
+}
+
+// G3DState's LightState: the set loaded and its four masks, the light in
+// each of GX's 8 slots, 128 LightObj (flags, then the GXLightObj), 128
+// ambient colors, 128 sets (8 light ids, the ambient id).
+enum {
+    LIGHT_SET_LOADED = 0x10,
+    LIGHT_MASK_DIFF_COLOR = 0x14,
+    LIGHT_MASK_DIFF_ALPHA = 0x18,
+    LIGHT_MASK_SPEC_COLOR = 0x1C,
+    LIGHT_MASK_SPEC_ALPHA = 0x20,
+    LIGHT_SLOT = 0x24,
+    LIGHT_OBJ = 0x2C,
+    LIGHT_AMB = 0x222C,
+    LIGHT_SET = 0x242C,
+    LIGHT_STATE_SIZE = 0x2E2C,
+};
+enum { LIGHT_ENABLE = 4, LIGHT_SPECULAR = 2, LIGHT_NO_COLOR = 0x10, LIGHT_NO_ALPHA = 0x20 };
+#define LIGHT_OBJ_SIZE 0x44u
+#define LIGHT_SET_SIZE 0xCu
+
+// The texture map modes' functions (ScnDependentTexMtxFuncTable at STATE +
+// 0x248: 256 of function, type) and the camera matrices they read
+// (CameraMtxState: flags, the view index, the inverse of the view's camera
+// matrix made on first use, 32 camera, projection and environment matrices).
+#define STATE_TEX_MAP_FUNC 0x248u
+enum {
+    CAMERA_FLAGS = 0x0,  // half: 1 the inverse is made
+    CAMERA_VIEW = 0x2,   // half
+    CAMERA_INVERSE = 0x4,
+    CAMERA_MTX = 0x34,
+    CAMERA_PROJ = 0xE34,
+    CAMERA_ENV = 0x1434,
+    CAMERA_STATE_SIZE = 0x1A34,
+};
+#define CAMERA_COUNT 32
+#define MTX34_SIZE 0x30u
+
+// The guest's cycles of each mapping function by path, its natives apart.
+#define TEX_SRT_MAP_CYCLES 85
+#define MAP_INVERSE_CYCLES 16
+#define MAP_INVERSE_MAKE_CYCLES 12
+#define MAP_ENV_CAMERA_CYCLES 66
+#define MAP_ENV_NONE_CYCLES 43
+#define MAP_ENV_LIGHT_OFF_CYCLES 58
+#define MAP_PROJ_CAMERA_CYCLES 68
+#define MAP_PROJ_NONE_CYCLES 35
+#define MAP_DEFAULT_CYCLES 14
+
+bool rvl_PSMTXConcat(CPUState* ctx);
+bool rvl_PSMTXCopy(CPUState* ctx);
+bool rvl_PSMTXInverse(CPUState* ctx);
+_Static_assert(TS_ENV_CONCAT == TS_CONCAT && TS_ENV_COPY == TS_COPY && TS_CONCAT == SKIN_PSMTX_CONCAT &&
+                   TS_COPY == CV_RVL_COPY && TS_INVERSE == TS_RVL_INVERSE,
+               "the mapping functions' callees with natives");
+
+static void map_concat(CPUState* ctx, u32 a, u32 b, u32 ab) {
+    ctx->gpr[3] = a;
+    ctx->gpr[4] = b;
+    ctx->gpr[5] = ab;
+    rvl_PSMTXConcat(ctx);
+}
+
+static void map_copy(CPUState* ctx, u32 src, u32 dst) {
+    ctx->gpr[3] = src;
+    ctx->gpr[4] = dst;
+    rvl_PSMTXCopy(ctx);
+}
+
+// The light a mapping function reads, 0 when out of range.
+static u32 map_light(s8 index) {
+    return index >= 0 ? (u32)G3D_LIGHT_STATE + LIGHT_OBJ + (u32)index * LIGHT_OBJ_SIZE : 0u;
+}
+
+// What the natives below need: the float state PSMTXConcat's replay runs in,
+// the camera state as plain memory, and a function this file knows, short of
+// EnvironmentMapping's light paths.
+static bool tex_map_ok(CPUState* ctx, u32 mode, s8 camera, s8 light) {
+    if ((ctx->msr & (PPC_MSR_FE0 | PPC_MSR_FE1)) || (ctx->gqr[0] & 0x00070007u) ||
+        !plain(ctx, (u32)G3D_CAMERA_STATE, CAMERA_STATE_SIZE) ||
+        lhz((u32)G3D_CAMERA_STATE + CAMERA_VIEW) >= CAMERA_COUNT)
+        return false;
+    const u32 func = lwz(STATE + STATE_TEX_MAP_FUNC + mode * 8u);
+    if (func == (u32)G3D_ENV_MAPPING) {
+        const u32 obj = map_light(light);
+        return camera >= 0 || !obj || (plain(ctx, obj, 4) && !(lwz(obj) & LIGHT_ENABLE));
+    }
+    return func == (u32)G3D_PROJ_MAPPING || func == (u32)G3D_DEFAULT_MAPPING;
+}
+
+// GetInvCameraMtxPtr: the inverse of the view's camera matrix, made once.
+static u32 map_inverse(CPUState* ctx, s64* cycles) {
+    const u32 state = (u32)G3D_CAMERA_STATE;
+    *cycles += MAP_INVERSE_CYCLES;
+    const u32 flags = lhz(state + CAMERA_FLAGS);
+    if (!(flags & 1u)) {
+        ctx->gpr[3] = state + CAMERA_MTX + lhz(state + CAMERA_VIEW) * MTX34_SIZE;
+        ctx->gpr[4] = state + CAMERA_INVERSE;
+        rvl_PSMTXInverse(ctx);
+        sth(state + CAMERA_FLAGS, flags | 1u);
+        *cycles += MAP_INVERSE_MAKE_CYCLES;
+    }
+    return state + CAMERA_INVERSE;
+}
+
+// The mode's function into m (ScnDependentMtxFunc: EnvironmentMapping without
+// a light, ProjectionMapping, DefaultMapping), as tex_map_ok allows it.
+static void tex_map(CPUState* ctx, u32 mode, u32 m, s8 camera, s8 light, s64* cycles) {
+    const u32 state = (u32)G3D_CAMERA_STATE, func = lwz(STATE + STATE_TEX_MAP_FUNC + mode * 8u);
+    const u32 view = lhz(state + CAMERA_VIEW) * MTX34_SIZE;
+    if (func == (u32)G3D_ENV_MAPPING) {
+        if (camera >= 0) {
+            const u32 inverse = map_inverse(ctx, cycles);
+            map_concat(ctx, state + CAMERA_MTX + (u32)camera * MTX34_SIZE, inverse, m);
+            const u32 zero = lwz((u32)G3D_ENV_ZERO);
+            stw(m + 0x2Cu, zero);
+            stw(m + 0x1Cu, zero);
+            stw(m + 0x0Cu, zero);
+            map_concat(ctx, state + CAMERA_ENV + view, m, m);
+            *cycles += MAP_ENV_CAMERA_CYCLES;
+        } else {
+            *cycles += map_light(light) ? MAP_ENV_LIGHT_OFF_CYCLES : MAP_ENV_NONE_CYCLES;
+            map_copy(ctx, state + CAMERA_ENV + view, m);
+        }
+    } else if (func == (u32)G3D_PROJ_MAPPING) {
+        if (camera >= 0) {
+            const u32 inverse = map_inverse(ctx, cycles);
+            map_concat(ctx, state + CAMERA_MTX + (u32)camera * MTX34_SIZE, inverse, m);
+            map_concat(ctx, state + CAMERA_PROJ + (u32)camera * MTX34_SIZE, m, m);
+            *cycles += MAP_PROJ_CAMERA_CYCLES;
+        } else {
+            map_copy(ctx, state + CAMERA_PROJ + view, m);
+            *cycles += MAP_PROJ_NONE_CYCLES;
+        }
+    } else {
+        *cycles += MAP_DEFAULT_CYCLES;  // m already holds the identity: PSMTXIdentity
+    }
+}
+
+// The camera a texture maps from: ids past the 32 cameras are none.
+static s8 tex_map_camera(CPUState* ctx, u32 effect) {
+    const s8 camera = (s8)lbz(effect);
+    return camera < CAMERA_COUNT ? camera : -1;
+}
+
 // void LoadResTexSrt(ResTexSrt srt): each texture's post-transform matrix,
 // from its TexSrt through the Maya functions (any other mode makes the
-// identity), the identity loaded once while it stays. Declines the camera
-// and light mappings and effect matrices that aren't the identity.
+// identity), the identity loaded once while it stays; a texture mapped from
+// the camera or a light loads its mode's matrix. Declines effect matrices
+// that aren't the identity, mappings on a TexSrt that isn't, and those
+// tex_map_ok doesn't take.
 bool g3d_LoadResTexSrt(CPUState* ctx) {
     const u32 srt = lwz(ctx->gpr[3]);
     const u32 frame = ctx->gpr[1] - 0xE0u, work = frame + 0x68u, ident = frame + 0x8u;
@@ -1022,7 +1171,9 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
         if (!(flags >> (i * 4u) & 1u))
             continue;
         const u32 effect = srt + TEX_SRT_EFFECT + i * 0x34u, nibble = flags >> (i * 4u) & 0xFu;
-        if (lbz(effect + 2u) != 0 || !(lbz(effect + 3u) & 1u))
+        const u32 map = lbz(effect + 2u);
+        if (!(lbz(effect + 3u) & 1u) ||
+            (map != 0 && (nibble != 0xFu || !tex_map_ok(ctx, map, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u)))))
             return false;
         if (nibble == 0xFu || mode != 0)
             continue;
@@ -1042,6 +1193,19 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
         }
         const u32 nibble = flags >> (i * 4u) & 0xFu;
         float m[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        const u32 effect = srt + TEX_SRT_EFFECT + i * 0x34u, map = lbz(effect + 2u);
+        if (map != 0) {
+            // The mode's matrix made over the identity and loaded as it is.
+            for (u32 j = 0; j < 12u; ++j)
+                stw(work + j * 4u, bits_f32(m[j]));
+            cycles += TEX_SRT_MAP_CYCLES;
+            tex_map(ctx, map, work, tex_map_camera(ctx, effect), (s8)lbz(effect + 1u), &cycles);
+            stw(STATE + STATE_TEX_MTX_TYPE + i * 4u, lwz(STATE + STATE_TEX_MAP_FUNC + map * 8u + 4u));
+            post_identity &= ~(1u << i);
+            stw(STATE + STATE_POST_TEX_IDENTITY, post_identity);
+            load_post_tex_mtx_at(ctx, work, i);
+            continue;
+        }
         if (nibble == 0xFu) {
             // The identity: loaded only if the last matrix there wasn't.
             if (post_identity & (1u << i)) {
@@ -1081,25 +1245,6 @@ bool g3d_LoadResTexSrt(CPUState* ctx) {
     ctx->downcount -= cycles;
     return true;
 }
-
-// G3DState's LightState: the set loaded and its four masks, the light in
-// each of GX's 8 slots, 128 LightObj (flags, then the GXLightObj), 128
-// ambient colors, 128 sets (8 light ids, the ambient id).
-enum {
-    LIGHT_SET_LOADED = 0x10,
-    LIGHT_MASK_DIFF_COLOR = 0x14,
-    LIGHT_MASK_DIFF_ALPHA = 0x18,
-    LIGHT_MASK_SPEC_COLOR = 0x1C,
-    LIGHT_MASK_SPEC_ALPHA = 0x20,
-    LIGHT_SLOT = 0x24,
-    LIGHT_OBJ = 0x2C,
-    LIGHT_AMB = 0x222C,
-    LIGHT_SET = 0x242C,
-    LIGHT_STATE_SIZE = 0x2E2C,
-};
-enum { LIGHT_ENABLE = 4, LIGHT_SPECULAR = 2, LIGHT_NO_COLOR = 0x10, LIGHT_NO_ALPHA = 0x20 };
-#define LIGHT_OBJ_SIZE 0x44u
-#define LIGHT_SET_SIZE 0xCu
 
 // Cycles beyond the instructions counted below: both functions' frames and
 // GPR saves.
