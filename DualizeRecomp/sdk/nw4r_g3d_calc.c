@@ -25,7 +25,8 @@ extern unsigned dolrecomp_call_depth;
 // callers' returns back through it, whose safepoints the guest's direct
 // returns don't have. A jump native returns after it; without the function
 // (or past the direct-call depth) it leaves to the dispatcher at `pc`.
-static void resume_guest(CPUState* ctx, u32 pc) {
+void g3d_resume_guest(CPUState* ctx, u32 pc);
+void g3d_resume_guest(CPUState* ctx, u32 pc) {
     ctx->pc = pc;
     const GuestFunction function = dolrecomp_lookup(ctx, pc);
     if (!function || dolrecomp_call_depth >= 256u)
@@ -268,7 +269,7 @@ bool g3d_CalcSkinning(CPUState* ctx) {
             if (!first && left - cycles - skin_after_cycles(ctx, ctx->gpr[28]) <= 0) {
                 // Where the guest's loop goes on, as from its safepoint.
                 ctx->downcount -= own;
-                resume_guest(ctx, base + 0x19Cu);
+                g3d_resume_guest(ctx, base + 0x19Cu);
                 return true;
             }
             left -= cycles;
@@ -879,7 +880,7 @@ bool g3d_CalcViewLC(CPUState* ctx) {
                 if (left - need <= 0) {
                     // Where the guest's loop goes on, as from its safepoint.
                     ctx->downcount -= own;
-                    resume_guest(ctx, AT(0x154));
+                    g3d_resume_guest(ctx, AT(0x154));
                     return true;
                 }
                 left -= need;

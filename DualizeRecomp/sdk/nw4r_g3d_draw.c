@@ -1861,3 +1861,310 @@ bool g3d_LoadResMatTexCoordGen(CPUState* ctx) {
     ctx->downcount -= cycles;
     return true;
 }
+
+// G3dLoadMaterial(r3 = &ResMat, r4 = flags, r5 = override table, r6 = the
+// indirect matrix callback, r7): the material's loads in the guest's order,
+// each through its native with the guest's frame, argument slots and
+// registers. A load whose native declines resumes the guest at its call
+// (natives touch nothing when they decline), which runs the rest. With r7
+// set there is nothing to load; the callback's path is declined at the entry.
+void g3d_resume_guest(CPUState* ctx, u32 pc);
+
+#define MAT_FRAME 0x130u
+
+// The override table: a non-null entry replaces the material's own.
+enum {
+    MAT_OVR_TEX_OBJ = 0x00,
+    MAT_OVR_TLUT = 0x04,
+    MAT_OVR_GEN_MODE = 0x08,
+    MAT_OVR_TEV = 0x0C,
+    MAT_OVR_PIX = 0x10,
+    MAT_OVR_TEV_COLOR = 0x14,
+    MAT_OVR_IND_MTX = 0x18,
+    MAT_OVR_CHAN = 0x1C,
+    MAT_OVR_TEX_COORD_GEN = 0x20,
+    MAT_OVR_MISC = 0x24,
+    MAT_OVR_TEX_SRT = 0x28,
+    MAT_OVR_SIZE = 0x2C,
+};
+
+// ResMatData: its parts, the tev's and display lists' offsets.
+enum {
+    MAT_GEN_MODE = 0x014,
+    MAT_MISC = 0x01C,
+    MAT_TEV_OFFSET = 0x028,
+    MAT_DL_OFFSET = 0x03C,
+    MAT_TEX_OBJ = 0x040,
+    MAT_TLUT = 0x144,
+    MAT_TEX_SRT = 0x1A8,
+    MAT_CHAN = 0x3F0,
+};
+
+// The display lists: pix, tev color, indirect matrices, tex coord gens.
+enum { MAT_DL_PIX = 0x00, MAT_DL_TEV_COLOR = 0x20, MAT_DL_IND_MTX = 0xA0, MAT_DL_TEX_COORD_GEN = 0xE0 };
+
+// The guest's cycles: the entry with _savegpr_28, the exit with _restgpr_28;
+// an override test (none or a table), the bodies with the material's part or
+// the override's; ResMatMisc's id getters (-1 without one), the tev getter,
+// the display list getter (0 without one).
+#define MAT_ENTRY_CYCLES 16
+#define MAT_EXIT_CYCLES 12
+#define MAT_TEST_CYCLES 2
+#define MAT_TABLE_TEST_CYCLES 5
+#define MAT_MISC_CYCLES 8
+#define MAT_MISC_OVR_CYCLES 9
+#define MAT_MISC_TABLE_CYCLES 11
+#define MAT_ID_CYCLES 6
+#define MAT_ID_NONE_CYCLES 5
+#define MAT_TEV_GET_CYCLES 6
+#define MAT_DL_GET_CYCLES 20
+#define MAT_DL_GET_NONE_CYCLES 19
+#define MAT_FOG_CALL_CYCLES 3
+#define MAT_ZCOMPLOC_CALL_CYCLES 4
+#define MAT_PART_CYCLES 6       // tlut, tex obj, gen mode, tev, pix
+#define MAT_DL_PART_CYCLES 7    // tev color, tex coord gen
+#define MAT_IND_PART_CYCLES 9
+#define MAT_IND_OVR_CYCLES 6
+#define MAT_OVR_CYCLES 4
+#define MAT_LIGHT_SET_CYCLES 8
+#define MAT_CHAN_CYCLES 30
+#define MAT_CHAN_TABLE_CYCLES 33
+#define MAT_CHAN_OVR_CYCLES 27
+#define MAT_TEX_SRT_CYCLES 6
+#define MAT_TEX_SRT_OVR_CYCLES 5
+#define MAT_SKIP_CYCLES 2
+
+typedef struct {
+    u32 base, frame, mat, ovr, flags, cb;
+    s64 cycles;
+} MatRun;
+
+// ResMatMisc's byte at `offset` (fog 2, light set 1), sign extended, or -1.
+static s32 mat_misc_id(CPUState* ctx, MatRun* run, u32 offset) {
+    const u32 misc = lwz(run->frame + 0x88u);
+    run->cycles += misc ? MAT_ID_CYCLES : MAT_ID_NONE_CYCLES;
+    return misc ? (s32)(s8)lbz(misc + offset) : -1;
+}
+
+// The display list getter called at `at`, with its frame and panic test
+// (the entry checked the data is there).
+static u32 mat_dl(CPUState* ctx, MatRun* run, u32 at, u32 part) {
+    const u32 frame = run->frame - 0x10u;
+    stw(frame, run->frame);
+    stw(frame + 0x14u, run->base + at + 4u);
+    stw(frame + 0x0Cu, ctx->gpr[31]);
+    const u32 data = lwz(run->mat), offset = lwz(data + MAT_DL_OFFSET);
+    run->cycles += offset ? MAT_DL_GET_CYCLES : MAT_DL_GET_NONE_CYCLES;
+    return offset ? data + offset + part : 0u + part;
+}
+
+// The override entry `k` or 0, with the test's cycles.
+static u32 mat_override(CPUState* ctx, MatRun* run, u32 k) {
+    run->cycles += run->ovr ? MAT_TABLE_TEST_CYCLES : MAT_TEST_CYCLES;
+    return run->ovr ? lwz(run->ovr + k) : 0u;
+}
+
+// The call at `at` with r3 = the slot at `slot` holding `value`: false when
+// its native declined and the guest took over from the call (the cycles
+// charged include the branch after a default part's call, which the guest
+// then runs itself).
+static bool mat_call(CPUState* ctx, MatRun* run, u32 at, u32 slot, u32 value, bool (*load)(CPUState*)) {
+    if (slot) {
+        stw(run->frame + slot, value);
+        ctx->gpr[3] = run->frame + slot;
+    }
+    ctx->gpr[0] = value;
+    ctx->lr = run->base + at + 4u;
+    ctx->downcount -= run->cycles;
+    run->cycles = 0;
+    if (load(ctx))
+        return true;
+    if ((lwz(run->base + at + 4u) >> 26) == 18u)
+        ctx->downcount += 1;
+    g3d_resume_guest(ctx, run->base + at);
+    return false;
+}
+
+// A part loaded from the slot of the material's (`def`) or the override's.
+static bool mat_part(CPUState* ctx, MatRun* run, u32 k, u32 at_def, u32 slot_def, u32 value_def, s64 cycles_def,
+                     u32 at_ovr, u32 slot_ovr, s64 cycles_ovr, bool (*load)(CPUState*)) {
+    const u32 value = mat_override(ctx, run, k);
+    if (value) {
+        run->cycles += cycles_ovr;
+        return mat_call(ctx, run, at_ovr, slot_ovr, value, load);
+    }
+    run->cycles += cycles_def;
+    return mat_call(ctx, run, at_def, slot_def, value_def, load);
+}
+
+bool g3d_LoadMaterial(CPUState* ctx) {
+    const u32 sp = ctx->gpr[1], frame = sp - MAT_FRAME, mat = ctx->gpr[3], ovr = ctx->gpr[5];
+    if (ctx->gpr[6] || !plain(ctx, frame - 0x10u, MAT_FRAME + 0x18u) || !plain(ctx, mat, 4))
+        return false;
+    const bool skip = ctx->gpr[7] != 0;
+    const u32 data = lwz(mat);
+    if (!skip && (!data || !plain(ctx, data, MAT_CHAN + 4u) || (ovr && !plain(ctx, ovr, MAT_OVR_SIZE))))
+        return false;
+    const u32 misc_ovr = !skip && ovr ? lwz(ovr + MAT_OVR_MISC) : 0u;
+    const u32 misc = misc_ovr ? misc_ovr : data + MAT_MISC;
+    if (!skip && !plain(ctx, misc, 4))
+        return false;
+
+    // The entry: the frame, LR and r28-r31 saved, the arguments kept there.
+    const u32 ret = ctx->lr, base = (u32)MAT_BASE;
+    stw(frame, sp);
+    stw(sp + 4u, ret);
+    for (u32 i = 0; i < 4u; ++i)
+        stw(sp - 0x10u + 4u * i, ctx->gpr[28 + i]);
+    const u32 flags = ctx->gpr[4];
+    ctx->gpr[1] = frame;
+    ctx->gpr[11] = sp;
+    ctx->gpr[28] = mat;
+    ctx->gpr[29] = flags;
+    ctx->gpr[30] = ovr;
+    ctx->gpr[31] = ctx->gpr[6];
+    MatRun run = {base, frame, mat, ovr, flags, ctx->gpr[6], MAT_ENTRY_CYCLES};
+
+    // Nothing to load: the entry tests the callback at +3CC and leaves.
+    if (skip) {
+        run.cycles += MAT_SKIP_CYCLES;
+        goto exit;
+    }
+
+    // Fog and z comp loc from ResMatMisc.
+    stw(frame + 0x88u, 0);
+    run.cycles += !ovr ? MAT_MISC_CYCLES : misc_ovr ? MAT_MISC_OVR_CYCLES : MAT_MISC_TABLE_CYCLES;
+    stw(frame + 0x88u, misc);
+    run.cycles += MAT_FOG_CALL_CYCLES;
+    ctx->gpr[3] = (u32)mat_misc_id(ctx, &run, 2u);
+    if (!mat_call(ctx, &run, 0x68u, 0, ctx->gpr[3], g3d_LoadFog))
+        return true;
+    run.cycles += MAT_ZCOMPLOC_CALL_CYCLES;
+    if (!mat_call(ctx, &run, 0x78u, 0x6Cu, misc, g3d_LoadResMatZCompLoc))
+        return true;
+
+    if (!mat_part(ctx, &run, MAT_OVR_TLUT, 0xA0u, 0x68u, data + MAT_TLUT, MAT_PART_CYCLES, 0xB4u, 0x64u,
+                  MAT_OVR_CYCLES, g3d_LoadResMatTlut) ||
+        !mat_part(ctx, &run, MAT_OVR_TEX_OBJ, 0xDCu, 0x60u, data + MAT_TEX_OBJ, MAT_PART_CYCLES, 0xF0u, 0x5Cu,
+                  MAT_OVR_CYCLES, g3d_LoadResMatTexObj) ||
+        !mat_part(ctx, &run, MAT_OVR_GEN_MODE, 0x118u, 0x58u, data + MAT_GEN_MODE, MAT_PART_CYCLES, 0x12Cu, 0x54u,
+                  MAT_OVR_CYCLES, g3d_LoadResMatGenMode))
+        return true;
+
+    // Tev: the tev getter's ResTev, or 0.
+    {
+        const u32 value = mat_override(ctx, &run, MAT_OVR_TEV);
+        bool done;
+        if (value) {
+            run.cycles += MAT_OVR_CYCLES;
+            done = mat_call(ctx, &run, 0x168u, 0x4Cu, value, g3d_LoadResMatTev);
+        } else {
+            const u32 offset = lwz(data + MAT_TEV_OFFSET);
+            run.cycles += MAT_PART_CYCLES + MAT_TEV_GET_CYCLES;
+            done = mat_call(ctx, &run, 0x154u, 0x50u, offset ? data + offset : 0u, g3d_LoadResMatTev);
+        }
+        if (!done)
+            return true;
+    }
+
+    // The display lists' pix, tev color and indirect matrices.
+    {
+        u32 value = mat_override(ctx, &run, MAT_OVR_PIX);
+        bool done;
+        if (value) {
+            run.cycles += MAT_OVR_CYCLES;
+            done = mat_call(ctx, &run, 0x1A4u, 0x44u, value, g3d_LoadResMatPix);
+        } else {
+            run.cycles += MAT_PART_CYCLES;
+            const u32 dl = mat_dl(ctx, &run, 0x184u, MAT_DL_PIX);
+            done = mat_call(ctx, &run, 0x190u, 0x48u, dl, g3d_LoadResMatPix);
+        }
+        if (!done)
+            return true;
+        value = mat_override(ctx, &run, MAT_OVR_TEV_COLOR);
+        if (value) {
+            run.cycles += MAT_OVR_CYCLES;
+            done = mat_call(ctx, &run, 0x1E4u, 0x3Cu, value, g3d_LoadResMatTevColor);
+        } else {
+            run.cycles += MAT_DL_PART_CYCLES;
+            const u32 dl = mat_dl(ctx, &run, 0x1C0u, MAT_DL_TEV_COLOR);
+            done = mat_call(ctx, &run, 0x1D0u, 0x40u, dl, g3d_LoadResMatTevColor);
+        }
+        if (!done)
+            return true;
+        value = mat_override(ctx, &run, MAT_OVR_IND_MTX);
+        if (value) {
+            run.cycles += MAT_IND_OVR_CYCLES;
+            done = mat_call(ctx, &run, 0x26Cu, 0x2Cu, value, g3d_LoadResMatIndMtx);
+        } else {
+            run.cycles += MAT_IND_PART_CYCLES;
+            const u32 dl = mat_dl(ctx, &run, 0x228u, MAT_DL_IND_MTX);
+            done = mat_call(ctx, &run, 0x238u, 0x34u, dl, g3d_LoadResMatIndMtx);
+        }
+        if (!done)
+            return true;
+    }
+
+    // The light set from ResMatMisc, its outputs into the channel load.
+    run.cycles += MAT_LIGHT_SET_CYCLES;
+    ctx->gpr[3] = (u32)mat_misc_id(ctx, &run, 1u);
+    ctx->gpr[4] = frame + 0x84u;
+    ctx->gpr[5] = frame + 0x80u;
+    ctx->gpr[6] = frame + 0x7Cu;
+    ctx->gpr[7] = frame + 0x78u;
+    ctx->gpr[8] = frame + 0x70u;
+    if (!mat_call(ctx, &run, 0x28Cu, 0, ctx->gpr[3], g3d_LoadLightSet))
+        return true;
+    {
+        const u32 chan_ovr = ovr ? lwz(ovr + MAT_OVR_CHAN) : 0u;
+        const u32 color = frame + (chan_ovr ? 0x1Cu : 0x24u);
+        u8 amb[4];
+        for (u32 i = 0; i < 4u; ++i) {
+            amb[i] = (u8)lbz(frame + 0x70u + i);
+            mem_write8_at(ctx, 0, frame + 0x74u + i, amb[i]);
+        }
+        for (u32 i = 0; i < 4u; ++i)
+            mem_write8_at(ctx, 0, color + i, amb[i]);
+        ctx->gpr[4] = lwz(frame + 0x84u);
+        ctx->gpr[5] = lwz(frame + 0x80u);
+        ctx->gpr[6] = lwz(frame + 0x7Cu);
+        ctx->gpr[7] = lwz(frame + 0x78u);
+        ctx->gpr[8] = color;
+        ctx->gpr[9] = (flags >> 3) & 1u;
+        run.cycles += !ovr ? MAT_CHAN_CYCLES : chan_ovr ? MAT_CHAN_OVR_CYCLES : MAT_CHAN_TABLE_CYCLES;
+        const bool done = chan_ovr ? mat_call(ctx, &run, 0x348u, 0x20u, chan_ovr, g3d_LoadResMatChan)
+                                   : mat_call(ctx, &run, 0x30Cu, 0x28u, data + MAT_CHAN, g3d_LoadResMatChan);
+        if (!done)
+            return true;
+    }
+
+    {
+        const u32 value = mat_override(ctx, &run, MAT_OVR_TEX_COORD_GEN);
+        bool done;
+        if (value) {
+            run.cycles += MAT_OVR_CYCLES;
+            done = mat_call(ctx, &run, 0x388u, 0x14u, value, g3d_LoadResMatTexCoordGen);
+        } else {
+            run.cycles += MAT_DL_PART_CYCLES;
+            const u32 dl = mat_dl(ctx, &run, 0x364u, MAT_DL_TEX_COORD_GEN);
+            done = mat_call(ctx, &run, 0x374u, 0x18u, dl, g3d_LoadResMatTexCoordGen);
+        }
+        if (!done)
+            return true;
+    }
+    if (!mat_part(ctx, &run, MAT_OVR_TEX_SRT, 0x3B0u, 0x10u, data + MAT_TEX_SRT, MAT_TEX_SRT_CYCLES, 0x3C4u, 0x0Cu,
+                  MAT_TEX_SRT_OVR_CYCLES, g3d_LoadResTexSrt))
+        return true;
+
+exit:
+    // The exit: r28-r31 back, LR from the frame.
+    for (u32 i = 0; i < 4u; ++i)
+        ctx->gpr[28 + i] = lwz(sp - 0x10u + 4u * i);
+    ctx->gpr[11] = sp;
+    ctx->gpr[0] = lwz(sp + 4u);
+    ctx->lr = ctx->gpr[0];
+    ctx->gpr[1] = sp;
+    ctx->downcount -= run.cycles + MAT_EXIT_CYCLES;
+    ctx->pc = ctx->lr & ~3u;
+    return true;
+}
