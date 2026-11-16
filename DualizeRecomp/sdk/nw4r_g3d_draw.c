@@ -31,6 +31,7 @@ enum {
     STATE_SHP_CACHE = 0x204,       // sShp: the vertex format of the last shape
     STATE_IDENTITY = 0x210,        // the current matrices are PNMTX0 and identities
     STATE_TEX_MTX_TYPE = 0x218,    // sPreTexMtxState: 8 function types
+    STATE_TEV = 0x238,             // the last tev loaded
     STATE_VIEW_NRM_ARRAY = 0x240,  // sPosNrmArrayState: view normal matrices
 };
 
@@ -160,8 +161,8 @@ static void load_gen_mode(CPUState* ctx) {
 #define TEX_COORD_SCALE_COORD_CYCLES 52
 #define GEN_MODE_CYCLES 45  // not seen in the scenes measured: a guess
 
-// The cycles of load_tex_coord_scale and load_gen_mode, before they run.
-static s64 state_load_cycles(CPUState* ctx) {
+// The cycles of load_tex_coord_scale, before it runs.
+static s64 tex_scale_cycles(CPUState* ctx) {
     const u32 flags = lwz(STATE + STATE_TEX_SCALE + TEX_SCALE_FLAGS);
     const u32 count = lbz(STATE + STATE_GEN_MODE);
     s64 cycles = 0;
@@ -169,11 +170,16 @@ static s64 state_load_cycles(CPUState* ctx) {
         cycles -= NO_TEX_COORD_SCALE_CYCLES;
     else if (!(flags & 1u) && count != 0)
         cycles += TEX_COORD_SCALE_CYCLES + TEX_COORD_SCALE_COORD_CYCLES * count;
-    const u32 gen = lwz(STATE + STATE_GEN_MODE + 8u);
-    if ((gen & 4u) && (gen & 3u) != 3u)
-        cycles += GEN_MODE_CYCLES;
     return cycles;
 }
+
+// The cycles of load_gen_mode, before it runs.
+static s64 gen_mode_cycles(CPUState* ctx) {
+    const u32 gen = lwz(STATE + STATE_GEN_MODE + 8u);
+    return (gen & 4u) && (gen & 3u) != 3u ? GEN_MODE_CYCLES : 0;
+}
+
+static s64 state_load_cycles(CPUState* ctx) { return tex_scale_cycles(ctx) + gen_mode_cycles(ctx); }
 
 // void LoadResShpPrePrimitive(ResShp shp): the shape's vertex format display
 // list, after the vertex descriptor's part when the last shape had the same.
@@ -315,6 +321,171 @@ bool g3d_LoadResShpPrimitive(CPUState* ctx) {
     ctx->gpr[3] = r3;
     ctx->gpr[4] = r4;
     ctx->gpr[5] = r5;
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// --- Material loads -------------------------------------------------------------
+
+// The guest's cycles per path, measured (the gen mode BP's and the tev's
+// display list path are not seen in the scenes measured: guesses).
+#define MAT_DL_CYCLES 39
+#define MAT_IND_MTX_CYCLES 35
+#define MAT_IND_MTX_DL_CYCLES 9
+#define MAT_GEN_MODE_BP_CYCLES 29
+
+// GenMode2::LoadBP: the gen mode register alone, when the material changed
+// the counts and the XF part is still to come. Returns its cycles.
+static s64 load_gen_mode_bp(CPUState* ctx) {
+    const u32 state = STATE + STATE_GEN_MODE;
+    const u32 flags = lwz(state + 8u);
+    if (!(flags & 4u) || (flags & 3u) != 2u)
+        return 0;
+    const u32 cull = lbz((u32)G3D_GEN_MODE_CULL_TABLE + lwz(state + 4u));
+    bp(ctx, 0xFE07FC3Fu);
+    bp(ctx, lbz(state) | (lbz(state + 1u) << 4) | ((lbz(state + 2u) - 1u) << 10) | (cull << 14) |
+                (lbz(state + 3u) << 16));
+    stw(state + 8u, flags | 1u);
+    return MAT_GEN_MODE_BP_CYCLES;
+}
+
+// A material display list of `size` bytes after the gen mode's BP: what the
+// pixel, tev color and indirect matrix loads share. `count` 0 skips the list.
+static bool load_mat_dl(CPUState* ctx, u32 size, u32 count, s64 cycles) {
+    const u32 dl = lwz(ctx->gpr[3]);
+    if (dl == 0) {
+        ctx->downcount -= 8;
+        return true;
+    }
+    if (lbz(STATE + STATE_SYNC) != 0)
+        return false;
+    cycles += load_gen_mode_bp(ctx);
+    stb(STATE + STATE_SYNC, 0);
+    if (count != 0) {
+        // GXFastCallDisplayList.
+        fifo8(0x40);
+        fifo32(dl);
+        fifo32(size);
+    }
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// void LoadResMatPix(ResMatPix pix): alpha compare, z mode, blend mode, dst alpha.
+bool g3d_LoadResMatPix(CPUState* ctx) { return load_mat_dl(ctx, 0x20u, 1u, MAT_DL_CYCLES); }
+
+// void LoadResMatTevColor(ResMatTevColor color): the tev's colors and konst colors.
+bool g3d_LoadResMatTevColor(CPUState* ctx) { return load_mat_dl(ctx, 0x80u, 1u, MAT_DL_CYCLES); }
+
+// void LoadResMatIndMtxAndScale(ResMatIndMtxAndScale ind): the indirect
+// matrices and scales, if the material has indirect stages.
+bool g3d_LoadResMatIndMtx(CPUState* ctx) {
+    const u32 count = lbz(STATE + STATE_GEN_MODE + 3u);
+    return load_mat_dl(ctx, 0x40u, count, MAT_IND_MTX_CYCLES + (count ? MAT_IND_MTX_DL_CYCLES : 0));
+}
+
+// __GXData, through the SDK's small-data pointer to it.
+#define GX_DATA lwz(ctx->gpr[2] + (u32)GX_DATA_SDA2)
+enum {
+    GX_DATA_BP_SENT_NOT = 0x000,  // nonzero: no flush primitive needed before a display list
+    GX_DATA_PE_CTRL = 0x22C,
+    GX_DATA_DIRTY_STATE = 0x5FC,
+};
+
+// Whether GXCallDisplayList would go straight to the stream (no dirty state
+// to flush, no flush primitive first).
+static bool gx_call_display_list_plain(CPUState* ctx) {
+    const u32 gx = GX_DATA;
+    return lwz(gx + GX_DATA_DIRTY_STATE) == 0 && lwz(gx + GX_DATA_BP_SENT_NOT) != 0;
+}
+
+#define ZCOMPLOC_CYCLES 26
+#define ZCOMPLOC_SET_CYCLES 23
+#define TEV_SAME_CYCLES 25
+#define TEV_CYCLES 75
+#define TEX_COORD_GEN_CYCLES 53
+#define TEX_COORD_GEN_4_CYCLES 1  // the size ladder: 2 or more coords
+#define TEX_COORD_GEN_8_CYCLES 3  // 4 or more
+
+// void LoadResMatMisc's z compare location (ResMatMisc misc): GXSetZCompLoc
+// when it changed, which makes the next display list a synced one.
+bool g3d_LoadResMatZCompLoc(CPUState* ctx) {
+    const u32 misc = lwz(ctx->gpr[3]);
+    if (misc == 0) {
+        ctx->downcount -= 8;
+        return true;
+    }
+    const u32 cache = (u32)G3D_ZCOMPLOC_CACHE, loc = lbz(misc);
+    s64 cycles = ZCOMPLOC_CYCLES;
+    if (!(lwz(cache) & 1u) || lbz(cache + 4u) != loc) {
+        stb(cache + 4u, loc);
+        stw(cache, lwz(cache) | 1u);
+        // GXSetZCompLoc.
+        const u32 gx = GX_DATA, pe = (lwz(gx + GX_DATA_PE_CTRL) & ~0x40u) | ((loc & 1u) << 6);
+        stw(gx + GX_DATA_PE_CTRL, pe);
+        bp(ctx, pe);
+        sth(gx + 2u, 0);
+        stb(STATE + STATE_SYNC, 1);
+        cycles += ZCOMPLOC_SET_CYCLES;
+    }
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// void LoadResMatTev(ResTev tev): the tev stages' display list when the
+// material's differs from the last one, and the tex coord scales from the
+// texture maps its coords sample.
+bool g3d_LoadResMatTev(CPUState* ctx) {
+    const u32 tev = lwz(ctx->gpr[3]);
+    const u32 last = STATE + STATE_TEV;
+    if (tev == 0 || tev == lwz(last)) {
+        ctx->downcount -= TEV_SAME_CYCLES;
+        return true;
+    }
+    if (lbz(STATE + STATE_SYNC) != 0 || !gx_call_display_list_plain(ctx))
+        return false;
+    stw(last, tev);
+    s64 cycles = TEV_CYCLES + load_gen_mode_bp(ctx);
+    stb(STATE + STATE_SYNC, 0);
+    // ResTev::CallDisplayList through GXCallDisplayList.
+    fifo8(0x40);
+    fifo32(tev + 0x20u);
+    fifo32(lwz((u32)G3D_TEV_DL_SIZE + (lbz(tev + 0xCu) - 1u) * 4u));
+    const u32 scale = STATE + STATE_TEX_SCALE, flags = lwz(scale + TEX_SCALE_FLAGS);
+    const u32 map0 = lwz(tev + 0x10u), map1 = lwz(tev + 0x14u);
+    if (!(flags & 2u) || map0 != lwz(scale + TEX_SCALE_MAP_ID) ||
+        map1 != lwz(scale + TEX_SCALE_MAP_ID + 4u)) {
+        stw(scale + TEX_SCALE_MAP_ID, map0);
+        stw(scale + TEX_SCALE_MAP_ID + 4u, map1);
+        stw(scale + TEX_SCALE_FLAGS, (lwz(scale + TEX_SCALE_FLAGS) | 2u) & ~1u);
+    }
+    cycles += tex_scale_cycles(ctx);
+    load_tex_coord_scale(ctx, lbz(STATE + STATE_GEN_MODE));
+    ctx->downcount -= cycles;
+    return true;
+}
+
+// void LoadResMatTexCoordGen(ResMatTexCoordGen gen): the tex coord
+// generators' display list (sized by their count), then the gen mode's XF part.
+bool g3d_LoadResMatTexCoordGen(CPUState* ctx) {
+    const u32 dl = lwz(ctx->gpr[3]);
+    if (dl == 0) {
+        ctx->downcount -= 8;
+        return true;
+    }
+    if (lbz(STATE + STATE_SYNC) != 0)
+        return false;
+    s64 cycles = TEX_COORD_GEN_CYCLES + gen_mode_cycles(ctx);
+    stb(STATE + STATE_SYNC, 0);
+    const u32 count = lbz(STATE + STATE_GEN_MODE);
+    if (count >= 2u)
+        cycles += TEX_COORD_GEN_4_CYCLES + (count >= 4u ? TEX_COORD_GEN_8_CYCLES : 0);
+    if (count != 0) {
+        fifo8(0x40);
+        fifo32(dl);
+        fifo32(count < 2u ? 0x20u : count < 4u ? 0x40u : count < 8u ? 0x80u : 0xA0u);
+    }
+    load_gen_mode(ctx);
     ctx->downcount -= cycles;
     return true;
 }

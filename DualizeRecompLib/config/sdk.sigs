@@ -23,6 +23,21 @@ g3d_LoadResShpPrimitive 1D4 9421FFA0 9938290A0309EF4B
 define G3D_STATE addr(g3d_LoadResShpPrimitive+18,2C)
 define G3D_CULL_TABLE addr(@GDSetGenMode2+0,10)
 define G3D_ZERO addr(@GDLoadTexMtxImm3x3+8,14)
+@G3dLoadMaterial 440 9421FED0 69DDCB944C8BD2A6
+g3d_LoadResMatPix 58 9421FFF0 ECA0AE48F68DFEC5 at call(@G3dLoadMaterial+190)
+g3d_LoadResMatTevColor 58 9421FFF0 ECA0AE48F68DFEC5 at call(@G3dLoadMaterial+1D0)
+g3d_LoadResMatIndMtx 68 9421FFF0 828CA45A90C064AC at call(@G3dLoadMaterial+238)
+@G3dGenModeLoadBP 8C 80830008 FC05F9C4E8624A46 at call(g3d_LoadResMatPix+28)
+define G3D_GEN_MODE_CULL_TABLE addr(@G3dGenModeLoadBP+1C,34)
+g3d_LoadResMatZCompLoc 7C 9421FFF0 22ECDC65185C59FA at call(@G3dLoadMaterial+78)
+g3d_LoadResMatTev E8 9421FFF0 DDD375867314EDC8 at call(@G3dLoadMaterial+154)
+g3d_LoadResMatTexCoordGen 54 9421FFF0 0CB0F1915AECD704 at call(@G3dLoadMaterial+374)
+@ResTevCallDisplayList 58 9421FFF0 DA305242DE8AB65C at call(g3d_LoadResMatTev+68)
+@GXCallDisplayList 74 9421FFE0 3BC53B9D50C3437C at call(@ResTevCallDisplayList+40)
+# The material natives: the z compare location cache, the tev display list sizes, __GXData.
+define G3D_ZCOMPLOC_CACHE addr(g3d_LoadResMatZCompLoc+1C,2C)
+define G3D_TEV_DL_SIZE addr(@ResTevCallDisplayList+24,28)
+define GX_DATA_SDA2 imm(@GXCallDisplayList+10)
 nw4r_SinCosFIdx E0 9421FFC0 A8259176DF245D2A
 nw4r_MTX34RotXYZFIdx 150 9421FFB0 1A2AFE159559BC66
 nw4r_MTX34ToMTX33 34 E0040000 23386EEB2B39B36B anywhere
