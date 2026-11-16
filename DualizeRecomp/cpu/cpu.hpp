@@ -96,6 +96,9 @@ public:
   uint64_t Timebase() const;
   void SetTimebase(uint64_t value);
   uint32_t& Spr(uint32_t index) { return m_spr[index & 1023]; }
+  // PPCSync from a native: what its sc and the OS's handler leave behind,
+  // `next` the address after the sc. False if the handler is not the OS's.
+  bool OsSync(uint32_t next);
   // mtdec from host code (the OS's alarm timer): the decrementer interrupt
   // comes after value timebase ticks.
   void SetDecrementer(uint32_t value);

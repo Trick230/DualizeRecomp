@@ -795,6 +795,25 @@ void Cpu::EnterException()
   }
 }
 
+bool Cpu::OsSync(uint32_t next)
+{
+  const uint8_t* code = m_memory.Physical(0xC00, sizeof(OS_SYNC_HANDLER));
+  if (!code || !CodeMatches(code, OS_SYNC_HANDLER, std::size(OS_SYNC_HANDLER)))
+    return false;
+  state.srr0 = next;
+  state.srr1 = state.msr & SRR1_MASK;
+  state.msr &= ~0x40000u;  // POW, which the exception clears
+  state.gpr[9] = m_spr[SPR_HID0];
+  state.gpr[10] = m_spr[SPR_HID0] | 8;
+  ++m_stats.native_exceptions;
+  return true;
+}
+
+extern "C" bool dualize_os_sync(CPUState* ctx, u32 next)
+{
+  return CpuOf(ctx).OsSync(next);
+}
+
 void Cpu::CheckInterrupts()
 {
   if (!(state.msr & MSR_EE))

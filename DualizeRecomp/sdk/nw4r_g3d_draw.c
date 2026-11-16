@@ -15,6 +15,8 @@
 #include "ppc_natives.h"
 #include "sdk/guest_memory.h"
 
+bool dualize_os_sync(CPUState* ctx, u32 next);
+
 bool rvl_GXLoadPosMtxImm(CPUState* ctx);
 bool rvl_GXLoadNrmMtxImm(CPUState* ctx);
 bool rvl_GXLoadTexMtxImm(CPUState* ctx);
@@ -325,10 +327,107 @@ bool g3d_LoadResShpPrimitive(CPUState* ctx) {
     return true;
 }
 
+// --- GX ---------------------------------------------------------------------
+
+// __GXData, through the SDK's small-data pointer to it.
+#define GX_DATA lwz(ctx->gpr[2] + (u32)GX_DATA_SDA2)
+enum {
+    GX_DATA_BP_SENT_NOT = 0x000,  // nonzero: no flush primitive needed before a display list
+    GX_DATA_SU_TS0 = 0x108,       // per tex coord: s scale and bias
+    GX_DATA_SU_TS1 = 0x128,       // t
+    GX_DATA_TREF = 0x150,         // per two tev stages: their tex coords and maps
+    GX_DATA_PE_CTRL = 0x22C,
+    GX_DATA_GEN_MODE = 0x254,
+    GX_DATA_IREF = 0x170,         // the indirect stages' tex coords and maps
+    GX_DATA_TEX_MAP_SIZE = 0x564, // per tex map
+    GX_DATA_TEX_MAP_WRAP = 0x584,
+    GX_DATA_TEV_TEX_MAP = 0x5A4,  // per tev stage
+    GX_DATA_MANUAL_COORDS = 0x5E4,
+    GX_DATA_TEV_TC_ENABLED = 0x5E8,
+    GX_DATA_DIRTY_STATE = 0x5FC,
+};
+enum { GX_DIRTY_SU_TEX = 1u };
+
+// The guest's cycles, measured (the indirect stages' are not seen in the
+// scenes measured: a guess).
+#define GX_SU_TEX_REGS_CYCLES 60
+#define GX_SU_TEX_REGS_IND_CYCLES 20
+#define GX_SU_TEX_REGS_TEV_CYCLES 14
+#define GX_SU_REGS_CYCLES 36
+#define GX_CALL_DISPLAY_LIST_CYCLES 23
+#define GX_DIRTY_STATE_CYCLES 35
+#define PPC_SYNC_CYCLES 12
+
+// __SetSURegs: tex coord `coord`'s scale from map `map`'s size and repeat modes.
+static void gx_set_su_regs(CPUState* ctx, u32 gx, u32 map, u32 coord) {
+    const u32 ts0 = gx + GX_DATA_SU_TS0 + coord * 4u, ts1 = gx + GX_DATA_SU_TS1 + coord * 4u;
+    const u32 size = lwz(gx + GX_DATA_TEX_MAP_SIZE + map * 4u);
+    const u32 wrap = lwz(gx + GX_DATA_TEX_MAP_WRAP + map * 4u);
+    stw(ts0, (lwz(ts0) & 0xFFFE0000u) | (size & 0x3FFu) | ((u32)((wrap & 3u) == 1u) << 16));
+    stw(ts1, (lwz(ts1) & 0xFFFE0000u) | ((size >> 10) & 0x3FFu) |
+                 ((u32)(((wrap >> 2) & 3u) == 1u) << 16));
+    bp(ctx, lwz(ts0));
+    bp(ctx, lwz(ts1));
+    sth(gx + 2u, 0);
+}
+
+// __GXSetSUTexRegs: the scales of the coords the indirect and tev stages
+// sample, unless set by hand. Returns its cycles.
+static s64 gx_set_su_tex_regs(CPUState* ctx, u32 gx) {
+    const u32 manual = lwz(gx + GX_DATA_MANUAL_COORDS);
+    if (manual == 0xFFu)
+        return GX_SU_TEX_REGS_CYCLES;
+    const u32 gen = lwz(gx + GX_DATA_GEN_MODE), iref = lwz(gx + GX_DATA_IREF);
+    const u32 inds = (gen >> 16) & 7u, tevs = ((gen >> 10) & 0xFu) + 1u;
+    s64 cycles = GX_SU_TEX_REGS_CYCLES + GX_SU_TEX_REGS_IND_CYCLES * inds +
+                 GX_SU_TEX_REGS_TEV_CYCLES * tevs;
+    for (u32 i = 0; i < inds; ++i) {
+        const u32 map = (iref >> (i * 6u)) & 7u, coord = (iref >> (i * 6u + 3u)) & 7u;
+        if (!(manual & (1u << coord))) {
+            gx_set_su_regs(ctx, gx, map, coord);
+            cycles += GX_SU_REGS_CYCLES;
+        }
+    }
+    const u32 enabled = lwz(gx + GX_DATA_TEV_TC_ENABLED);
+    for (u32 i = 0; i < tevs; ++i) {
+        const u32 tref = lwz(gx + GX_DATA_TREF + (i >> 1) * 4u);
+        const u32 coord = (i & 1u ? tref >> 15 : tref >> 3) & 7u;
+        const u32 map = lwz(gx + GX_DATA_TEV_TEX_MAP + i * 4u) & ~0x100u;
+        if (map != 0xFFu && !(manual & (1u << coord)) && (enabled & (1u << i))) {
+            gx_set_su_regs(ctx, gx, map, coord);
+            cycles += GX_SU_REGS_CYCLES;
+        }
+    }
+    return cycles;
+}
+
+// Whether GXCallDisplayList can run here: no dirty state but the tex coord
+// scales, and no flush primitive needed before the list.
+static bool gx_call_display_list_ready(CPUState* ctx) {
+    const u32 gx = GX_DATA, dirty = lwz(gx + GX_DATA_DIRTY_STATE);
+    if (dirty & ~GX_DIRTY_SU_TEX)
+        return false;
+    // __SetSURegs clears the half at +2; the one at +0 then decides alone.
+    return dirty ? lhz(gx) != 0 : lwz(gx + GX_DATA_BP_SENT_NOT) != 0;
+}
+
+// GXCallDisplayList, once gx_call_display_list_ready. Returns its cycles.
+static s64 gx_call_display_list(CPUState* ctx, u32 list, u32 size) {
+    const u32 gx = GX_DATA;
+    s64 cycles = GX_CALL_DISPLAY_LIST_CYCLES;
+    if (lwz(gx + GX_DATA_DIRTY_STATE) != 0) {
+        cycles += GX_DIRTY_STATE_CYCLES + gx_set_su_tex_regs(ctx, gx);
+        stw(gx + GX_DATA_DIRTY_STATE, 0);
+    }
+    fifo8(0x40);
+    fifo32(list);
+    fifo32(size);
+    return cycles;
+}
+
 // --- Material loads -------------------------------------------------------------
 
-// The guest's cycles per path, measured (the gen mode BP's and the tev's
-// display list path are not seen in the scenes measured: guesses).
+// The guest's cycles per path, measured with their callees.
 #define MAT_DL_CYCLES 39
 #define MAT_IND_MTX_CYCLES 35
 #define MAT_IND_MTX_DL_CYCLES 9
@@ -357,15 +456,21 @@ static bool load_mat_dl(CPUState* ctx, u32 size, u32 count, s64 cycles) {
         ctx->downcount -= 8;
         return true;
     }
-    if (lbz(STATE + STATE_SYNC) != 0)
+    // After a synced load (the z compare location's), GXCallDisplayList.
+    const bool sync = lbz(STATE + STATE_SYNC) != 0;
+    if (sync && count != 0 && !gx_call_display_list_ready(ctx))
         return false;
     cycles += load_gen_mode_bp(ctx);
     stb(STATE + STATE_SYNC, 0);
     if (count != 0) {
-        // GXFastCallDisplayList.
-        fifo8(0x40);
-        fifo32(dl);
-        fifo32(size);
+        if (sync) {
+            cycles += gx_call_display_list(ctx, dl, size);
+        } else {
+            // GXFastCallDisplayList.
+            fifo8(0x40);
+            fifo32(dl);
+            fifo32(size);
+        }
     }
     ctx->downcount -= cycles;
     return true;
@@ -384,25 +489,12 @@ bool g3d_LoadResMatIndMtx(CPUState* ctx) {
     return load_mat_dl(ctx, 0x40u, count, MAT_IND_MTX_CYCLES + (count ? MAT_IND_MTX_DL_CYCLES : 0));
 }
 
-// __GXData, through the SDK's small-data pointer to it.
-#define GX_DATA lwz(ctx->gpr[2] + (u32)GX_DATA_SDA2)
-enum {
-    GX_DATA_BP_SENT_NOT = 0x000,  // nonzero: no flush primitive needed before a display list
-    GX_DATA_PE_CTRL = 0x22C,
-    GX_DATA_DIRTY_STATE = 0x5FC,
-};
-
-// Whether GXCallDisplayList would go straight to the stream (no dirty state
-// to flush, no flush primitive first).
-static bool gx_call_display_list_plain(CPUState* ctx) {
-    const u32 gx = GX_DATA;
-    return lwz(gx + GX_DATA_DIRTY_STATE) == 0 && lwz(gx + GX_DATA_BP_SENT_NOT) != 0;
-}
 
 #define ZCOMPLOC_CYCLES 26
 #define ZCOMPLOC_SET_CYCLES 23
 #define TEV_SAME_CYCLES 25
-#define TEV_CYCLES 75
+#define TEV_CYCLES 107
+#define TEV_SU_TEX_CYCLES 4  // the tex coord scales after it: the mean of a data-dependent 0-9
 #define TEX_COORD_GEN_CYCLES 53
 #define TEX_COORD_GEN_4_CYCLES 1  // the size ladder: 2 or more coords
 #define TEX_COORD_GEN_8_CYCLES 3  // 4 or more
@@ -442,15 +534,19 @@ bool g3d_LoadResMatTev(CPUState* ctx) {
         ctx->downcount -= TEV_SAME_CYCLES;
         return true;
     }
-    if (lbz(STATE + STATE_SYNC) != 0 || !gx_call_display_list_plain(ctx))
+    // A synced load: PPCSync first.
+    const bool sync = lbz(STATE + STATE_SYNC) != 0;
+    if (!gx_call_display_list_ready(ctx) || (sync && !dualize_os_sync(ctx, (u32)PPC_SYNC + 4u)))
         return false;
+    if (sync)
+        ctx->downcount -= PPC_SYNC_CYCLES;
     stw(last, tev);
+    const bool dirty = lwz(GX_DATA + GX_DATA_DIRTY_STATE) != 0;
     s64 cycles = TEV_CYCLES + load_gen_mode_bp(ctx);
     stb(STATE + STATE_SYNC, 0);
-    // ResTev::CallDisplayList through GXCallDisplayList.
-    fifo8(0x40);
-    fifo32(tev + 0x20u);
-    fifo32(lwz((u32)G3D_TEV_DL_SIZE + (lbz(tev + 0xCu) - 1u) * 4u));
+    // ResTev::CallDisplayList.
+    cycles += gx_call_display_list(ctx, tev + 0x20u,
+                                   lwz((u32)G3D_TEV_DL_SIZE + (lbz(tev + 0xCu) - 1u) * 4u));
     const u32 scale = STATE + STATE_TEX_SCALE, flags = lwz(scale + TEX_SCALE_FLAGS);
     const u32 map0 = lwz(tev + 0x10u), map1 = lwz(tev + 0x14u);
     if (!(flags & 2u) || map0 != lwz(scale + TEX_SCALE_MAP_ID) ||
@@ -460,6 +556,8 @@ bool g3d_LoadResMatTev(CPUState* ctx) {
         stw(scale + TEX_SCALE_FLAGS, (lwz(scale + TEX_SCALE_FLAGS) | 2u) & ~1u);
     }
     cycles += tex_scale_cycles(ctx);
+    if (dirty)
+        cycles += TEV_SU_TEX_CYCLES;
     load_tex_coord_scale(ctx, lbz(STATE + STATE_GEN_MODE));
     ctx->downcount -= cycles;
     return true;
@@ -473,17 +571,24 @@ bool g3d_LoadResMatTexCoordGen(CPUState* ctx) {
         ctx->downcount -= 8;
         return true;
     }
-    if (lbz(STATE + STATE_SYNC) != 0)
+    // After a synced load, GXCallDisplayList.
+    const u32 count = lbz(STATE + STATE_GEN_MODE);
+    const bool sync = lbz(STATE + STATE_SYNC) != 0;
+    if (sync && count != 0 && !gx_call_display_list_ready(ctx))
         return false;
     s64 cycles = TEX_COORD_GEN_CYCLES + gen_mode_cycles(ctx);
     stb(STATE + STATE_SYNC, 0);
-    const u32 count = lbz(STATE + STATE_GEN_MODE);
     if (count >= 2u)
         cycles += TEX_COORD_GEN_4_CYCLES + (count >= 4u ? TEX_COORD_GEN_8_CYCLES : 0);
     if (count != 0) {
-        fifo8(0x40);
-        fifo32(dl);
-        fifo32(count < 2u ? 0x20u : count < 4u ? 0x40u : count < 8u ? 0x80u : 0xA0u);
+        const u32 size = count < 2u ? 0x20u : count < 4u ? 0x40u : count < 8u ? 0x80u : 0xA0u;
+        if (sync) {
+            cycles += gx_call_display_list(ctx, dl, size);
+        } else {
+            fifo8(0x40);
+            fifo32(dl);
+            fifo32(size);
+        }
     }
     load_gen_mode(ctx);
     ctx->downcount -= cycles;

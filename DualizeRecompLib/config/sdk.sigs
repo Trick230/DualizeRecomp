@@ -38,6 +38,7 @@ g3d_LoadResMatTexCoordGen 54 9421FFF0 0CB0F1915AECD704 at call(@G3dLoadMaterial+
 define G3D_ZCOMPLOC_CACHE addr(g3d_LoadResMatZCompLoc+1C,2C)
 define G3D_TEV_DL_SIZE addr(@ResTevCallDisplayList+24,28)
 define GX_DATA_SDA2 imm(@GXCallDisplayList+10)
+define PPC_SYNC call(@ResTevCallDisplayList+1C)
 nw4r_SinCosFIdx E0 9421FFC0 A8259176DF245D2A
 nw4r_MTX34RotXYZFIdx 150 9421FFB0 1A2AFE159559BC66
 nw4r_MTX34ToMTX33 34 E0040000 23386EEB2B39B36B anywhere
