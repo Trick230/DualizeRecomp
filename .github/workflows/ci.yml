@@ -1,6 +1,7 @@
-# Builds what needs no game data, from a clean machine, on Windows and Linux:
-# the toolchain from scripts/setup.sh, the recompiler, and the renderer with
-# every library it links. The game itself never reaches CI.
+# Builds what needs no game data, from a clean machine: the toolchain from
+# scripts/setup.sh and the recompiler on Windows and Linux, and on Windows the
+# renderer with every library it links (its shader compiler and window surface
+# are Windows-only for now). The game itself never reaches CI.
 name: ci
 on:
   push:
@@ -13,7 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            targets: dolrecomp aurora_gx aurora_shader_pack
+          - os: ubuntu-latest
+            targets: dolrecomp
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -37,4 +42,4 @@ jobs:
           done
           cmake --preset release -DDUALIZE_DEPS_WITHOUT_GAME=ON
       - name: Build
-        run: bash scripts/build.sh release --target dolrecomp aurora_gx aurora_shader_pack
+        run: bash scripts/build.sh release --target ${{ matrix.targets }}

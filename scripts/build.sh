@@ -6,7 +6,9 @@
 # when it was moved or copied from elsewhere (its cache names the old place),
 # and when the game appeared since a tools-only configure.
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# -P: the POSIX form even when started from a D:/... directory, whose colon
+# would split PATH.
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$ROOT"
 PRESET="${1:-release}"
 [ $# -gt 0 ] && shift
