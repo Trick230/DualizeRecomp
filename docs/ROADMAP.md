@@ -1,6 +1,6 @@
 # Roadmap
 
-Every phase, step by step, with what was measured on the way. The summary is in the [README](../README.md#roadmap).
+Every phase, step by step, with what was measured on the way. The overview is in the [README](../README.md).
 
 | Phase | Goal | Status |
 |---|---|---|

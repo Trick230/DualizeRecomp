@@ -147,7 +147,7 @@ game runs at uncapped (see the README).
   whole 62 s that boot is deterministic, steady-state audio too, and
   gameplay is ~1% faster.
 - **`0022` Native machine.** `moderngekko-native` (`src/native`) and
-  `moderngekko-port run-native`; see [Native machine](../README.md#native-machine).
+  `moderngekko-port run-native`; see [Native machine](GUIDE.md#runtime).
   `/dev/fs`, `/dev/es` and Bluetooth join `src/ios`. Along the way:
   - The locked-cache DMA takes physical addresses as well as effective ones.
     The SDK passes MEM2 matrix arrays as physical addresses, and dropping
@@ -160,7 +160,7 @@ game runs at uncapped (see the README).
   - The disc directory opens and seeks files with the platform's wide-path,
     64-bit calls.
   - CPU ABI 7 adds `flat_base`, the guest address space mapped 1:1 (see
-    [Native machine](../README.md#native-machine)). Modules index it directly instead of
+    [Native machine](GUIDE.md#runtime)). Modules index it directly instead of
     going through the 64 KiB-slice table: 90 → ~113 FPS uncapped, together
     with the next fix.
   - The CPU thread waits for the render thread to drain on a semaphore the
@@ -168,7 +168,7 @@ game runs at uncapped (see the README).
     15.6 ms timer tick. With flat memory the sleep alone held the game at
     64 FPS.
 - **`0023` Frame interpolation options, display aspect.** The native
-  machine turns on Aurora's [frame interpolation](../README.md#frame-interpolation)
+  machine turns on Aurora's [frame interpolation](GUIDE.md#frame-interpolation)
   while throttled, with `--no-interpolation` and `--present-rate <hz>`. It
   reads the console's aspect setting (SYSCONF `IPL.AR`) so the window keeps
   16:9 or 4:3. `NATIVE_GX_STATS` adds interpolated presents, the share of
@@ -273,7 +273,7 @@ game runs at uncapped (see the README).
     recorded; the newest frame is held back while the one before it is
     replayed at the display's refresh rate with blended matrices, lights and
     post-transform texture matrices. See
-    [Frame interpolation](../README.md#frame-interpolation).
+    [Frame interpolation](GUIDE.md#frame-interpolation).
     Draws are paired with the older frame's in two passes: first every draw
     exactly where an older one is, then the rest with the nearest close
     instance of their model. In one pass a tree coming into view next to
