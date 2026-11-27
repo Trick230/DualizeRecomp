@@ -4,7 +4,7 @@
 
 **NiGHTS: Journey of Dreams (Wii), statically recompiled to native PC code**
 
-Native CPU · native Wii runtime · D3D12 / Vulkan renderer · interpolated up to your refresh rate
+Native CPU, native Wii runtime, D3D12 and Vulkan renderer, interpolated up to your refresh rate
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x86__64-0078d4)
 ![Game](https://img.shields.io/badge/game-R7EE8P%20(USA)-7b3fe4)
