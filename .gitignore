@@ -21,6 +21,8 @@ build/
 build-*/
 cmake-build-*/
 extern/
+# Local data derived from the game (e.g. Ghidra projects)
+local/
 .tools/
 # The pre-CMake pipeline's submodule checkouts and title database, if left
 # over from an older clone

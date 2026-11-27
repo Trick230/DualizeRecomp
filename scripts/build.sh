@@ -14,11 +14,7 @@ PRESET="${1:-release}"
 [ $# -gt 0 ] && shift
 BUILD_DIR="${BUILD_DIR:-build/${PRESET}}"
 
-T="$ROOT/.tools"
-for d in "$T/llvm-mingw/bin" "$T/cmake/bin" "$T/ninja" "$T/ccache"; do
-    [ -d "$d" ] && PATH="$d:$PATH"
-done
-export PATH
+. "$ROOT/scripts/env.sh"
 
 # The directory as CMake writes it (D:/... on Windows, where case and the
 # drive letter's case don't matter).
