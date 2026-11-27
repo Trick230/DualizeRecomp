@@ -1,0 +1,40 @@
+# Builds what needs no game data, from a clean machine, on Windows and Linux:
+# the toolchain from scripts/setup.sh, the recompiler, and the renderer with
+# every library it links. The game itself never reaches CI.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld libasound2-dev libpulse-dev libx11-dev libxext-dev \
+            libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libudev-dev
+      - name: Toolchain
+        run: bash scripts/setup.sh
+      - name: Configure
+        run: |
+          for d in .tools/llvm-mingw/bin .tools/cmake/bin .tools/ninja .tools/ccache; do
+            [ -d "$d" ] && export PATH="$PWD/$d:$PATH"
+          done
+          cmake --preset release -DDUALIZE_DEPS_WITHOUT_GAME=ON
+      - name: Build
+        run: bash scripts/build.sh release --target dolrecomp aurora_gx aurora_shader_pack

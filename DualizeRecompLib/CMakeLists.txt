@@ -97,7 +97,15 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     if(DUALIZE_LTO)
         set_property(TARGET DualizeRecompLib PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     endif()
-    set(DUALIZE_LTO_JOBS 4 CACHE STRING "Parallel ThinLTO backend jobs at link time")
+    # One job per ~8 GB of RAM by default (2 on 16 GB), at most 8.
+    cmake_host_system_information(RESULT _ram_mb QUERY TOTAL_PHYSICAL_MEMORY)
+    math(EXPR _lto_jobs "${_ram_mb} / 7500")
+    if(_lto_jobs LESS 1)
+        set(_lto_jobs 1)
+    elseif(_lto_jobs GREATER 8)
+        set(_lto_jobs 8)
+    endif()
+    set(DUALIZE_LTO_JOBS ${_lto_jobs} CACHE STRING "Parallel ThinLTO backend jobs at link time")
     target_link_options(DualizeRecompLib INTERFACE
         -fuse-ld=lld
         "LINKER:--thinlto-jobs=${DUALIZE_LTO_JOBS}"
