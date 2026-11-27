@@ -66,7 +66,7 @@ case "$(uname -s)" in
         if ! command -v clang >/dev/null || ! command -v ld.lld >/dev/null; then
             echo "Clang and lld are missing. On Debian or Ubuntu:"
             echo "  sudo apt install clang lld libasound2-dev libpulse-dev libx11-dev libxext-dev \\"
-            echo "    libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libudev-dev"
+            echo "    libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxfixes-dev libwayland-dev libxkbcommon-dev libudev-dev"
         fi
         ;;
     *) echo "unsupported system: $(uname -s)"; exit 1 ;;

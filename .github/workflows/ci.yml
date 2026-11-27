@@ -27,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld libasound2-dev libpulse-dev libx11-dev libxext-dev \
-            libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libudev-dev
+            libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxfixes-dev libwayland-dev libxkbcommon-dev libudev-dev
       - name: Toolchain
         run: bash scripts/setup.sh
       - name: Configure
