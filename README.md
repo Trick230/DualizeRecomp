@@ -4,8 +4,6 @@
 
 **NiGHTS: Journey of Dreams (Wii), statically recompiled to native PC code**
 
-A native port with a D3D12 and Vulkan renderer that interpolates up to your refresh rate.
-
 ![Platform](https://img.shields.io/badge/platform-Windows%20x86__64-0078d4)
 ![Game](https://img.shields.io/badge/game-R7EE8P%20(USA)-7b3fe4)
 ![Status](https://img.shields.io/badge/status-playable-2ea44f)
@@ -185,12 +183,12 @@ work the same way (Xbox names below).
 
 | Gamepad | GameCube pad | Classic Controller (`DUALIZE_PAD_TARGET=classic`) |
 |---|---|---|
-| A · B · X · Y | A · X · B · Y | b · a · y · x |
+| A / B / X / Y | A / X / B / Y | b / a / y / x |
 | Left / right stick | Control stick / C stick | Left / right stick |
-| LT · RT | L · R (analog) | L · R |
-| LB · RB | — · Z | ZL · ZR |
+| LT / RT | L / R (analog) | L / R |
+| LB / RB | — / Z | ZL / ZR |
 | D-pad | D-pad | D-pad |
-| Back · Start · Guide | — · START/PAUSE · — | − · + · Home |
+| Back / Start / Guide | — / START/PAUSE / — | − / + / Home |
 
 > [!WARNING]
 > Overlays that hook the swap chain (RivaTuner Statistics Server, Steam's frame
