@@ -26,6 +26,20 @@ between are **interpolated** at the display's refresh rate.
 > it downloads none. Bring your own dump of a disc you legally own. The
 > recompiled output is derived from the game, so it is never committed either.
 
+## Contents
+
+- [Highlights](#highlights)
+- [Status](#status)
+- [Building](#building)
+- [Running](#running)
+- [How it works](#how-it-works)
+- [Performance](#performance)
+- [Roadmap](#roadmap)
+- [Working on the forks](#working-on-the-forks)
+- [Repository layout](#repository-layout)
+- [Credits](#credits)
+- [Legal](#legal)
+
 ## Highlights
 
 - **Every game instruction is native code.** No JIT. Interrupts and the
