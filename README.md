@@ -59,22 +59,24 @@ game's 30 FPS it idles most of the time.
 
 ## Installation
 
-You need Windows with MSYS2 UCRT64 (`mingw-w64-ucrt-x86_64-clang`, `-lld`, `-cmake`, `-ninja`)
-and Git, an x86-64-v3 CPU (AVX2) to run the build, and your own NiGHTS: Journey of Dreams (USA)
-disc image.
+You need Windows 10/11 with Git for Windows (its Git Bash runs the scripts), an x86-64-v3 CPU
+(AVX2) to run the build, and your own NiGHTS: Journey of Dreams (USA) disc image.
 
 ```sh
 git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
 cd DualizeRecomp
-cmake --preset release && cmake --build build/release      # the tools only, no game yet
+bash scripts/setup.sh                                       # Clang, CMake, Ninja, ccache, Python into .tools/
+bash scripts/build.sh release                               # the tools only, no game yet
 build/release/tools/DolRecomp/dolrecomp --setup             # Wiimms ISO Tools into extern/wit
 build/release/tools/DolRecomp/dolrecomp extract iso/nights.iso extracted/nights
-cmake --preset release && cmake --build build/release      # the game: ~30 min the first time
+bash scripts/build.sh release                               # the game: ~30 min the first time
 ```
 
-The configure step downloads SDL3, DXC, the Vulkan headers and the GPU memory allocators.
-ThinLTO caches its work, so a rebuild only re-optimizes what changed. Presets, CPU targets and
-how to check your dump: **[docs/GUIDE.md](docs/GUIDE.md#building)**.
+`setup.sh` fetches pinned, checksummed tools into `.tools/` and installs nothing on the system;
+the folder can be moved. The configure step downloads SDL3, DXC, the Vulkan headers and the GPU
+memory allocators. ThinLTO and ccache keep their work, so a rebuild only re-optimizes what
+changed. Linux builds the recompiler only (the renderer is Windows-only for now). Presets, CPU
+targets and how to check your dump: **[docs/GUIDE.md](docs/GUIDE.md#building)**.
 
 ## Usage
 
@@ -121,7 +123,8 @@ measurements in [docs/ROADMAP.md](docs/ROADMAP.md), and how the port got here in
 
 ```sh
 bash scripts/build.sh release              # build, printing only errors
-cmake --preset dev                         # no ThinLTO, guest code at -O1: faster builds
+bash scripts/build.sh dev                  # no ThinLTO, guest code at -O1: faster builds
+. scripts/env.sh                           # .tools/ first on PATH, for the Python scripts below
 python scripts/check/regress.py            # replays input movies, compares guest RAM hashes
 python scripts/check/perf_suite.py         # uncapped scenes from savestates, interleaved runs
 scripts/sync.sh setup                      # once per clone: submodules follow checkouts and pulls

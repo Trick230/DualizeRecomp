@@ -13,10 +13,16 @@ environment switch, the controls, and how the port works inside.
 
 ### Requirements
 
-- CMake 3.25+, Ninja, Git; the configure step downloads SDL3, DXC, the
-  Vulkan headers, volk and the D3D12 and Vulkan memory allocators
-- Clang with lld (ThinLTO links the game's code); on Windows, MSYS2 UCRT64
-  with `mingw-w64-ucrt-x86_64-clang`, `-lld`, `-cmake` and `-ninja`
+- Windows 10/11 with Git for Windows: `scripts/setup.sh` runs in its Git Bash
+  and fetches pinned, sha256-checked tools into `.tools/` (llvm-mingw Clang and
+  lld, CMake, Ninja, ccache, a relocatable Python with `scripts/requirements.txt`);
+  nothing is installed on the system and the folder can be moved or copied.
+  `--re` adds Ghidra, its GameCube/Wii loader and a JDK for reverse engineering
+- The configure step downloads SDL3, DXC, the Vulkan headers, volk and the
+  D3D12 and Vulkan memory allocators
+- Linux: Clang, lld and SDL3's headers from the distribution; `setup.sh`
+  fetches the rest. Only the recompiler builds there for now: the renderer is
+  Windows-only
 - A 64-bit host and your own NiGHTS: Journey of Dreams (USA) disc image
 - An x86-64-v3 CPU (AVX2, FMA: Intel Haswell or AMD Zen and later, ~96% of
   Steam's survey) to run the build. `-DDUALIZE_CPU_TARGET=x86-64-v2` reaches
@@ -28,19 +34,22 @@ environment switch, the controls, and how the port works inside.
 ```sh
 git clone --recurse-submodules https://github.com/Trick230/DualizeRecomp.git
 cd DualizeRecomp
-cmake --preset release            # no game yet: configures the tools only
-cmake --build build/release
+bash scripts/setup.sh                    # the toolchain into .tools/ (once)
+bash scripts/build.sh release            # no game yet: builds the tools only
 build/release/tools/DolRecomp/dolrecomp --setup                    # Wiimms ISO Tools into extern/wit
 build/release/tools/DolRecomp/dolrecomp extract iso/nights.iso extracted/nights
-cmake --preset release            # now with the game
-cmake --build build/release       # ~30 min the first time
+bash scripts/build.sh release            # now with the game: ~30 min the first time
 build/release/DualizeRecomp/DualizeRecomp --game extracted/nights
 ```
 
 The build runs DolRecomp on `extracted/nights` (set `DUALIZE_GAME_DIR` to use
 another directory) with [`DualizeRecompLib/config/R7EE8P.toml`](../DualizeRecompLib/config/R7EE8P.toml)
-and compiles what it writes. ThinLTO caches its work in `build/release`, so a
-rebuild only re-optimizes what changed.
+and compiles what it writes. `build.sh` puts `.tools/` first on PATH,
+configures by itself when the build directory is new, was moved, or the game
+appeared since a tools-only configure, and prints only errors. ThinLTO caches
+its work in the build directory and ccache in `.cache/ccache`, so a rebuild
+only re-optimizes what changed. For the Python scripts in a shell of your own,
+`. scripts/env.sh` puts the same tools first on PATH.
 
 To check your dump, `sha256sum extracted/nights/sys/main.dol` should print
 `e63c17343cf854fffc35155546536ae57bd7018dc3979575ac7c981262144c20`.
